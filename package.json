@@ -1,0 +1,17 @@
+{
+  "name": "aliceloop",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "npm@11.11.0",
+  "description": "Desktop-first AI runtime and study companion for TCM learners.",
+  "scripts": {
+    "build": "npm run build --workspace @aliceloop/runtime-core && npm run build --workspace @aliceloop/pdf-ingest && npm run build --workspace @aliceloop/daemon && npm run build --workspace @aliceloop/desktop",
+    "dev:daemon": "npm run dev --workspace @aliceloop/daemon",
+    "dev:desktop": "npm run dev --workspace @aliceloop/desktop",
+    "typecheck": "npm run typecheck --workspace @aliceloop/runtime-core && npm run typecheck --workspace @aliceloop/pdf-ingest && npm run typecheck --workspace @aliceloop/daemon && npm run typecheck --workspace @aliceloop/desktop"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}

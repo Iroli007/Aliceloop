@@ -1,0 +1,21 @@
+{
+  "name": "@aliceloop/runtime-core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Core runtime primitives and shared agent orchestration logic.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --dts --format esm --out-dir dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.3"
+  }
+}

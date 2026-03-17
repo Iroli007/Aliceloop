@@ -1,0 +1,26 @@
+{
+  "name": "@aliceloop/daemon",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Local runtime daemon for Aliceloop.",
+  "scripts": {
+    "build": "tsup src/index.ts --dts --format esm --out-dir dist",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aliceloop/runtime-core": "file:../../packages/runtime-core",
+    "@fastify/cors": "^11.1.0",
+    "better-sqlite3": "^12.2.0",
+    "fastify": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.10",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

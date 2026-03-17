@@ -1,0 +1,24 @@
+{
+  "name": "@aliceloop/pdf-ingest",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "PDF structure extraction, navigation, and ingest pipeline.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --dts --format esm --out-dir dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aliceloop/runtime-core": "file:../runtime-core"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.3"
+  }
+}
