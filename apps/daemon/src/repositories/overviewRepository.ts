@@ -6,9 +6,9 @@ import {
   type MemoryNote,
   type ShellOverview,
   type StudyArtifact,
-  type TaskRun,
 } from "@aliceloop/runtime-core";
 import { getDatabase } from "../db/client";
+import { listTaskRuns } from "./taskRunRepository";
 
 interface AttentionRow {
   id: string;
@@ -22,6 +22,72 @@ interface AttentionRow {
 }
 
 export { shellOverviewRoute };
+
+function getPrimaryLibrary() {
+  const db = getDatabase();
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          title,
+          source_kind AS sourceKind,
+          document_kind AS documentKind,
+          source_path AS sourcePath,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          last_attention_label AS lastAttentionLabel
+        FROM library_items
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `,
+    )
+    .get() as LibraryItem | undefined;
+}
+
+export function getPrimaryLibraryContext() {
+  const db = getDatabase();
+  const attentionRow = db
+    .prepare(
+      `
+        SELECT
+          current_library_item_id AS currentLibraryItemId,
+          current_library_title AS currentLibraryTitle
+        FROM attention_state
+        WHERE id = 'primary'
+      `,
+    )
+    .get() as { currentLibraryItemId: string | null; currentLibraryTitle: string | null } | undefined;
+
+  const library = getPrimaryLibrary();
+
+  return {
+    libraryItemId: attentionRow?.currentLibraryItemId ?? library?.id ?? "book-bianzheng",
+    relatedLibraryTitle: attentionRow?.currentLibraryTitle ?? library?.title ?? "Aliceloop Study Library",
+  };
+}
+
+export function upsertStudyArtifact(artifact: StudyArtifact) {
+  const db = getDatabase();
+  db.prepare(
+    `
+      INSERT INTO study_artifacts (
+        id, library_item_id, kind, title, summary, body, related_library_title, updated_at_label, updated_at
+      ) VALUES (
+        @id, @libraryItemId, @kind, @title, @summary, @body, @relatedLibraryTitle, @updatedAtLabel, @updatedAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        summary = excluded.summary,
+        body = excluded.body,
+        related_library_title = excluded.related_library_title,
+        updated_at_label = excluded.updated_at_label,
+        updated_at = excluded.updated_at
+    `,
+  ).run(artifact);
+
+  return artifact;
+}
 
 export function getShellOverview(): ShellOverview {
   const db = getDatabase();
@@ -53,6 +119,7 @@ export function getShellOverview(): ShellOverview {
           kind,
           title,
           summary,
+          body,
           related_library_title AS relatedLibraryTitle,
           updated_at AS updatedAt,
           updated_at_label AS updatedAtLabel
@@ -62,21 +129,7 @@ export function getShellOverview(): ShellOverview {
     )
     .all() as StudyArtifact[];
 
-  const taskRuns = db
-    .prepare(
-      `
-        SELECT
-          id,
-          task_type AS taskType,
-          status,
-          title,
-          updated_at AS updatedAt,
-          updated_at_label AS updatedAtLabel
-        FROM task_runs
-        ORDER BY updated_at DESC
-      `,
-    )
-    .all() as TaskRun[];
+  const taskRuns = listTaskRuns({ limit: 100 });
 
   const memoryRows = db
     .prepare(

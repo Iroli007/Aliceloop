@@ -1,19 +1,29 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type ProviderKind,
+  previewSessionSnapshot,
   previewShellOverview,
   type AttentionEvent,
+  type DevicePresence,
+  type JobRunDetail,
   type LibraryItem,
   type MemoryNote,
+  type Session,
+  type SessionEvent,
+  type SessionMessage,
   type StudyArtifact,
   type TaskRun,
 } from "@aliceloop/runtime-core";
 import { schemaStatements } from "./schema";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(currentDir, "../../.data");
+const dataDir = process.env.ALICELOOP_DATA_DIR?.trim()
+  ? resolve(process.env.ALICELOOP_DATA_DIR)
+  : join(currentDir, "../../.data");
+const uploadsDir = join(dataDir, "uploads");
 const databasePath = join(dataDir, "aliceloop.db");
 
 type SeedContentBlock = {
@@ -35,6 +45,16 @@ type SeedCrossReference = {
   targetRef: string;
   label: string;
   score: number;
+};
+
+type SeedProviderConfig = {
+  providerId: ProviderKind;
+  label: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string | null;
+  enabled: number;
+  updatedAt: string;
 };
 
 const seedContentBlocks: SeedContentBlock[] = [
@@ -91,6 +111,82 @@ const seedCrossReferences: SeedCrossReference[] = [
   },
 ];
 
+const previewEvents: SessionEvent[] = [
+  {
+    id: "seed-session-event-1",
+    sessionId: previewSessionSnapshot.session.id,
+    seq: 1,
+    type: "message.created",
+    payload: {
+      message: previewSessionSnapshot.messages[0],
+    },
+    createdAt: previewSessionSnapshot.messages[0].createdAt,
+  },
+  {
+    id: "seed-session-event-2",
+    sessionId: previewSessionSnapshot.session.id,
+    seq: 2,
+    type: "message.acked",
+    payload: {
+      message: previewSessionSnapshot.messages[1],
+    },
+    createdAt: previewSessionSnapshot.messages[1].createdAt,
+  },
+  {
+    id: "seed-session-event-3",
+    sessionId: previewSessionSnapshot.session.id,
+    seq: 3,
+    type: "attachment.ready",
+    payload: {
+      attachment: previewSessionSnapshot.attachments[0],
+    },
+    createdAt: previewSessionSnapshot.attachments[0].createdAt,
+  },
+  {
+    id: "seed-session-event-4",
+    sessionId: previewSessionSnapshot.session.id,
+    seq: 4,
+    type: "message.created",
+    payload: {
+      message: previewSessionSnapshot.messages[2],
+    },
+    createdAt: previewSessionSnapshot.messages[2].createdAt,
+  },
+  {
+    id: "seed-session-event-5",
+    sessionId: previewSessionSnapshot.session.id,
+    seq: 5,
+    type: "job.updated",
+    payload: {
+      job: previewSessionSnapshot.jobs[0],
+    },
+    createdAt: previewSessionSnapshot.jobs[0].updatedAt,
+  },
+  {
+    id: "seed-session-event-6",
+    sessionId: previewSessionSnapshot.session.id,
+    seq: 6,
+    type: "presence.updated",
+    payload: {
+      devices: previewSessionSnapshot.devices,
+      runtimePresence: previewSessionSnapshot.runtimePresence,
+    },
+    createdAt: previewSessionSnapshot.runtimePresence.lastHeartbeatAt ?? previewSessionSnapshot.session.updatedAt,
+  },
+];
+
+const seedProviderConfigs: SeedProviderConfig[] = [
+  {
+    providerId: "minimax",
+    label: "MiniMax",
+    baseUrl: "https://api.minimax.io/v1",
+    model: "MiniMax-M2.1",
+    apiKey: null,
+    enabled: 0,
+    updatedAt: previewSessionSnapshot.session.updatedAt,
+  },
+];
+
 function seedLibraryItem(db: Database.Database, item: LibraryItem) {
   db.prepare(
     `
@@ -107,9 +203,9 @@ function seedArtifact(db: Database.Database, artifact: StudyArtifact) {
   db.prepare(
     `
       INSERT OR REPLACE INTO study_artifacts (
-        id, library_item_id, kind, title, summary, related_library_title, updated_at_label, updated_at
+        id, library_item_id, kind, title, summary, body, related_library_title, updated_at_label, updated_at
       ) VALUES (
-        @id, @libraryItemId, @kind, @title, @summary, @relatedLibraryTitle, @updatedAtLabel, @updatedAt
+        @id, @libraryItemId, @kind, @title, @summary, @body, @relatedLibraryTitle, @updatedAtLabel, @updatedAt
       )
     `,
   ).run(artifact);
@@ -119,9 +215,9 @@ function seedTaskRun(db: Database.Database, taskRun: TaskRun) {
   db.prepare(
     `
       INSERT OR REPLACE INTO task_runs (
-        id, task_type, status, title, updated_at, updated_at_label
+        id, session_id, task_type, status, title, detail, updated_at, updated_at_label
       ) VALUES (
-        @id, @taskType, @status, @title, @updatedAt, @updatedAtLabel
+        @id, @sessionId, @taskType, @status, @title, @detail, @updatedAt, @updatedAtLabel
       )
     `,
   ).run(taskRun);
@@ -189,11 +285,99 @@ function seedCrossReference(db: Database.Database, crossReference: SeedCrossRefe
   ).run(crossReference);
 }
 
-function bootstrap(db: Database.Database) {
-  for (const statement of schemaStatements) {
-    db.exec(statement);
-  }
+function seedSession(db: Database.Database, session: Session) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO sessions (
+        id, title, created_at, updated_at
+      ) VALUES (
+        @id, @title, @createdAt, @updatedAt
+      )
+    `,
+  ).run(session);
+}
 
+function seedAttachment(db: Database.Database, attachment: SessionMessage["attachments"][number]) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO attachments (
+        id, session_id, file_name, mime_type, byte_size, storage_path, status, created_at
+      ) VALUES (
+        @id, @sessionId, @fileName, @mimeType, @byteSize, @storagePath, @status, @createdAt
+      )
+    `,
+  ).run(attachment);
+}
+
+function seedSessionMessage(db: Database.Database, message: SessionMessage, sourceDeviceId: string) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO session_messages (
+        id, session_id, client_message_id, role, content, attachment_ids, status, source_device_id, created_at, updated_at
+      ) VALUES (
+        @id, @sessionId, @clientMessageId, @role, @content, @attachmentIds, @status, @sourceDeviceId, @createdAt, @updatedAt
+      )
+    `,
+  ).run({
+    ...message,
+    attachmentIds: JSON.stringify(message.attachments.map((attachment) => attachment.id)),
+    sourceDeviceId,
+    updatedAt: message.createdAt,
+  });
+}
+
+function seedSessionEvent(db: Database.Database, event: SessionEvent) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO session_events (
+        seq, id, session_id, type, payload, created_at
+      ) VALUES (
+        @seq, @id, @sessionId, @type, @payload, @createdAt
+      )
+    `,
+  ).run({
+    ...event,
+    payload: JSON.stringify(event.payload),
+  });
+}
+
+function seedDevicePresence(db: Database.Database, device: DevicePresence) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO device_presence (
+        device_id, device_type, label, status, last_seen_at
+      ) VALUES (
+        @deviceId, @deviceType, @label, @status, @lastSeenAt
+      )
+    `,
+  ).run(device);
+}
+
+function seedJobRun(db: Database.Database, job: JobRunDetail) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO job_runs (
+        id, session_id, kind, status, title, detail, updated_at
+      ) VALUES (
+        @id, @sessionId, @kind, @status, @title, @detail, @updatedAt
+      )
+    `,
+  ).run(job);
+}
+
+function seedProviderConfig(db: Database.Database, config: SeedProviderConfig) {
+  db.prepare(
+    `
+      INSERT OR IGNORE INTO provider_configs (
+        provider_id, label, base_url, model, api_key, enabled, updated_at
+      ) VALUES (
+        @providerId, @label, @baseUrl, @model, @apiKey, @enabled, @updatedAt
+      )
+    `,
+  ).run(config);
+}
+
+function seedOverviewData(db: Database.Database) {
   const recordCount = db.prepare("SELECT COUNT(*) AS count FROM library_items").get() as { count: number };
   if (recordCount.count > 0) {
     return;
@@ -247,6 +431,69 @@ function bootstrap(db: Database.Database) {
   }
 }
 
+function seedSessionData(db: Database.Database) {
+  const sessionCount = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+  if (sessionCount.count > 0) {
+    return;
+  }
+
+  seedSession(db, previewSessionSnapshot.session);
+
+  for (const attachment of previewSessionSnapshot.attachments) {
+    seedAttachment(db, attachment);
+  }
+
+  seedSessionMessage(db, previewSessionSnapshot.messages[0], "desktop-preview");
+  seedSessionMessage(db, previewSessionSnapshot.messages[1], "desktop-preview");
+  seedSessionMessage(db, previewSessionSnapshot.messages[2], "mobile-preview");
+
+  for (const device of previewSessionSnapshot.devices) {
+    seedDevicePresence(db, device);
+  }
+
+  for (const job of previewSessionSnapshot.jobs) {
+    seedJobRun(db, job);
+  }
+
+  for (const event of previewEvents) {
+    seedSessionEvent(db, event);
+  }
+}
+
+function seedProviderData(db: Database.Database) {
+  for (const config of seedProviderConfigs) {
+    seedProviderConfig(db, config);
+  }
+}
+
+function ensureColumn(db: Database.Database, tableName: string, columnName: string, definition: string) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+}
+
+function runMigrations(db: Database.Database) {
+  ensureColumn(db, "study_artifacts", "body", "TEXT NOT NULL DEFAULT ''");
+  db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
+  ensureColumn(db, "task_runs", "session_id", "TEXT");
+  ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");
+  db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
+}
+
+function bootstrap(db: Database.Database) {
+  for (const statement of schemaStatements) {
+    db.exec(statement);
+  }
+
+  runMigrations(db);
+  seedProviderData(db);
+  seedOverviewData(db);
+  seedSessionData(db);
+}
+
 let database: Database.Database | null = null;
 
 export function getDatabase(): Database.Database {
@@ -255,8 +502,15 @@ export function getDatabase(): Database.Database {
   }
 
   mkdirSync(dataDir, { recursive: true });
+  mkdirSync(uploadsDir, { recursive: true });
   database = new Database(databasePath);
   database.pragma("journal_mode = WAL");
+  database.pragma("foreign_keys = ON");
   bootstrap(database);
   return database;
+}
+
+export function getUploadsDir() {
+  mkdirSync(uploadsDir, { recursive: true });
+  return uploadsDir;
 }

@@ -3,10 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "dist/main/index.js",
   "description": "Electron desktop shell for Aliceloop.",
   "scripts": {
     "build": "electron-vite build",
+    "build:web": "vite build --config vite.renderer.config.ts",
     "dev": "electron-vite dev",
+    "dev:web": "vite --config vite.renderer.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -15,10 +18,10 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.5.2",
     "@types/node": "^24.0.10",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.5.2",
     "electron": "^37.2.1",
     "electron-vite": "^3.1.0",
     "typescript": "^5.8.3"

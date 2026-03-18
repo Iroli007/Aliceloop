@@ -1,4 +1,5 @@
-import type { ShellOverview } from "./domain";
+import type { SessionSnapshot, SessionThreadSummary, ShellOverview } from "./domain";
+import { primarySessionId } from "./domain";
 
 export const previewShellOverview: ShellOverview = {
   library: [
@@ -30,6 +31,8 @@ export const previewShellOverview: ShellOverview = {
       kind: "study-page",
       title: "八纲辨证学习页",
       summary: "聚焦寒热、虚实与易混淆点，适合快速回看和复习前定位。",
+      body:
+        "1. 寒证常见畏寒喜暖、口淡不渴、舌淡苔白，判断时先看整体偏冷的体征。\n2. 热证常见口渴喜冷饮、面赤、舌红苔黄，和寒证的取向刚好相反。\n3. 气虚偏乏力气短、自汗，阳虚在此基础上更偏畏寒肢冷，别只看“虚”而忽略“寒”。",
       relatedLibraryTitle: "中医诊断学 · 八纲辨证",
       updatedAt: "2026-03-17T07:23:00.000Z",
       updatedAtLabel: "刚刚更新",
@@ -40,6 +43,8 @@ export const previewShellOverview: ShellOverview = {
       kind: "review-pack",
       title: "今晚复习包",
       summary: "围绕寒热辨别、气虚/阳虚混淆和关系图抽问。",
+      body:
+        "今晚先复习三件事：\n1. 用一组对照词快速区分寒证和热证。\n2. 回忆气虚与阳虚的共有点，再补上阳虚特有的畏寒肢冷。\n3. 再看一次关系图，确认寒热与虚实可以组合，而不是互相替代。",
       relatedLibraryTitle: "中医诊断学 · 八纲辨证",
       updatedAt: "2026-03-17T07:24:00.000Z",
       updatedAtLabel: "今晚 20:30",
@@ -96,20 +101,135 @@ export const previewShellOverview: ShellOverview = {
   taskRuns: [
     {
       id: "task-1",
+      sessionId: null,
       taskType: "document-ingest",
       status: "done",
       title: "解析《中医诊断学》目录与章节边界",
+      detail: "目录、章节边界和首批导航块已经落到本地索引。",
       updatedAt: "2026-03-17T07:20:00.000Z",
       updatedAtLabel: "7 分钟前",
     },
     {
       id: "task-2",
+      sessionId: null,
       taskType: "study-artifact",
       status: "running",
       title: "生成八纲辨证学习页",
+      detail: "正在把寒热与气虚/阳虚的混淆点整理成可回看的结构化正文。",
       updatedAt: "2026-03-17T07:24:00.000Z",
       updatedAtLabel: "正在运行",
     },
   ],
 };
 
+export const previewSessionSnapshot: SessionSnapshot = {
+  session: {
+    id: primarySessionId,
+    title: "八纲辨证伴随会话",
+    createdAt: "2026-03-17T07:18:00.000Z",
+    updatedAt: "2026-03-17T07:28:00.000Z",
+  },
+  messages: [
+    {
+      id: "message-1",
+      clientMessageId: "desktop-seed-1",
+      sessionId: primarySessionId,
+      role: "user",
+      content: "把八纲辨证里寒热和气虚/阳虚的混淆点整理成一个能在手机上快速回看的结构。",
+      attachments: [],
+      status: "acked",
+      createdAt: "2026-03-17T07:20:00.000Z",
+    },
+    {
+      id: "message-2",
+      clientMessageId: "assistant-seed-1",
+      sessionId: primarySessionId,
+      role: "assistant",
+      content: "已经把学习页和今晚复习包排进当前会话，桌面和手机端会共享同一条任务流与结果。",
+      attachments: [],
+      status: "acked",
+      createdAt: "2026-03-17T07:21:00.000Z",
+    },
+    {
+      id: "message-3",
+      clientMessageId: "mobile-seed-1",
+      sessionId: primarySessionId,
+      role: "user",
+      content: "我上课拍到一张寒热关系图，等会儿从手机传上来后也想直接挂进这个会话。",
+      attachments: [
+        {
+          id: "attachment-seed-1",
+          sessionId: primarySessionId,
+          fileName: "hanre-figure.jpg",
+          mimeType: "image/jpeg",
+          byteSize: 284320,
+          storagePath: "/Users/demo/Pictures/hanre-figure.jpg",
+          status: "ready",
+          createdAt: "2026-03-17T07:27:00.000Z",
+        },
+      ],
+      status: "acked",
+      createdAt: "2026-03-17T07:27:30.000Z",
+    },
+  ],
+  attachments: [
+    {
+      id: "attachment-seed-1",
+      sessionId: primarySessionId,
+      fileName: "hanre-figure.jpg",
+      mimeType: "image/jpeg",
+      byteSize: 284320,
+      storagePath: "/Users/demo/Pictures/hanre-figure.jpg",
+      status: "ready",
+      createdAt: "2026-03-17T07:27:00.000Z",
+    },
+  ],
+  jobs: [
+    {
+      id: "job-seed-1",
+      sessionId: primarySessionId,
+      kind: "attachment-ingest",
+      status: "done",
+      title: "整理手机上传的寒热关系图",
+      detail: "图片已进入会话附件，可继续触发 OCR 或学习页更新。",
+      updatedAt: "2026-03-17T07:28:00.000Z",
+    },
+  ],
+  devices: [
+    {
+      deviceId: "desktop-preview",
+      deviceType: "desktop",
+      label: "Aliceloop Desktop",
+      status: "online",
+      lastSeenAt: "2026-03-17T07:28:00.000Z",
+    },
+    {
+      deviceId: "mobile-preview",
+      deviceType: "mobile",
+      label: "Aliceloop Mobile",
+      status: "online",
+      lastSeenAt: "2026-03-17T07:27:50.000Z",
+    },
+  ],
+  runtimePresence: {
+    online: true,
+    hostDeviceId: "desktop-preview",
+    hostLabel: "Aliceloop Desktop",
+    lastHeartbeatAt: "2026-03-17T07:28:00.000Z",
+  },
+  artifacts: previewShellOverview.artifacts,
+  overview: previewShellOverview,
+  lastEventSeq: 6,
+};
+
+export const previewSessionThreads: SessionThreadSummary[] = [
+  {
+    id: previewSessionSnapshot.session.id,
+    title: previewSessionSnapshot.session.title,
+    createdAt: previewSessionSnapshot.session.createdAt,
+    updatedAt: previewSessionSnapshot.session.updatedAt,
+    messageCount: previewSessionSnapshot.messages.length,
+    latestMessagePreview: previewSessionSnapshot.messages.at(-1)?.content ?? null,
+    latestMessageAt: previewSessionSnapshot.messages.at(-1)?.createdAt ?? null,
+  },
+];

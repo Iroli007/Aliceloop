@@ -2,7 +2,7 @@ export {};
 
 declare global {
   interface Window {
-    aliceloopDesktop: {
+    aliceloopDesktop?: {
       getAppMeta(): Promise<{
         daemonBaseUrl: string;
         name: string;
@@ -14,5 +14,12 @@ declare global {
       }>;
     };
   }
-}
 
+  interface ImportMetaEnv {
+    readonly VITE_DAEMON_URL?: string;
+  }
+
+  interface ImportMeta {
+    readonly env: ImportMetaEnv;
+  }
+}

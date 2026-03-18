@@ -197,6 +197,146 @@ Aliceloop 不是通用 Alma 克隆，也不是单纯的 Tele Bot。
 - 新 GUI 视图
 - 新 runtime 行为
 
+### 4.4 Runtime Loop Baseline
+
+以后凡是讨论 Aliceloop 的 agent loop、runtime、技能边界或多端同步，都必须先参考这一节。
+
+这次拍板的核心不是：
+
+- 把系统写成固定 workflow
+- 工程代码先分流成 `action mode` / `artifact mode`
+- 把 GUI 协议绑死成“聊天文本流”
+
+而是：
+
+**Aliceloop 是一个 stateful policy loop，不是一个硬编码 workflow engine。**
+
+#### 4.4.1 统一判断
+
+模型面对的是统一状态，而不是工程师预先切好的流程分支。
+
+统一状态至少包括：
+
+- 当前 session
+- 近期消息
+- attention state
+- memory
+- attachments
+- jobs
+- artifacts
+- 当前桌面 / runtime 上下文
+
+模型在同一个 loop 里自主决定“下一跳操作”。
+
+#### 4.4.2 四原语不变
+
+runtime 的最小执行原语仍然固定为：
+
+- `read`
+- `write`
+- `edit`
+- `bash`
+
+不要因为要做电脑控制、artifact、远程同步，就把 runtime 内核重新膨胀成一堆杂乱工具。
+
+复杂能力仍然上移到 skill：
+
+- `desktop-control`
+- `document-ingest`
+- `study-artifact`
+- `widget-skill`
+- `review-coach`
+
+skill 内部再用四原语完成工作。
+
+#### 4.4.3 电脑控制权不能丢
+
+Aliceloop 不是“上传资料 -> 返回工件”的普通聊天软件。
+
+它必须保留桌面宿主的执行权：
+
+- 打开和定位本地资料
+- 调本地脚本
+- 调浏览器或桌面自动化
+- 触发后台任务
+- 生成并更新 artifact
+
+因此“行动”和“生成工件”不是互斥路线，而是同一个 policy loop 中都可被选择的操作。
+
+#### 4.4.4 Artifact 不是默认输出
+
+artifact 很重要，但不是每轮都必须产出。
+
+更准确的原则是：
+
+- 简单问答可以只回复消息
+- 需要操作电脑时可以先行动
+- 需要沉淀成可回看资产时才调用 `widget-skill`
+- 一轮里允许同时：
+  - 先行动
+  - 再产出 artifact
+  - 再补一条解释消息
+
+也就是说，artifact 是按需选择的操作，不是默认模板。
+
+#### 4.4.5 GUI 必须吃“typed commits”，不是只吃文本流
+
+如果协议只支持 assistant 文本流，Aliceloop 会退化成聊天软件。
+
+GUI 和多端同步必须原生支持结构化提交，例如：
+
+- `message.emit`
+- `skill.call`
+- `desktop.act`
+- `artifact.begin`
+- `artifact.patch`
+- `artifact.done`
+- `job.update`
+- `memory.upsert`
+- `finish`
+
+这意味着：
+
+- 传输层可以是 HTTP + SSE，也可以以后接 WebSocket
+- 但语义必须是事件流 / commit stream
+- 不能把协议设计成“只有 message delta”
+
+#### 4.4.6 Runtime 和前端的职责边界
+
+模型不直接操纵前端组件，也不直接写 UI 代码。
+
+正确边界是：
+
+1. 模型决定下一步操作
+2. skill 产出结构化 op / commit
+3. runtime 校验并持久化
+4. GUI 根据 commit 渲染消息、动作状态和 artifact
+
+`widget-skill` 的职责是生成受控的 artifact schema / block tree / patch ops，不是直接生成随意的前端实现。
+
+#### 4.4.7 推荐 loop 形态
+
+推荐的内核心智模型是：
+
+`observe -> decide next operation -> execute bounded skill loop -> emit typed commits -> persist -> publish -> reflect`
+
+其中：
+
+- 决策在模型
+- 约束在 runtime
+- 长期状态在 session / memory / artifact store
+- 四原语只存在于执行层
+
+这个 loop 可以产生：
+
+- 普通消息
+- 本机动作
+- artifact 变更
+- 后台 job
+- 记忆更新
+
+而不是只产出一段文本。
+
 ## 5. 为什么选 TypeScript + 托管 Python
 
 主语言选 TypeScript，不走全 Python。
@@ -380,6 +520,7 @@ Prompt caching 不是长期记忆，而是：
 3. 它是用户主路径，还是平台能力冲动
 4. 它应该进入热记忆、冷记忆，还是只作为检索索引
 5. 它是不是会把真相层重新绑回卡片或大 JSON
+6. 它是不是在偷偷把 agent 再写回工程 workflow，而不是保持 policy loop
+7. 它是不是把 GUI 协议重新退化成只会流式吐文本
 
-如果这五个问题答不清，就先不做。
-
+如果这些问题答不清，就先不做。

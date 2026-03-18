@@ -1,17 +1,16 @@
 :root {
   color-scheme: light;
-  --app-bg: #edf2fb;
-  --panel-bg: rgba(255, 255, 255, 0.78);
+  --app-bg: #eef3fb;
+  --panel-bg: rgba(255, 255, 255, 0.84);
   --panel-strong: #ffffff;
-  --panel-border: rgba(89, 106, 140, 0.12);
-  --text-primary: #162033;
-  --text-muted: #6a768d;
-  --accent: #7ea2c4;
-  --accent-soft: rgba(126, 162, 196, 0.18);
-  --shadow-soft: 0 20px 48px rgba(98, 118, 153, 0.12);
-  --radius-panel: 24px;
-  --radius-card: 20px;
+  --panel-border: rgba(90, 110, 144, 0.1);
+  --text-primary: #20293a;
+  --text-muted: #7b879c;
+  --accent: #8aa8bf;
+  --accent-soft: rgba(138, 168, 191, 0.18);
+  --shadow-soft: 0 18px 46px rgba(98, 118, 153, 0.08);
+  --radius-panel: 22px;
+  --radius-card: 18px;
   --radius-pill: 999px;
   --font-sans: "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
 }
-
