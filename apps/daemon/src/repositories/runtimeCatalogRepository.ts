@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -26,63 +26,7 @@ const runtimeScriptsDir = resolveExistingPath([
 const daemonRoot = dirname(runtimeScriptsDir);
 const workspaceRoot = resolve(daemonRoot, "../..");
 const tsxCliPath = resolve(workspaceRoot, "node_modules/tsx/dist/cli.mjs");
-
-const skillCatalog: SkillDefinition[] = [
-  {
-    id: "document-ingest",
-    label: "document-ingest",
-    description: "导入资料，生成结构、块级内容与基础回链。",
-    status: "available",
-    taskType: "document-ingest",
-    usesSandbox: true,
-    runtimeScriptId: null,
-  },
-  {
-    id: "review-coach",
-    label: "review-coach",
-    description: "根据 attention、artifact 和 memory 生成一轮复习建议。",
-    status: "available",
-    taskType: "review-coach",
-    usesSandbox: false,
-    runtimeScriptId: null,
-  },
-  {
-    id: "script-runner",
-    label: "script-runner",
-    description: "在权限型沙箱里执行受限的 Node / TypeScript 脚本或命令。",
-    status: "available",
-    taskType: "script-runner",
-    usesSandbox: true,
-    runtimeScriptId: null,
-  },
-  {
-    id: "runtime-overview",
-    label: "runtime-overview",
-    description: "读取当前 runtime 的工作目录、数据目录和参数摘要，适合快速诊断宿主状态。",
-    status: "available",
-    taskType: "script-runner",
-    usesSandbox: true,
-    runtimeScriptId: "runtime-overview",
-  },
-  {
-    id: "data-dir-scan",
-    label: "data-dir-scan",
-    description: "快速查看 Aliceloop data 目录下的一层文件与目录，适合核对本地状态。",
-    status: "available",
-    taskType: "script-runner",
-    usesSandbox: true,
-    runtimeScriptId: "data-dir-scan",
-  },
-  {
-    id: "study-artifact",
-    label: "study-artifact",
-    description: "围绕当前会话和资料生成学习型工件。",
-    status: "planned",
-    taskType: "study-artifact",
-    usesSandbox: false,
-    runtimeScriptId: null,
-  },
-];
+const projectSkillsDir = resolve(workspaceRoot, "skills");
 
 const mcpServers: McpServerDefinition[] = [
   {
@@ -106,6 +50,16 @@ interface StoredRuntimeScriptDefinition extends RuntimeScriptDefinition {
   defaultCwd: string;
   launchCommand: string;
   launchArgsPrefix: string[];
+}
+
+interface SkillFrontmatter {
+  name?: string;
+  label?: string;
+  description?: string;
+  status?: SkillDefinition["status"];
+  taskType?: SkillDefinition["taskType"];
+  usesSandbox?: string;
+  runtimeScriptId?: string;
 }
 
 const runtimeScripts: StoredRuntimeScriptDefinition[] = [
@@ -137,12 +91,80 @@ const runtimeScripts: StoredRuntimeScriptDefinition[] = [
   },
 ];
 
+function parseSkillFrontmatter(content: string): SkillFrontmatter {
+  const lines = content.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") {
+    return {};
+  }
+
+  const result: SkillFrontmatter = {};
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trim() === "---") {
+      break;
+    }
+
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+
+    const [, rawKey, rawValue] = match;
+    const key = rawKey as keyof SkillFrontmatter;
+    result[key] = rawValue.trim() as never;
+  }
+
+  return result;
+}
+
+function coerceBoolean(value: string | undefined) {
+  return value?.trim().toLowerCase() === "true";
+}
+
+function normalizeRuntimeScriptId(value: string | undefined) {
+  const normalized = value?.trim() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function readProjectSkills() {
+  if (!existsSync(projectSkillsDir)) {
+    return [] satisfies SkillDefinition[];
+  }
+
+  return readdirSync(projectSkillsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const skillPath = join(projectSkillsDir, entry.name, "SKILL.md");
+      if (!existsSync(skillPath)) {
+        return null;
+      }
+
+      const source = readFileSync(skillPath, "utf8");
+      const frontmatter = parseSkillFrontmatter(source);
+      if (!frontmatter.name || !frontmatter.description) {
+        return null;
+      }
+
+      return {
+        id: frontmatter.name,
+        label: frontmatter.label?.trim() || frontmatter.name,
+        description: frontmatter.description,
+        status: frontmatter.status === "planned" ? "planned" : "available",
+        taskType: frontmatter.taskType ?? null,
+        usesSandbox: coerceBoolean(frontmatter.usesSandbox),
+        runtimeScriptId: normalizeRuntimeScriptId(frontmatter.runtimeScriptId),
+      } satisfies SkillDefinition;
+    })
+    .filter((skill): skill is SkillDefinition => Boolean(skill))
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
 export function listSkillDefinitions() {
-  return [...skillCatalog];
+  return readProjectSkills();
 }
 
 export function getSkillDefinition(skillId: string) {
-  return skillCatalog.find((skill) => skill.id === skillId) ?? null;
+  return listSkillDefinitions().find((skill) => skill.id === skillId) ?? null;
 }
 
 export function listMcpServerDefinitions() {

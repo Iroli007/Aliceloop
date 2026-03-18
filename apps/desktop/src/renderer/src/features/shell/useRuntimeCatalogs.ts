@@ -1,50 +1,6 @@
-import {
-  previewShellOverview,
-  type McpServerDefinition,
-  type MemoryNote,
-  type SkillDefinition,
-} from "@aliceloop/runtime-core";
+import { previewShellOverview, type McpServerDefinition, type MemoryNote, type SkillDefinition } from "@aliceloop/runtime-core";
 import { useEffect, useMemo, useState } from "react";
 import { getDesktopBridge } from "../../platform/desktopBridge";
-
-const previewSkills: SkillDefinition[] = [
-  {
-    id: "document-ingest",
-    label: "document-ingest",
-    description: "导入资料，生成结构、块级内容与基础回链。",
-    status: "available",
-    taskType: "document-ingest",
-    usesSandbox: true,
-    runtimeScriptId: null,
-  },
-  {
-    id: "study-artifact",
-    label: "study-artifact",
-    description: "围绕当前会话和资料生成学习型工件。",
-    status: "planned",
-    taskType: "study-artifact",
-    usesSandbox: false,
-    runtimeScriptId: null,
-  },
-  {
-    id: "review-coach",
-    label: "review-coach",
-    description: "围绕近期注意力与长期记忆生成陪练与复盘。",
-    status: "available",
-    taskType: "review-coach",
-    usesSandbox: false,
-    runtimeScriptId: null,
-  },
-  {
-    id: "script-runner",
-    label: "script-runner",
-    description: "在受控目录里运行 Node / TypeScript 脚本。",
-    status: "available",
-    taskType: "script-runner",
-    usesSandbox: true,
-    runtimeScriptId: null,
-  },
-];
 
 const previewMcpServers: McpServerDefinition[] = [
   {
@@ -76,7 +32,7 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
   const [state, setState] = useState<RuntimeCatalogsState>({
     status: "loading",
     memories: previewShellOverview.memories,
-    skills: previewSkills,
+    skills: [],
     mcpServers: previewMcpServers,
   });
 
@@ -123,7 +79,7 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
           setState({
             status: "error",
             memories: previewShellOverview.memories,
-            skills: previewSkills,
+            skills: [],
             mcpServers: previewMcpServers,
             error: error instanceof Error ? error.message : "Failed to load runtime catalogs",
           });

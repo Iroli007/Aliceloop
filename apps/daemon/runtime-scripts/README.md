@@ -8,7 +8,7 @@
 - 脚本入口必须可直接运行，不依赖前端环境
 - 脚本通过 `ALICELOOP_DATA_DIR` 读取当前 data 目录
 - 需要暴露给 daemon 的脚本，必须在 `src/repositories/runtimeCatalogRepository.ts` 里登记
-- 想作为技能暴露给上层时，需要在同一个 catalog 里把 `runtimeScriptId` 绑定到对应 skill
+- 想作为技能暴露给上层时，需要在项目根目录的 `skills/<skill-id>/SKILL.md` 里把 `runtimeScriptId` 绑定到对应 skill
 
 当前内置脚本：
 
