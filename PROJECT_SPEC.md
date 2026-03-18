@@ -24,6 +24,27 @@
 - 固定运行时骨架
 - 固定后续 git 提交纪律
 
+对 `1.0` 这一条发布线来说，可以直接拍板：
+
+- **后端骨架已经完成**
+- 还没完成的是上层能力，而不是基础骨架本身
+
+这里的“骨架完成”指的是：
+
+- daemon / gateway 已有
+- session / tasks / provider / runtime catalog 已有真实链路
+- permission sandbox 已有统一执行 ABI
+- per-session queue 已有
+- 前后端已经能围绕 live daemon 联调
+
+还未完成但不再阻塞 1.0 skeleton 的，是：
+
+- 更完整的 policy loop
+- 更深的 memory governance
+- 更成熟的 artifact 生成器
+- Tele / remote continuity
+- 更强的 PDF 理解质量
+
 ## 1. Product Scope
 
 ### 1.1 产品定义
@@ -434,7 +455,13 @@ Aliceloop 是一个：
 
 ### 6.1 提交前缀
 
-只使用：
+默认采用 conventional commits 形式：
+
+- `feat(scope): summary`
+- `fix(scope): summary`
+- `test(scope): summary`
+
+当前类型只使用：
 
 - `feat:`
 - `fix:`
@@ -456,11 +483,26 @@ Aliceloop 是一个：
 - 把多个无关功能压成一个巨大提交
 - 长时间把试验性改动堆在工作区不整理
 
+如果一轮对话里实际上解决了 3 个问题，就应该拆成 3 个**问题单元**：
+
+- 分别实现
+- 分别验证
+- 必要时分别提交
+
+不要把“一次回答”直接等同于“一次提交”。
+
 ### 6.3 推荐顺序
 
 1. `feat:` 或 `fix:` 落真实改动
 2. `test:` 补 smoke / 验证脚本
 3. 必要时同步文档
+
+scope 建议直接对应真实问题边界，例如：
+
+- `feat(daemon): ...`
+- `fix(runtime): ...`
+- `test(queue): ...`
+- `feat(docs): ...`
 
 ## 7. Immediate Todo
 
