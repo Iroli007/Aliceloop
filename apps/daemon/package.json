@@ -1,17 +1,21 @@
 {
   "name": "@aliceloop/daemon",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Local runtime daemon for Aliceloop.",
   "scripts": {
     "build": "tsup src/index.ts --dts --format esm --out-dir dist",
     "dev": "tsx watch src/index.ts",
+    "smoke:queue": "tsx scripts/sessionRunQueueSmoke.ts",
+    "smoke:sandbox": "tsx scripts/sandboxSmoke.ts",
+    "smoke:tasks:api": "tsx scripts/taskApiSmoke.ts",
     "smoke:tasks": "tsx scripts/taskRunsSmoke.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aliceloop/pdf-ingest": "file:../../packages/pdf-ingest",
     "@aliceloop/runtime-core": "file:../../packages/runtime-core",
     "@fastify/cors": "^11.1.0",
     "better-sqlite3": "^12.2.0",

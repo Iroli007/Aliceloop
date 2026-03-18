@@ -1,7 +1,7 @@
 {
   "name": "aliceloop",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "packageManager": "npm@11.11.0",
   "description": "Desktop-first AI runtime and study companion for TCM learners.",
   "scripts": {

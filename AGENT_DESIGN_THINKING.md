@@ -69,7 +69,7 @@ Aliceloop 不是通用 Alma 克隆，也不是单纯的 Tele Bot。
   - `edit`
   - `bash`
 - 复杂能力尽量放到 skill / 模块
-- 真正困难的任务允许落到托管 Python 脚本
+- 真正困难的任务允许落到受控的 TypeScript / Node 脚本
 
 ### 2.4 Postmortem
 
@@ -110,7 +110,7 @@ Aliceloop 不是通用 Alma 克隆，也不是单纯的 Tele Bot。
 - queue
 - worker
 - 本地工具调用
-- 托管 Python runtime
+- 本地脚本 runtime
 
 问题示例：
 
@@ -126,7 +126,7 @@ Aliceloop 不是通用 Alma 克隆，也不是单纯的 Tele Bot。
 - `document-ingest`
 - `study-artifact`
 - `review-coach`
-- `local-script-runner`
+- `script-runner`
 
 问题示例：
 
@@ -237,7 +237,22 @@ runtime 的最小执行原语仍然固定为：
 - `edit`
 - `bash`
 
-不要因为要做电脑控制、artifact、远程同步，就把 runtime 内核重新膨胀成一堆杂乱工具。
+这里必须特别分清：
+
+- 这四个原语是 **execution ABI / sandbox ABI**
+- 它们不是 runtime core 的全部
+
+runtime core 负责的是：
+
+- session
+- queue
+- events
+- jobs
+- memory
+- artifacts
+- persistence
+
+不要因为要做电脑控制、artifact、远程同步，就把执行平面重新膨胀成一堆杂乱工具。
 
 复杂能力仍然上移到 skill：
 
@@ -248,6 +263,52 @@ runtime 的最小执行原语仍然固定为：
 - `review-coach`
 
 skill 内部再用四原语完成工作。
+
+#### 4.4.2.1 分层拍板
+
+以后讨论 Aliceloop 架构时，默认按这五层理解，不要混用概念：
+
+1. `Gateway / Control Plane`
+   - 消息入口
+   - heartbeat
+   - surface binding
+   - snapshot / stream
+2. `Runtime Core / State Plane`
+   - session
+   - queue
+   - events
+   - jobs
+   - memory
+   - artifact
+3. `Execution Plane / Sandbox`
+   - `read`
+   - `write`
+   - `edit`
+   - `bash`
+4. `Skills`
+   - `document-ingest`
+   - `study-artifact`
+   - `review-coach`
+   - `desktop-control`
+5. `Agent Loop`
+   - observe
+   - decide next operation
+   - call skill / primitive
+   - emit typed commits
+
+因此：
+
+- heartbeat 和消息接入属于第一层
+- session / memory / artifact / queue 属于第二层
+- 四原语属于第三层
+- skill 是第四层
+- loop 是第五层
+
+沙箱不是整个 runtime，也不是整个 loop。
+
+更准确地说：
+
+**沙箱是 agent loop 的执行平面。**
 
 #### 4.4.3 电脑控制权不能丢
 
@@ -337,26 +398,92 @@ GUI 和多端同步必须原生支持结构化提交，例如：
 
 而不是只产出一段文本。
 
-## 5. 为什么选 TypeScript + 托管 Python
+#### 4.4.8 Policy Loop 不是 Workflow
 
-主语言选 TypeScript，不走全 Python。
+`policy loop` 这个词容易让人误会成流程编排，这里要明确拍板：
+
+- 不是工程师先写好 `if/else` 路线图
+- 不是先把请求切成 `action mode` / `artifact mode`
+- 不是 BPMN / DAG / 节点图先行
+
+更准确的意思是：
+
+- 模型面对统一状态
+- 模型自己决定下一跳操作
+- runtime 只提供约束、持久化和提交边界
+
+因此 Aliceloop 要避免：
+
+- 先写死“什么时候一定走 artifact”
+- 先写死“什么时候一定走 action”
+- 先把 agent loop 做成一套工程化审批流
+
+允许存在的只有：
+
+- 安全边界
+- 幂等边界
+- session 串行边界
+- commit schema
+
+除此之外，下一步动作尽量由模型决定。
+
+#### 4.4.9 权限型沙箱优先
+
+首版沙箱先不走 Docker-first，也不追求 microVM。
+
+首版优先做 **权限型沙箱**：
+
+- 对工作目录做路径限制
+- 对 `read/write/edit` 做 allowlist 校验
+- 对 `bash` 做命令前缀、工作目录、超时和日志约束
+- 对高风险操作做审批或显式开关
+
+这样做的原因：
+
+- Aliceloop 当前是桌面本体优先产品
+- 我们先要稳定执行 ABI，而不是先追求重隔离
+- 权限型沙箱更容易和 Electron / daemon / 本地会话状态整合
+
+以后如果要给陌生代码更强隔离，再把第三层替换成 Docker 或更强沙箱实现。
+
+#### 4.4.10 OpenClaw 借鉴边界
+
+OpenClaw 值得借鉴的是：
+
+- 单一 gateway / host process
+- per-session serialized runs
+- event stream
+- skills / tools / sandbox 分层
+
+但 Aliceloop 不照抄这些部分：
+
+- text-first output shaping
+- 多渠道优先的产品形态
+- 把聊天回复当成默认主产物
+
+对 Aliceloop 来说，更适合的是：
+
+- 借它的外层 orchestration
+- 不借它的 text/tool-first output assumption
+
+也就是说：
+
+**借骨架，不借产品默认语义。**
+
+## 5. 为什么只选 TypeScript
+
+主语言选 TypeScript，不走 Python 工具臂。
 
 原因：
 
 - Electron 桌面产品壳最自然
 - Tele、会话、流式状态、runtime 编排在 Node/TypeScript 里更顺
 - 技术栈统一，便于做本地 daemon、桥接和工具注册
-
-同时保留 Python，但不要求用户机器预装：
-
-- 应用自己托管 Python runtime
-- Python 只做特定处理和困难场景脚本执行
-- 不让系统依赖用户本机环境
+- 本地脚本也可以统一走 TypeScript / Node，不必再引入另一套运行时和分发复杂度
 
 这意味着：
 
-- **TS 是主脑**
-- **Python 是工具臂**
+- **TS 既是主脑，也是第一版工具臂**
 
 ## 6. 为什么不用“卡片产品”做真相层
 
@@ -383,7 +510,47 @@ GUI 和多端同步必须原生支持结构化提交，例如：
 
 卡片如果以后存在，也只是派生视图，不是主存储对象。
 
-## 7. PDF 导航系统原则
+## 7. Git 与发布纪律
+
+从 `Aliceloop 1.0` 开始，工程推进默认遵守这套提交纪律。
+
+### 7.1 版本含义
+
+`Aliceloop 1.0` 表示第一版 runtime skeleton 已经成立：
+
+- daemon / gateway 已经存在
+- runtime core 已经有真实状态层
+- permission sandbox 已经有统一执行 ABI
+- provider / tasks / runtime catalog 已经能走真实链路
+
+它不表示所有长期目标都已完成，而表示骨架已经足够稳定，可以承接后续连续演进。
+
+### 7.2 提交前缀
+
+后续默认只使用：
+
+- `feat:`
+- `fix:`
+- `test:`
+
+### 7.3 原子化原则
+
+每次提交尽量只表达一个最小意图：
+
+- 一个小功能
+- 一个明确 bugfix
+- 一组与该功能直接相关的测试
+
+不要把多条无关主线揉进同一个提交。
+
+### 7.4 对本项目的具体要求
+
+- runtime / daemon / 前端布局，尽量分开提交
+- 先落真实链路，再补测试和文档
+- 临时实验不要长时间滞留在主分支工作区
+- `1.0.x` 阶段优先沿现有 skeleton 收口，不再重写分层
+
+## 8. PDF 导航系统原则
 
 主流程不是：
 
@@ -417,7 +584,7 @@ AI 不先全局搜，而是：
 - 本地 OCR 不是主流程
 - 图表和正文允许走不同理解路径
 
-## 8. 记忆层拍板
+## 9. 记忆层拍板
 
 记忆层正式固定为四层，不再继续发散。
 
@@ -478,7 +645,7 @@ AI 不先全局搜，而是：
 - 学习失败记忆
 - 用户误判记忆
 
-## 9. Prompt Caching
+## 10. Prompt Caching
 
 Prompt caching 不是长期记忆，而是：
 
