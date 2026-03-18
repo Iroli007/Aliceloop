@@ -37,6 +37,12 @@
 - per-session queue 已有
 - 前后端已经能围绕 live daemon 联调
 
+需要特别区分的一点：
+
+- **agent loop 还没实现**
+- 当前完成的是 runtime skeleton，不是完整的自主决策 loop
+- 现在已有的是 provider runner、task runner、sandbox executor 和 session queue
+
 还未完成但不再阻塞 1.0 skeleton 的，是：
 
 - 更完整的 policy loop
@@ -52,8 +58,8 @@
 Aliceloop 是一个：
 
 - 桌面本体优先的本地 AI companion
-- 可被 Tele 连续控制的 agent runtime
-- 面向中医学习场景的资料理解、定位、组织与陪练系统
+- 可跨多个 surface 持续存在的 agent runtime
+- 面向文档、任务、本机动作和工件生成的长期工作台
 
 ### 1.2 第一阶段目标
 
@@ -61,9 +67,9 @@ Aliceloop 是一个：
 
 首版只做这条主链路：
 
-1. 导入医学 PDF / 网页资料
-2. 快速定位相关章节、页段、图表
-3. 生成学习型 artifact
+1. 导入本地 PDF / 网页 / 文本 / 附件
+2. 快速定位相关结构、内容块和上下文
+3. 生成学习型 artifact 或执行本机动作
 4. 让用户感觉系统一直知道“最近在看什么”
 
 ### 1.3 首版输出
@@ -92,6 +98,9 @@ Aliceloop 是一个：
 
 - 已完成长期设计文档：
   - [AGENT_DESIGN_THINKING.md](/Users/raper/workspace/Projects/Aliceloop/AGENT_DESIGN_THINKING.md)
+- 项目级 skill 定义统一放在：
+  - `/skills/<skill-id>/SKILL.md`
+- `apps/daemon/runtime-scripts` 只放脚本资源，不再充当 skill catalog
 
 #### 桌面壳
 
@@ -122,6 +131,7 @@ Aliceloop 是一个：
 - library 结构和块级读取接口已通
 - 权限型 sandbox executor 已接到真实后端入口
 - attention / memories / skills / providers / MCP catalog 接口已通
+- `skills` catalog 已改成从项目根目录 `skills/` 读取定义
 
 当前接口：
 
@@ -370,7 +380,7 @@ Aliceloop 是一个：
 
 完成标准：
 
-- 一份真实医学 PDF 能被导入
+- 一份真实 PDF 能被导入
 - 系统能快速定位到相关章节/页段
 
 当前进度：
@@ -588,6 +598,7 @@ npm run smoke:tasks:api --workspace @aliceloop/daemon
   - `Execution Plane / Sandbox`
   - `Skills`
   - `Agent Loop`
+- 这里的 `Agent Loop` 还是目标层，不要误判成已经实现完成
 - 当前首版沙箱策略已经拍板：
   - 先做权限型沙箱
   - 当前已落成第一版 sandbox executor

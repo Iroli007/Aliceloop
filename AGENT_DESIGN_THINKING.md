@@ -133,6 +133,13 @@ Aliceloop 不是通用 Alma 克隆，也不是单纯的聊天壳。
 - 这是不是应该抽成一个独立策略模块
 - 这部分逻辑是否会污染主 prompt
 
+实现纪律：
+
+- 项目级 skill 定义统一放在仓库根目录的 `skills/<skill-id>/SKILL.md`
+- daemon 和前端只消费这层定义，不再在多个业务文件里各自维护一份真实 skill catalog
+- `apps/daemon/runtime-scripts` 只负责脚本资源，不再兼任 skill 定义层
+- skill 可以绑定 runtime script，但 skill 和 script 不是同一个概念
+
 ### 3.4 Artifacts
 
 任务产出物的形态。
@@ -200,6 +207,21 @@ Aliceloop 不是通用 Alma 克隆，也不是单纯的聊天壳。
 ### 4.4 Runtime Loop Baseline
 
 以后凡是讨论 Aliceloop 的 agent loop、runtime、技能边界或多端同步，都必须先参考这一节。
+
+先记住一个当前事实：
+
+**Aliceloop 的 agent loop 现在还没实现。**
+
+当前仓库已经有：
+
+- gateway / daemon
+- runtime core skeleton
+- permission sandbox executor
+- per-session queue
+- provider runner
+- 少量 managed skills
+
+这些都还不是通用的 `observe -> decide -> execute -> reflect` agent loop。
 
 这次拍板的核心不是：
 
