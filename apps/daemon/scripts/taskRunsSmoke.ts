@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,16 +8,24 @@ async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-task-runs-"));
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
 
-  const [{ createAttachment, createSession, upsertSessionJob }, { getShellOverview }, { getTaskRun, listTaskRuns }] =
-    await Promise.all([
-      import("../src/repositories/sessionRepository.ts"),
-      import("../src/repositories/overviewRepository.ts"),
-      import("../src/repositories/taskRunRepository.ts"),
-    ]);
+  const [
+    { createAttachment, createSession, upsertSessionJob },
+    { getShellOverview },
+    { getTaskRun, listTaskRuns },
+    { runManagedTask },
+  ] = await Promise.all([
+    import("../src/repositories/sessionRepository.ts"),
+    import("../src/repositories/overviewRepository.ts"),
+    import("../src/repositories/taskRunRepository.ts"),
+    import("../src/services/taskRunner.ts"),
+  ]);
 
   const session = createSession("任务表烟雾测试");
 
   const studyJobId = randomUUID();
+  const scriptPath = join(tempDataDir, "echo-task.js");
+  writeFileSync(scriptPath, 'console.log("task-runner-ok");\n', "utf8");
+
   upsertSessionJob({
     id: studyJobId,
     sessionId: session.id,
@@ -66,6 +74,26 @@ async function main() {
   const studyTask = getTaskRun(studyJobId);
   const attachmentTask = getTaskRun(attachmentResult.jobs[0].id);
   const providerTask = getTaskRun(providerJobId);
+  const documentIngest = await runManagedTask({
+    taskType: "document-ingest",
+    title: "Runtime 设计草稿",
+    sourcePath: "/tmp/runtime-notes.pdf",
+    sourceKind: "handout",
+    documentKind: "digital",
+  });
+  const reviewCoach = await runManagedTask({
+    taskType: "review-coach",
+    sessionId: session.id,
+  });
+  const localScript = await runManagedTask({
+    taskType: "script-runner",
+    sessionId: session.id,
+    title: "运行任务测试脚本",
+    command: "node",
+    args: [scriptPath],
+    cwd: tempDataDir,
+  });
+  const refreshedTaskList = listTaskRuns({ limit: 20 });
 
   assert(studyTask, "study-artifact task should exist");
   assert.equal(studyTask.taskType, "study-artifact");
@@ -80,6 +108,17 @@ async function main() {
   assert.equal(providerTask, null, "provider-completion jobs should not be mirrored into task_runs");
   assert(overview.taskRuns.some((task) => task.id === studyJobId), "overview should include study-artifact task");
   assert(scopedTasks.every((task) => task.sessionId === session.id), "session-scoped task list should stay in session");
+  assert(documentIngest.libraryItem, "document-ingest task should create a library item");
+  assert.equal(documentIngest.task.taskType, "document-ingest");
+  assert.equal(documentIngest.task.status, "done");
+  assert(reviewCoach.memoryNote, "review-coach task should create a memory note");
+  assert.equal(reviewCoach.task.taskType, "review-coach");
+  assert.equal(localScript.task.taskType, "script-runner");
+  assert.equal(localScript.task.status, "done");
+  assert(localScript.task.detail.includes("task-runner-ok"), "script-runner should capture stdout");
+  assert(refreshedTaskList.some((task) => task.id === documentIngest.task.id), "task list should include document-ingest task");
+  assert(refreshedTaskList.some((task) => task.id === reviewCoach.task.id), "task list should include review-coach task");
+  assert(refreshedTaskList.some((task) => task.id === localScript.task.id), "task list should include script-runner task");
 
   console.log(
     JSON.stringify(
@@ -87,8 +126,8 @@ async function main() {
         ok: true,
         tempDataDir,
         sessionId: session.id,
-        taskIds: scopedTasks.map((task) => task.id),
-        taskTypes: scopedTasks.map((task) => task.taskType),
+        taskIds: refreshedTaskList.map((task) => task.id),
+        taskTypes: refreshedTaskList.map((task) => task.taskType),
       },
       null,
       2,
