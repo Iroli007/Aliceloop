@@ -99,6 +99,32 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS document_structures (
+      id TEXT PRIMARY KEY,
+      library_item_id TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      root_section_keys TEXT NOT NULL,
+      FOREIGN KEY (library_item_id) REFERENCES library_items(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS section_spans (
+      id TEXT PRIMARY KEY,
+      library_item_id TEXT NOT NULL,
+      section_key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      page_from INTEGER NOT NULL,
+      page_to INTEGER NOT NULL,
+      parent_key TEXT,
+      order_index INTEGER NOT NULL,
+      FOREIGN KEY (library_item_id) REFERENCES library_items(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE UNIQUE INDEX IF NOT EXISTS section_spans_library_section_key_idx
+    ON section_spans (library_item_id, section_key)
+  `,
+  `
     CREATE TABLE IF NOT EXISTS study_artifacts (
       id TEXT PRIMARY KEY,
       library_item_id TEXT NOT NULL,
@@ -189,6 +215,20 @@ export const schemaStatements = [
       content TEXT NOT NULL,
       source TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS sandbox_runs (
+      id TEXT PRIMARY KEY,
+      primitive TEXT NOT NULL,
+      status TEXT NOT NULL,
+      target_path TEXT,
+      command TEXT,
+      args_json TEXT NOT NULL,
+      cwd TEXT,
+      detail TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      finished_at TEXT
     )
   `,
 ];

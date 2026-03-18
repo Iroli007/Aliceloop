@@ -1,5 +1,5 @@
 import type { Attachment } from "@aliceloop/runtime-core";
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import { useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
 import type { CompanionState } from "./useCompanionData";
 
 interface CompanionLayoutProps {
@@ -60,9 +60,7 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
   const latestJobs = state.snapshot.jobs.slice(0, 3);
   const runtimeOffline = !state.snapshot.runtimePresence.online;
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
+  async function submitDraft() {
     if (!draft.trim() && queuedAttachments.length === 0) {
       return;
     }
@@ -80,6 +78,24 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
 
     setDraft("");
     setQueuedAttachments([]);
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitDraft();
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+
+    if (event.nativeEvent.isComposing) {
+      return;
+    }
+
+    event.preventDefault();
+    void submitDraft();
   }
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -250,6 +266,7 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
         <textarea
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={handleComposerKeyDown}
           placeholder={runtimeOffline ? "桌面 runtime 离线中，草稿会保留在这里。" : "给桌面 Aliceloop 发一条消息..."}
           disabled={state.pendingMessage}
         />

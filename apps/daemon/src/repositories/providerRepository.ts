@@ -19,7 +19,7 @@ interface UpdateProviderInput {
   enabled?: boolean;
 }
 
-interface StoredProviderConfig {
+export interface StoredProviderConfig {
   id: ProviderKind;
   label: string;
   baseUrl: string;
@@ -33,8 +33,8 @@ const providerDefaults: Record<ProviderKind, StoredProviderConfig> = {
   minimax: {
     id: "minimax",
     label: "MiniMax",
-    baseUrl: "https://api.minimax.io/v1",
-    model: "MiniMax-M2.1",
+    baseUrl: "https://api.minimaxi.com/v1",
+    model: "MiniMax-M2.5",
     apiKey: null,
     enabled: false,
     updatedAt: null,
@@ -110,8 +110,19 @@ export function getProviderConfig(providerId: ProviderKind): ProviderConfig {
   return toPublicProviderConfig(toStoredProviderConfig(getProviderRow(providerId), providerId));
 }
 
+export function listProviderConfigs() {
+  return (Object.keys(providerDefaults) as ProviderKind[]).map((providerId) => getProviderConfig(providerId));
+}
+
 export function getStoredProviderConfig(providerId: ProviderKind): StoredProviderConfig {
   return toStoredProviderConfig(getProviderRow(providerId), providerId);
+}
+
+export function getActiveProviderConfig() {
+  return (Object.keys(providerDefaults) as ProviderKind[])
+    .map((providerId) => getStoredProviderConfig(providerId))
+    .find((provider) => provider.enabled && provider.apiKey)
+    ?? null;
 }
 
 export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig {

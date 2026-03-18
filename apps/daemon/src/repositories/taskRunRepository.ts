@@ -28,7 +28,7 @@ function toTaskType(jobKind: string): TaskType | null {
     case "attachment-ingest":
     case "study-artifact":
     case "review-coach":
-    case "local-script-runner":
+    case "script-runner":
       return jobKind;
     default:
       return null;
@@ -103,48 +103,47 @@ export function syncTaskRunFromJob(job: JobRunDetail) {
   });
 }
 
-export function listTaskRuns(options: { sessionId?: string; limit?: number } = {}) {
+export function listTaskRuns(options: { sessionId?: string; taskType?: TaskType; status?: TaskStatus; limit?: number } = {}) {
   const db = getDatabase();
   const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+  const filters: string[] = [];
+  const params: Array<string | number> = [];
 
-  const rows = options.sessionId
-    ? (db
-        .prepare(
-          `
-            SELECT
-              id,
-              session_id AS sessionId,
-              task_type AS taskType,
-              status,
-              title,
-              detail,
-              updated_at AS updatedAt,
-              updated_at_label AS updatedAtLabel
-            FROM task_runs
-            WHERE session_id = ?
-            ORDER BY updated_at DESC, id DESC
-            LIMIT ?
-          `,
-        )
-        .all(options.sessionId, limit) as TaskRunRow[])
-    : (db
-        .prepare(
-          `
-            SELECT
-              id,
-              session_id AS sessionId,
-              task_type AS taskType,
-              status,
-              title,
-              detail,
-              updated_at AS updatedAt,
-              updated_at_label AS updatedAtLabel
-            FROM task_runs
-            ORDER BY updated_at DESC, id DESC
-            LIMIT ?
-          `,
-        )
-        .all(limit) as TaskRunRow[]);
+  if (options.sessionId) {
+    filters.push("session_id = ?");
+    params.push(options.sessionId);
+  }
+
+  if (options.taskType) {
+    filters.push("task_type = ?");
+    params.push(options.taskType);
+  }
+
+  if (options.status) {
+    filters.push("status = ?");
+    params.push(options.status);
+  }
+
+  const whereClause = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          id,
+          session_id AS sessionId,
+          task_type AS taskType,
+          status,
+          title,
+          detail,
+          updated_at AS updatedAt,
+          updated_at_label AS updatedAtLabel
+        FROM task_runs
+        ${whereClause}
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+      `,
+    )
+    .all(...params, limit) as TaskRunRow[];
 
   return rows.map(toTaskRun);
 }

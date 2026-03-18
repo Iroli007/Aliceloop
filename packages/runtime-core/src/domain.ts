@@ -7,7 +7,7 @@ export type TaskType =
   | "attachment-ingest"
   | "study-artifact"
   | "review-coach"
-  | "local-script-runner";
+  | "script-runner";
 export type MemoryKind = "attention-summary" | "learning-pattern" | "postmortem";
 export type BlockKind = "outline" | "paragraph" | "figure-caption" | "table";
 export type DeviceType = "desktop" | "mobile";
@@ -16,6 +16,11 @@ export type SessionRole = "user" | "assistant" | "system";
 export type SessionMessageStatus = "pending" | "acked" | "error";
 export type AttachmentStatus = "ready" | "failed";
 export type ProviderKind = "minimax";
+export type SandboxPrimitive = "read" | "write" | "edit" | "bash";
+export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
+export type SkillStatus = "available" | "planned";
+export type McpServerStatus = "available" | "planned";
+export type RuntimeScriptStatus = "available" | "planned";
 export type SessionEventType =
   | "message.created"
   | "message.acked"
@@ -213,6 +218,59 @@ export interface ProviderConfig {
   updatedAt: string | null;
 }
 
+export interface SkillDefinition {
+  id: string;
+  label: string;
+  description: string;
+  status: SkillStatus;
+  taskType: TaskType | null;
+  usesSandbox: boolean;
+  runtimeScriptId: string | null;
+}
+
+export interface McpServerDefinition {
+  id: string;
+  label: string;
+  transport: "builtin" | "stdio" | "http";
+  status: McpServerStatus;
+  capabilities: string[];
+}
+
+export interface RuntimeScriptDefinition {
+  id: string;
+  label: string;
+  description: string;
+  runtime: "node-ts";
+  status: RuntimeScriptStatus;
+  usesSandbox: boolean;
+  defaultArgs: string[];
+}
+
+export interface RuntimeQueueState {
+  queuedSessionCount: number;
+}
+
+export interface RuntimeStats {
+  sessionCount: number;
+  messageCount: number;
+  libraryItemCount: number;
+  artifactCount: number;
+  taskRunCount: number;
+  memoryCount: number;
+  sandboxRunCount: number;
+}
+
+export interface RuntimeCatalogSnapshot {
+  runtimePresence: RuntimePresence;
+  queue: RuntimeQueueState;
+  stats: RuntimeStats;
+  providers: ProviderConfig[];
+  skills: SkillDefinition[];
+  scripts: RuntimeScriptDefinition[];
+  mcpServers: McpServerDefinition[];
+  recentSandboxRuns: SandboxRun[];
+}
+
 export interface JobRunDetail {
   id: string;
   sessionId: string;
@@ -221,6 +279,19 @@ export interface JobRunDetail {
   title: string;
   detail: string;
   updatedAt: string;
+}
+
+export interface SandboxRun {
+  id: string;
+  primitive: SandboxPrimitive;
+  status: SandboxRunStatus;
+  targetPath: string | null;
+  command: string | null;
+  args: string[];
+  cwd: string | null;
+  detail: string;
+  createdAt: string;
+  finishedAt: string | null;
 }
 
 export interface SessionSnapshot {

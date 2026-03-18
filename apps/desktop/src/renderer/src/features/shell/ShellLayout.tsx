@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useMiniMaxProvider } from "../providers/useMiniMaxProvider";
-import { providerCatalog, settingsNav } from "./nav";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useProviderConfigs } from "../providers/useProviderConfigs";
+import { settingsNav } from "./nav";
 import { useShellConversation } from "./useShellConversation";
+import { useRuntimeCatalogs } from "./useRuntimeCatalogs";
 import type { ShellState } from "./useShellData";
 
 interface ShellLayoutProps {
@@ -70,7 +71,8 @@ function groupThreadsByDate(threads: ReturnType<typeof useShellConversation>["th
 
 export function ShellLayout({ state }: ShellLayoutProps) {
   const { data } = state;
-  const miniMaxProvider = useMiniMaxProvider();
+  const providerState = useProviderConfigs();
+  const runtimeCatalogs = useRuntimeCatalogs();
   const conversation = useShellConversation();
   const threadGroups = groupThreadsByDate(conversation.threads);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -79,8 +81,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [activeSettingsTab, setActiveSettingsTab] = useState("providers");
   const [activeProviderId, setActiveProviderId] = useState("minimax");
   const [providerApiKeyInput, setProviderApiKeyInput] = useState("");
-  const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("https://api.minimax.io/v1");
-  const [providerModelInput, setProviderModelInput] = useState("MiniMax-M2.1");
+  const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("https://api.minimaxi.com/v1");
+  const [providerModelInput, setProviderModelInput] = useState("MiniMax-M2.5");
   const [providerEnabled, setProviderEnabled] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
   const [composerDraft, setComposerDraft] = useState("");
@@ -88,15 +90,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
   const motionTimerRef = useRef<number | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
-  const providers = providerCatalog.map((provider) =>
-    provider.id === "minimax"
-      ? {
-          ...provider,
-          status: miniMaxProvider.config.enabled ? "active" : "inactive",
-        }
-      : provider,
-  );
-  const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0];
+  const providers = providerState.providers;
+  const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
+  const enabledProvider = providers.find((item) => item.enabled) ?? null;
 
   useEffect(() => {
     return () => {
@@ -107,10 +103,24 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   }, []);
 
   useEffect(() => {
-    setProviderBaseUrlInput(miniMaxProvider.config.baseUrl);
-    setProviderModelInput(miniMaxProvider.config.model);
-    setProviderEnabled(miniMaxProvider.config.enabled);
-  }, [miniMaxProvider.config]);
+    if (!activeProvider) {
+      return;
+    }
+
+    setProviderBaseUrlInput(activeProvider.baseUrl);
+    setProviderModelInput(activeProvider.model);
+    setProviderEnabled(activeProvider.enabled);
+  }, [activeProvider]);
+
+  useEffect(() => {
+    if (providers.length === 0) {
+      return;
+    }
+
+    if (!providers.some((provider) => provider.id === activeProviderId)) {
+      setActiveProviderId(providers[0].id);
+    }
+  }, [activeProviderId, providers]);
 
   useEffect(() => {
     const viewport = messagesViewportRef.current;
@@ -139,13 +149,14 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   }
 
   async function saveActiveProvider() {
-    if (activeProviderId !== "minimax") {
-      setProviderNotice("这一家还没接到真实推理链路，先用 MiniMax 跑首条会话。");
+    if (!activeProvider) {
+      setProviderNotice("当前还没有可编辑的 provider。");
       return;
     }
 
     setProviderNotice(null);
-    const result = await miniMaxProvider.save({
+    const result = await providerState.save({
+      providerId: activeProvider.id,
       baseUrl: providerBaseUrlInput,
       model: providerModelInput,
       apiKey: providerApiKeyInput.trim() ? providerApiKeyInput.trim() : undefined,
@@ -153,17 +164,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     });
 
     if (!result.ok) {
-      setProviderNotice(result.error ?? "保存 MiniMax 配置失败");
+      setProviderNotice(result.error ?? `保存 ${activeProvider.label} 配置失败`);
       return;
     }
 
     setProviderApiKeyInput("");
-    setProviderNotice("MiniMax 已保存。现在主界面和 companion 都可以发真实消息。");
+    setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存。现在主界面和 companion 都可以发真实消息。`);
   }
 
-  async function submitComposer(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
+  async function submitComposerDraft() {
     const content = composerDraft.trim();
     if (!content) {
       return;
@@ -177,6 +186,24 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }
 
     setComposerDraft("");
+  }
+
+  async function submitComposer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitComposerDraft();
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+
+    if (event.nativeEvent.isComposing) {
+      return;
+    }
+
+    event.preventDefault();
+    void submitComposerDraft();
   }
 
   async function createThread() {
@@ -352,13 +379,14 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               className="composer__input composer__input--field"
               value={composerDraft}
               onChange={(event) => setComposerDraft(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
               placeholder="输入消息..."
               disabled={conversation.pending}
             />
             <div className="composer__toolbar">
               <span className="composer__action">⌘</span>
               <span className="composer__meta">
-                {miniMaxProvider.config.enabled ? miniMaxProvider.config.model : "MiniMax 未启用"}
+                {enabledProvider ? enabledProvider.model : "Provider 未启用"}
               </span>
               <span className="composer__spacer" />
               {conversation.latestJob ? (
@@ -429,42 +457,38 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                           onClick={() => setActiveProviderId(provider.id)}
                         >
                           <div className="provider-list__identity">
-                            <span className="provider-list__logo">{provider.name.slice(0, 2)}</span>
+                            <span className="provider-list__logo">{provider.label.slice(0, 2)}</span>
                             <div>
-                              <div className="provider-list__name">{provider.name}</div>
-                              <div className="provider-list__subtitle">{provider.subtitle}</div>
+                              <div className="provider-list__name">{provider.label}</div>
+                              <div className="provider-list__subtitle">{provider.model}</div>
                             </div>
                           </div>
-                          <span className={`provider-list__status provider-list__status--${provider.status}`} />
+                          <span className={`provider-list__status provider-list__status--${provider.enabled ? "active" : "inactive"}`} />
                         </button>
                       ))}
                     </div>
 
                     <div className="provider-detail">
-                      <div className="provider-detail__header">
-                        <div>
-                          <h3>{activeProvider.name}</h3>
-                          <p>{activeProvider.subtitle}</p>
-                        </div>
-                        <div className="provider-detail__switches">
-                          <button className="provider-detail__icon">ϟ</button>
-                          <button
-                            className={`provider-detail__toggle${
-                              (activeProviderId === "minimax" ? providerEnabled : activeProvider.status === "active")
-                                ? " provider-detail__toggle--on"
-                                : ""
-                            }`}
-                            onClick={() => activeProviderId === "minimax" && setProviderEnabled((current) => !current)}
-                          />
-                        </div>
-                      </div>
-
-                      {activeProviderId === "minimax" ? (
+                      {activeProvider ? (
                         <>
+                          <div className="provider-detail__header">
+                            <div>
+                              <h3>{activeProvider.label}</h3>
+                              <p>{activeProvider.baseUrl}</p>
+                            </div>
+                            <div className="provider-detail__switches">
+                              <button className="provider-detail__icon">ϟ</button>
+                              <button
+                                className={`provider-detail__toggle${providerEnabled ? " provider-detail__toggle--on" : ""}`}
+                                onClick={() => setProviderEnabled((current) => !current)}
+                              />
+                            </div>
+                          </div>
+
                           <div className="provider-field">
                             <label>当前策略</label>
                             <div className="provider-field__box">
-                              先用 MiniMax 跑通第一次真实会话，再继续做 artifact 流式。
+                              先让 provider 稳定跑通真实会话，再继续把 artifact、skills 和更完整的 runtime loop 往上接。
                             </div>
                           </div>
 
@@ -476,9 +500,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                               value={providerApiKeyInput}
                               onChange={(event) => setProviderApiKeyInput(event.target.value)}
                               placeholder={
-                                miniMaxProvider.config.hasApiKey
-                                  ? `已保存 ${miniMaxProvider.config.apiKeyMasked ?? "MiniMax Key"}，留空则保持不变`
-                                  : "粘贴你的 MiniMax API Key"
+                                activeProvider.hasApiKey
+                                  ? `已保存 ${activeProvider.apiKeyMasked ?? `${activeProvider.label} Key`}，留空则保持不变`
+                                  : `粘贴你的 ${activeProvider.label} API Key`
                               }
                             />
                           </div>
@@ -489,7 +513,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                               className="provider-field__input"
                               value={providerBaseUrlInput}
                               onChange={(event) => setProviderBaseUrlInput(event.target.value)}
-                              placeholder="https://api.minimax.io/v1"
+                              placeholder="https://api.minimaxi.com/v1"
                             />
                           </div>
 
@@ -499,19 +523,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                               className="provider-field__input"
                               value={providerModelInput}
                               onChange={(event) => setProviderModelInput(event.target.value)}
-                              placeholder="MiniMax-M2.1"
+                              placeholder="MiniMax-M2.5"
                             />
                           </div>
 
                           <div className="provider-field">
                             <label>状态</label>
                             <div className="provider-field__box">
-                              {miniMaxProvider.config.enabled ? "已启用，可接真实推理" : "未启用，保存后仍可先保留配置"}
+                              {providerEnabled ? "已启用，可接真实推理" : "未启用，保存后仍可先保留配置"}
                             </div>
                           </div>
 
                           {providerNotice ? <div className="provider-notice">{providerNotice}</div> : null}
-                          {miniMaxProvider.error ? <div className="provider-notice provider-notice--error">{miniMaxProvider.error}</div> : null}
+                          {providerState.error ? <div className="provider-notice provider-notice--error">{providerState.error}</div> : null}
 
                           <div className="provider-actions">
                             <button className="settings-toolbar__button" onClick={() => setProviderApiKeyInput("")}>
@@ -520,17 +544,17 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             <button
                               className="settings-toolbar__button settings-toolbar__button--primary"
                               onClick={saveActiveProvider}
-                              disabled={miniMaxProvider.saving}
+                              disabled={providerState.savingProviderId === activeProvider.id}
                             >
-                              {miniMaxProvider.saving ? "保存中..." : "保存 MiniMax"}
+                              {providerState.savingProviderId === activeProvider.id ? "保存中..." : `保存 ${activeProvider.label}`}
                             </button>
                           </div>
                         </>
                       ) : (
                         <div className="provider-field">
-                          <label>接入状态</label>
+                          <label>Provider</label>
                           <div className="provider-field__box">
-                            这家先保留入口位，等 MiniMax 跑稳后再接。
+                            还没有从 daemon 读到可编辑的 provider。
                           </div>
                         </div>
                       )}
@@ -543,10 +567,13 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <h3>高层记忆</h3>
-                    <span>{data.memories.length} 条</span>
+                    <span>{runtimeCatalogs.memories.length} 条</span>
                   </div>
+                  {runtimeCatalogs.error && runtimeCatalogs.status === "error" ? (
+                    <div className="provider-notice provider-notice--error">{runtimeCatalogs.error}</div>
+                  ) : null}
                   <div className="settings-panel__list">
-                    {data.memories.map((memory) => (
+                    {runtimeCatalogs.memories.map((memory) => (
                       <div key={memory.id} className="settings-panel__item">
                         <strong>{memory.title}</strong>
                         <span>{memory.content}</span>
@@ -560,17 +587,24 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <h3>MCP 服务器</h3>
-                    <span>2 个建议入口</span>
+                    <span>{runtimeCatalogs.mcpServers.length} 个条目</span>
                   </div>
+                  {runtimeCatalogs.error && runtimeCatalogs.status === "error" ? (
+                    <div className="provider-notice provider-notice--error">{runtimeCatalogs.error}</div>
+                  ) : null}
                   <div className="settings-panel__list">
-                    <div className="settings-panel__item">
-                      <strong>Context7</strong>
-                      <span>用于最新文档与代码示例的读取入口。</span>
-                    </div>
-                    <div className="settings-panel__item">
-                      <strong>Fetch</strong>
-                      <span>用于网页抓取与结构化内容获取。</span>
-                    </div>
+                    {runtimeCatalogs.mcpServers.map((server) => (
+                      <div key={server.id} className="settings-panel__item">
+                        <strong>{server.label}</strong>
+                        <span>
+                          {server.transport}
+                          {" · "}
+                          {server.capabilities.join(" / ")}
+                          {" · "}
+                          {server.status}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ) : null}
@@ -579,25 +613,23 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <h3>技能</h3>
-                    <span>4 个产品能力</span>
+                    <span>{runtimeCatalogs.skills.length} 个条目</span>
                   </div>
+                  {runtimeCatalogs.error && runtimeCatalogs.status === "error" ? (
+                    <div className="provider-notice provider-notice--error">{runtimeCatalogs.error}</div>
+                  ) : null}
                   <div className="settings-panel__list">
-                    <div className="settings-panel__item">
-                      <strong>document-ingest</strong>
-                      <span>识别 PDF 类型、抽目录、拆章节、建立导航。</span>
-                    </div>
-                    <div className="settings-panel__item">
-                      <strong>study-artifact</strong>
-                      <span>生成学习页、专题页与晚间复习包。</span>
-                    </div>
-                    <div className="settings-panel__item">
-                      <strong>review-coach</strong>
-                      <span>围绕近期注意力与长期记忆生成陪练与复盘。</span>
-                    </div>
-                    <div className="settings-panel__item">
-                      <strong>local-script-runner</strong>
-                      <span>困难时在受控目录里生成并运行本地脚本。</span>
-                    </div>
+                    {runtimeCatalogs.skills.map((skill) => (
+                      <div key={skill.id} className="settings-panel__item">
+                        <strong>{skill.label}</strong>
+                        <span>
+                          {skill.description}
+                          {" · "}
+                          {skill.usesSandbox ? "uses sandbox" : "in-process"}
+                          {skill.taskType ? ` · ${skill.taskType}` : ""}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ) : null}
@@ -609,9 +641,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <button
                   className="settings-actions__button settings-actions__button--primary"
                   onClick={saveActiveProvider}
-                  disabled={activeSettingsTab !== "providers" || activeProviderId !== "minimax" || miniMaxProvider.saving}
+                  disabled={activeSettingsTab !== "providers" || !activeProvider || providerState.savingProviderId === activeProvider.id}
                 >
-                  {miniMaxProvider.saving ? "保存中..." : "保存"}
+                  {providerState.savingProviderId ? "保存中..." : "保存"}
                 </button>
               </footer>
             </div>

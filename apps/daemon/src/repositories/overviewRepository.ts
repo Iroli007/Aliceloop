@@ -1,4 +1,6 @@
 import {
+  type DocumentKind,
+  type SourceKind,
   shellOverviewRoute,
   type AttentionEvent,
   type AttentionState,
@@ -67,6 +69,26 @@ export function getPrimaryLibraryContext() {
   };
 }
 
+interface CreateLibraryItemInput {
+  id: string;
+  title: string;
+  sourceKind: SourceKind;
+  documentKind: DocumentKind;
+  sourcePath: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastAttentionLabel?: string | null;
+}
+
+interface CreateMemoryNoteInput {
+  id: string;
+  kind: MemoryNote["kind"];
+  title: string;
+  content: string;
+  source: string;
+  updatedAt: string;
+}
+
 export function upsertStudyArtifact(artifact: StudyArtifact) {
   const db = getDatabase();
   db.prepare(
@@ -87,6 +109,239 @@ export function upsertStudyArtifact(artifact: StudyArtifact) {
   ).run(artifact);
 
   return artifact;
+}
+
+export function listStudyArtifacts(options: { libraryItemId?: string; limit?: number } = {}) {
+  const db = getDatabase();
+  const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+
+  if (options.libraryItemId) {
+    return db
+      .prepare(
+        `
+          SELECT
+            id,
+            library_item_id AS libraryItemId,
+            kind,
+            title,
+            summary,
+            body,
+            related_library_title AS relatedLibraryTitle,
+            updated_at AS updatedAt,
+            updated_at_label AS updatedAtLabel
+          FROM study_artifacts
+          WHERE library_item_id = ?
+          ORDER BY updated_at DESC, id DESC
+          LIMIT ?
+        `,
+      )
+      .all(options.libraryItemId, limit) as StudyArtifact[];
+  }
+
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          library_item_id AS libraryItemId,
+          kind,
+          title,
+          summary,
+          body,
+          related_library_title AS relatedLibraryTitle,
+          updated_at AS updatedAt,
+          updated_at_label AS updatedAtLabel
+        FROM study_artifacts
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+      `,
+    )
+    .all(limit) as StudyArtifact[];
+}
+
+export function getStudyArtifact(artifactId: string) {
+  const db = getDatabase();
+  const row = db
+    .prepare(
+      `
+        SELECT
+          id,
+          library_item_id AS libraryItemId,
+          kind,
+          title,
+          summary,
+          body,
+          related_library_title AS relatedLibraryTitle,
+          updated_at AS updatedAt,
+          updated_at_label AS updatedAtLabel
+        FROM study_artifacts
+        WHERE id = ?
+      `,
+    )
+    .get(artifactId) as StudyArtifact | undefined;
+
+  return row ?? null;
+}
+
+export function upsertLibraryItem(input: CreateLibraryItemInput) {
+  const db = getDatabase();
+  db.prepare(
+    `
+      INSERT INTO library_items (
+        id, title, source_kind, document_kind, source_path, created_at, updated_at, last_attention_label
+      ) VALUES (
+        @id, @title, @sourceKind, @documentKind, @sourcePath, @createdAt, @updatedAt, @lastAttentionLabel
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        source_kind = excluded.source_kind,
+        document_kind = excluded.document_kind,
+        source_path = excluded.source_path,
+        updated_at = excluded.updated_at,
+        last_attention_label = excluded.last_attention_label
+    `,
+  ).run({
+    ...input,
+    lastAttentionLabel: input.lastAttentionLabel ?? null,
+  });
+
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          title,
+          source_kind AS sourceKind,
+          document_kind AS documentKind,
+          source_path AS sourcePath,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          last_attention_label AS lastAttentionLabel
+        FROM library_items
+        WHERE id = ?
+      `,
+    )
+    .get(input.id) as LibraryItem;
+}
+
+export function createMemoryNote(input: CreateMemoryNoteInput) {
+  const db = getDatabase();
+  db.prepare(
+    `
+      INSERT INTO memory_notes (
+        id, kind, title, content, source, updated_at
+      ) VALUES (
+        @id, @kind, @title, @content, @source, @updatedAt
+      )
+    `,
+  ).run(input);
+
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          kind,
+          title,
+          content,
+          source,
+          updated_at AS updatedAt
+        FROM memory_notes
+        WHERE id = ?
+      `,
+    )
+    .get(input.id) as MemoryNote;
+}
+
+export function listMemoryNotes(limit = 50) {
+  const db = getDatabase();
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          kind,
+          title,
+          content,
+          source,
+          updated_at AS updatedAt
+        FROM memory_notes
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `,
+    )
+    .all(Math.max(1, Math.min(limit, 200))) as MemoryNote[];
+}
+
+export function getMemoryNote(memoryId: string) {
+  const db = getDatabase();
+  const row = db
+    .prepare(
+      `
+        SELECT
+          id,
+          kind,
+          title,
+          content,
+          source,
+          updated_at AS updatedAt
+        FROM memory_notes
+        WHERE id = ?
+      `,
+    )
+    .get(memoryId) as MemoryNote | undefined;
+
+  return row ?? null;
+}
+
+export function getAttentionState() {
+  const db = getDatabase();
+  const attentionRow = db
+    .prepare(
+      `
+        SELECT
+          id,
+          current_library_item_id,
+          current_library_title,
+          current_section_key,
+          current_section_label,
+          focus_summary,
+          concepts,
+          updated_at
+        FROM attention_state
+        WHERE id = 'primary'
+      `,
+    )
+    .get() as AttentionRow;
+
+  const attentionEvents = db
+    .prepare(
+      `
+        SELECT
+          id,
+          library_item_id AS libraryItemId,
+          section_key AS sectionKey,
+          concept_key AS conceptKey,
+          reason,
+          weight,
+          occurred_at AS occurredAt
+        FROM attention_events
+        ORDER BY occurred_at DESC
+      `,
+    )
+    .all() as AttentionEvent[];
+
+  return {
+    id: attentionRow.id,
+    currentLibraryItemId: attentionRow.current_library_item_id,
+    currentLibraryTitle: attentionRow.current_library_title,
+    currentSectionKey: attentionRow.current_section_key,
+    currentSectionLabel: attentionRow.current_section_label,
+    focusSummary: attentionRow.focus_summary,
+    concepts: JSON.parse(attentionRow.concepts) as string[],
+    updatedAt: attentionRow.updated_at,
+    events: attentionEvents,
+  } satisfies AttentionState;
 }
 
 export function getShellOverview(): ShellOverview {
@@ -131,68 +386,8 @@ export function getShellOverview(): ShellOverview {
 
   const taskRuns = listTaskRuns({ limit: 100 });
 
-  const memoryRows = db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        ORDER BY updated_at DESC
-      `,
-    )
-    .all() as MemoryNote[];
-
-  const attentionRow = db
-    .prepare(
-      `
-        SELECT
-          id,
-          current_library_item_id,
-          current_library_title,
-          current_section_key,
-          current_section_label,
-          focus_summary,
-          concepts,
-          updated_at
-        FROM attention_state
-        WHERE id = 'primary'
-      `,
-    )
-    .get() as AttentionRow;
-
-  const attentionEvents = db
-    .prepare(
-      `
-        SELECT
-          id,
-          library_item_id AS libraryItemId,
-          section_key AS sectionKey,
-          concept_key AS conceptKey,
-          reason,
-          weight,
-          occurred_at AS occurredAt
-        FROM attention_events
-        ORDER BY occurred_at DESC
-      `,
-    )
-    .all() as AttentionEvent[];
-
-  const attention: AttentionState = {
-    id: attentionRow.id,
-    currentLibraryItemId: attentionRow.current_library_item_id,
-    currentLibraryTitle: attentionRow.current_library_title,
-    currentSectionKey: attentionRow.current_section_key,
-    currentSectionLabel: attentionRow.current_section_label,
-    focusSummary: attentionRow.focus_summary,
-    concepts: JSON.parse(attentionRow.concepts) as string[],
-    updatedAt: attentionRow.updated_at,
-    events: attentionEvents,
-  };
+  const memoryRows = listMemoryNotes(200);
+  const attention = getAttentionState();
 
   return {
     attention,

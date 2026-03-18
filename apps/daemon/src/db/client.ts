@@ -59,54 +59,54 @@ type SeedProviderConfig = {
 
 const seedContentBlocks: SeedContentBlock[] = [
   {
-    id: "block-outline-bianzheng",
-    libraryItemId: "book-bianzheng",
-    sectionKey: "chapter-03",
-    sectionLabel: "第三章 八纲辨证",
+    id: "block-outline-runtime",
+    libraryItemId: "runtime-notes",
+    sectionKey: "section-01",
+    sectionLabel: "第 1 节 Runtime 概览",
     pageFrom: 28,
     pageTo: 35,
     blockKind: "outline",
-    content: "八纲辨证从阴阳、表里、寒热、虚实四对维度组织，是定位整本书核心导航的上层框架。",
+    content: "Runtime 设计从 gateway、state plane、execution plane 和 skill layer 四个层级组织，是定位整套系统骨架的上层导航。",
   },
   {
-    id: "block-body-bianzheng",
-    libraryItemId: "book-bianzheng",
-    sectionKey: "chapter-03.section-02",
-    sectionLabel: "八纲辨证 · 寒热",
+    id: "block-body-runtime",
+    libraryItemId: "runtime-notes",
+    sectionKey: "section-03",
+    sectionLabel: "第 3 节 Session Stream",
     pageFrom: 31,
     pageTo: 32,
     blockKind: "paragraph",
-    content: "寒证常见畏寒喜暖、口淡不渴、舌淡苔白。热证常见口渴喜冷饮、面赤、舌红苔黄。气虚与阳虚容易在此处发生混淆。",
+    content: "Session stream 负责把 snapshot、事件流和心跳串起来。真正的副作用执行不应该直接写进 UI，而应该先变成 typed commit 再落到 runtime core。",
   },
   {
-    id: "block-figure-bianzheng",
-    libraryItemId: "book-bianzheng",
-    sectionKey: "chapter-03.figure-01",
-    sectionLabel: "八纲辨证关系图",
+    id: "block-figure-runtime",
+    libraryItemId: "runtime-notes",
+    sectionKey: "section-04.figure-01",
+    sectionLabel: "Sandbox 边界图",
     pageFrom: 33,
     pageTo: 33,
     blockKind: "figure-caption",
-    content: "本图对表里、寒热、虚实之间的组合关系进行总览，适合作为回忆入口而不是逐句阅读。",
+    content: "本图对 read、write、edit、bash 四个原语的边界进行总览，适合作为回忆入口而不是逐句阅读。",
   },
 ];
 
 const seedCrossReferences: SeedCrossReference[] = [
   {
-    id: "xref-cold-heat-figure",
+    id: "xref-sandbox-figure",
     sourceKind: "concept",
-    sourceRef: "寒热",
+    sourceRef: "sandbox",
     targetKind: "content-block",
-    targetRef: "block-figure-bianzheng",
-    label: "寒热判断关系图",
+    targetRef: "block-figure-runtime",
+    label: "四原语边界图",
     score: 0.93,
   },
   {
-    id: "xref-qi-yang",
+    id: "xref-session-artifact",
     sourceKind: "concept",
-    sourceRef: "气虚-阳虚",
+    sourceRef: "session-artifact",
     targetKind: "content-block",
-    targetRef: "block-body-bianzheng",
-    label: "混淆点回链到正文",
+    targetRef: "block-body-runtime",
+    label: "同步协议回链到正文",
     score: 0.95,
   },
 ];
@@ -179,8 +179,8 @@ const seedProviderConfigs: SeedProviderConfig[] = [
   {
     providerId: "minimax",
     label: "MiniMax",
-    baseUrl: "https://api.minimax.io/v1",
-    model: "MiniMax-M2.1",
+    baseUrl: "https://api.minimaxi.com/v1",
+    model: "MiniMax-M2.5",
     apiKey: null,
     enabled: 0,
     updatedAt: previewSessionSnapshot.session.updatedAt,
@@ -481,6 +481,160 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
+  db.prepare("UPDATE task_runs SET task_type = 'script-runner' WHERE task_type = 'local-script-runner'").run();
+  db.prepare("UPDATE job_runs SET kind = 'script-runner' WHERE kind = 'local-script-runner'").run();
+  db.prepare(
+    `
+      UPDATE library_items
+      SET
+        title = CASE id
+          WHEN 'book-bianzheng' THEN 'Aliceloop Runtime Notes'
+          WHEN 'book-fangji' THEN 'Companion Sync Workshop'
+          ELSE title
+        END,
+        source_path = CASE id
+          WHEN 'book-bianzheng' THEN '/Library/Projects/Aliceloop/runtime-notes.md'
+          WHEN 'book-fangji' THEN '/Library/Projects/Aliceloop/companion-sync.pdf'
+          ELSE source_path
+        END,
+        last_attention_label = CASE id
+          WHEN 'book-bianzheng' THEN '第 3 节 · Session Stream'
+          WHEN 'book-fangji' THEN '移动端同步'
+          ELSE last_attention_label
+        END
+      WHERE id IN ('book-bianzheng', 'book-fangji')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE study_artifacts
+      SET
+        title = CASE id
+          WHEN 'artifact-study-bianzheng' THEN 'Runtime 结构整理页'
+          WHEN 'artifact-review-pack' THEN '今晚复习包'
+          ELSE title
+        END,
+        summary = CASE id
+          WHEN 'artifact-study-bianzheng' THEN '聚焦 session、sandbox、artifact 和 memory 的关系，适合快速回看和后续实现前定位。'
+          WHEN 'artifact-review-pack' THEN '围绕 runtime 分层、provider 接入和 companion 同步关系做抽问。'
+          ELSE summary
+        END,
+        body = CASE id
+          WHEN 'artifact-study-bianzheng' THEN '1. Session、queue 和 events 组成 runtime 的真相层，负责持续状态和多端同步。'||char(10)||'2. Sandbox 只提供 read、write、edit、bash 四个执行原语，skills 通过它做副作用操作。'||char(10)||'3. Artifact、memory 和 tasks 是提交层结果，不该和底层执行 ABI 混在一起。'
+          WHEN 'artifact-review-pack' THEN '今晚先复习三件事：'||char(10)||'1. 先说清 gateway、runtime core 和 sandbox 各自负责什么。'||char(10)||'2. 回忆为什么 policy loop 不是 workflow，而是模型面对统一状态的下一跳决策。'||char(10)||'3. 再看一次 companion 同步链路，确认 snapshot、stream 和 heartbeat 的分工。'
+          ELSE body
+        END,
+        related_library_title = 'Aliceloop Runtime Notes'
+      WHERE id IN ('artifact-study-bianzheng', 'artifact-review-pack')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE memory_notes
+      SET
+        title = CASE id
+          WHEN 'memory-1' THEN '近期关注重心'
+          WHEN 'memory-2' THEN '稳定混淆点'
+          ELSE title
+        END,
+        content = CASE id
+          WHEN 'memory-1' THEN '用户最近主要围绕 runtime core、provider 接入和 companion 同步的边界来回切换。'
+          WHEN 'memory-2' THEN '遇到 runtime 设计问题时，优先给分层图和最小执行边界，而不是先展开大而全的流程图。'
+          ELSE content
+        END
+      WHERE id IN ('memory-1', 'memory-2')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE task_runs
+      SET
+        title = CASE id
+          WHEN 'task-1' THEN '解析 Runtime 设计笔记目录与章节边界'
+          WHEN 'task-2' THEN '生成 Runtime 结构整理页'
+          ELSE title
+        END,
+        detail = CASE id
+          WHEN 'task-1' THEN '目录、章节边界和首批导航块已经落到本地索引。'
+          WHEN 'task-2' THEN '正在把 session、sandbox 和 artifact 的边界整理成可回看的结构化正文。'
+          ELSE detail
+        END
+      WHERE id IN ('task-1', 'task-2')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE content_blocks
+      SET
+        section_label = CASE id
+          WHEN 'block-outline-bianzheng' THEN '第 1 节 Runtime 概览'
+          WHEN 'block-body-bianzheng' THEN '第 3 节 Session Stream'
+          WHEN 'block-figure-bianzheng' THEN 'Sandbox 边界图'
+          ELSE section_label
+        END,
+        content = CASE id
+          WHEN 'block-outline-bianzheng' THEN 'Runtime 设计从 gateway、state plane、execution plane 和 skill layer 四个层级组织，是定位整套系统骨架的上层导航。'
+          WHEN 'block-body-bianzheng' THEN 'Session stream 负责把 snapshot、事件流和心跳串起来。真正的副作用执行不应该直接写进 UI，而应该先变成 typed commit 再落到 runtime core。'
+          WHEN 'block-figure-bianzheng' THEN '本图对 read、write、edit、bash 四个原语的边界进行总览，适合作为回忆入口而不是逐句阅读。'
+          ELSE content
+        END
+      WHERE id IN ('block-outline-bianzheng', 'block-body-bianzheng', 'block-figure-bianzheng')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE content_blocks_fts
+      SET content = (
+        SELECT content FROM content_blocks WHERE content_blocks.id = content_blocks_fts.content_block_id
+      )
+      WHERE content_block_id IN ('block-outline-bianzheng', 'block-body-bianzheng', 'block-figure-bianzheng')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE cross_references
+      SET
+        source_ref = CASE id
+          WHEN 'xref-cold-heat-figure' THEN 'sandbox'
+          WHEN 'xref-qi-yang' THEN 'session-artifact'
+          ELSE source_ref
+        END,
+        label = CASE id
+          WHEN 'xref-cold-heat-figure' THEN '四原语边界图'
+          WHEN 'xref-qi-yang' THEN '同步协议回链到正文'
+          ELSE label
+        END
+      WHERE id IN ('xref-cold-heat-figure', 'xref-qi-yang')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE attention_state
+      SET
+        current_library_title = 'Aliceloop Runtime Notes',
+        current_section_label = '第 3 节 · Session Stream',
+        focus_summary = '最近连续回到 session stream、sandbox 边界和 artifact 提交这几个实现点。',
+        concepts = '["session","sandbox","artifact","memory"]'
+      WHERE id = 'primary' AND current_library_item_id = 'book-bianzheng'
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE attention_events
+      SET
+        concept_key = CASE id
+          WHEN 'event-1' THEN 'session-stream'
+          WHEN 'event-2' THEN 'sandbox-boundary'
+          ELSE concept_key
+        END,
+        reason = CASE id
+          WHEN 'event-1' THEN '最近 24 小时反复回到同一段同步协议设计。'
+          WHEN 'event-2' THEN '用户连续追问沙箱和 runtime core 的边界。'
+          ELSE reason
+        END
+      WHERE id IN ('event-1', 'event-2')
+    `,
+  ).run();
 }
 
 function bootstrap(db: Database.Database) {
@@ -513,4 +667,9 @@ export function getDatabase(): Database.Database {
 export function getUploadsDir() {
   mkdirSync(uploadsDir, { recursive: true });
   return uploadsDir;
+}
+
+export function getDataDir() {
+  mkdirSync(dataDir, { recursive: true });
+  return dataDir;
 }

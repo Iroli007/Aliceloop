@@ -74,22 +74,22 @@ function publishRuntimeNotice(sessionId: string, content: string) {
   }
 }
 
-function summarizeMiniMaxError(status: number, payloadText: string) {
+function summarizeProviderError(label: string, status: number, payloadText: string) {
   try {
     const payload = JSON.parse(payloadText) as MiniMaxErrorResponse;
     const message = payload.error?.message?.trim();
     if (message) {
       if (status === 401) {
-        return `MiniMax 认证失败，请检查 API Key 是否正确可用。原始信息：${message}`;
+        return `${label} 认证失败，请检查 API Key 是否正确可用。原始信息：${message}`;
       }
 
-      return `MiniMax 请求失败（HTTP ${status}）：${message}`;
+      return `${label} 请求失败（HTTP ${status}）：${message}`;
     }
   } catch {
     // Fall through to the raw-text branch below.
   }
 
-  return `MiniMax 请求失败（HTTP ${status}）。`;
+  return `${label} 请求失败（HTTP ${status}）。`;
 }
 
 export async function runMiniMaxReply(sessionId: string) {
@@ -102,30 +102,30 @@ export async function runMiniMaxReply(sessionId: string) {
       sessionId,
       kind: "provider-completion",
       status: "failed",
-      title: "MiniMax 未配置",
-      detail: "先在设置里填入 MiniMax API Key，并启用这个 provider，再发第一条真实消息。",
+      title: `${config.label} 未配置`,
+      detail: `先在设置里填入 ${config.label} API Key，并启用这个 provider，再发第一条真实消息。`,
     });
-    publishRuntimeNotice(sessionId, "MiniMax 还没配置好。先去设置里填 API Key，然后再试一次。");
+    publishRuntimeNotice(sessionId, `${config.label} 还没配置好。先去设置里填 API Key，然后再试一次。`);
     return;
   }
 
   publishJob({
-    id: jobId,
-    sessionId,
-    kind: "provider-completion",
-    status: "queued",
-    title: "排队请求 MiniMax",
-    detail: `准备使用 ${config.model} 生成这轮回复。`,
-  });
+      id: jobId,
+      sessionId,
+      kind: "provider-completion",
+      status: "queued",
+      title: `排队请求 ${config.label}`,
+      detail: `准备使用 ${config.model} 生成这轮回复。`,
+    });
 
   publishJob({
-    id: jobId,
-    sessionId,
-    kind: "provider-completion",
-    status: "running",
-    title: "MiniMax 正在回复",
-    detail: `正在向 ${config.label} 发起真实推理请求。`,
-  });
+      id: jobId,
+      sessionId,
+      kind: "provider-completion",
+      status: "running",
+      title: `${config.label} 正在回复`,
+      detail: `正在向 ${config.label} 发起真实推理请求。`,
+    });
 
   try {
     const snapshot = getSessionSnapshot(sessionId);
@@ -155,13 +155,13 @@ export async function runMiniMaxReply(sessionId: string) {
 
     if (!response.ok) {
       const errorText = (await response.text()).slice(0, 320);
-      throw new Error(summarizeMiniMaxError(response.status, errorText));
+      throw new Error(summarizeProviderError(config.label, response.status, errorText));
     }
 
     const payload = (await response.json()) as MiniMaxChatResponse;
     const assistantText = extractAssistantText(payload);
     if (!assistantText) {
-      throw new Error("MiniMax returned empty content");
+      throw new Error(`${config.label} returned empty content`);
     }
 
     const result = createSessionMessage({
@@ -182,7 +182,7 @@ export async function runMiniMaxReply(sessionId: string) {
       sessionId,
       kind: "provider-completion",
       status: "done",
-      title: "MiniMax 回复完成",
+      title: `${config.label} 回复完成`,
       detail: `已通过 ${config.model} 回写这一轮 assistant 消息。`,
     });
 
@@ -193,15 +193,15 @@ export async function runMiniMaxReply(sessionId: string) {
       });
     }
   } catch (error) {
-    const detail = error instanceof Error ? error.message : "MiniMax 调用失败";
+    const detail = error instanceof Error ? error.message : `${config.label} 调用失败`;
     publishJob({
       id: jobId,
       sessionId,
       kind: "provider-completion",
       status: "failed",
-      title: "MiniMax 回复失败",
+      title: `${config.label} 回复失败`,
       detail,
     });
-    publishRuntimeNotice(sessionId, `MiniMax 调用失败：${detail}`);
+    publishRuntimeNotice(sessionId, `${config.label} 调用失败：${detail}`);
   }
 }

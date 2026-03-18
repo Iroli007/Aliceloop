@@ -1,13 +1,52 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { primarySessionId, type DeviceType, type ProviderKind, type SessionRole } from "@aliceloop/runtime-core";
+import {
+  primarySessionId,
+  type ContentBlock,
+  type CrossReference,
+  type DeviceType,
+  type DocumentKind,
+  type DocumentStructure,
+  type ProviderKind,
+  type SectionSpan,
+  type SessionRole,
+  type SourceKind,
+  type TaskStatus,
+  type TaskType,
+} from "@aliceloop/runtime-core";
 import { getUploadsDir } from "./db/client";
 import { publishSessionEvent, subscribeToSession } from "./realtime/sessionStreams";
-import { getShellOverview, shellOverviewRoute } from "./repositories/overviewRepository";
-import { getProviderConfig, updateProviderConfig } from "./repositories/providerRepository";
+import {
+  getDocumentStructure,
+  listContentBlocks,
+  listCrossReferences,
+  listLibraryItems,
+  listSectionSpans,
+  searchContentBlocks,
+} from "./repositories/libraryRepository";
+import {
+  getAttentionState,
+  getMemoryNote,
+  getShellOverview,
+  getStudyArtifact,
+  listMemoryNotes,
+  listStudyArtifacts,
+  shellOverviewRoute,
+} from "./repositories/overviewRepository";
+import { getProviderConfig, listProviderConfigs, updateProviderConfig } from "./repositories/providerRepository";
+import {
+  getMcpServerDefinition,
+  getRuntimeCatalogSnapshot,
+  getSkillDefinition,
+  getRuntimeScriptDefinition,
+  getStoredRuntimeScriptDefinition,
+  listMcpServerDefinitions,
+  listRuntimeScriptDefinitions,
+  listSkillDefinitions,
+} from "./repositories/runtimeCatalogRepository";
+import { getSandboxRun, listSandboxRuns } from "./repositories/sandboxRunRepository";
 import {
   canAcceptClientTraffic,
   createAttachment,
@@ -20,7 +59,9 @@ import {
   listSessionEventsSince,
 } from "./repositories/sessionRepository";
 import { backfillTaskRunsFromJobs, getTaskRun, listTaskRuns } from "./repositories/taskRunRepository";
-import { runMiniMaxReply } from "./services/minimaxRunner";
+import { runProviderReply } from "./services/providerRunner";
+import { createPermissionSandboxExecutor } from "./services/sandboxExecutor";
+import { runManagedTask } from "./services/taskRunner";
 
 interface SessionParams {
   id: string;
@@ -28,6 +69,18 @@ interface SessionParams {
 
 interface ProviderParams {
   id: ProviderKind;
+}
+
+interface SkillParams {
+  id: string;
+}
+
+interface McpServerParams {
+  id: string;
+}
+
+interface RuntimeScriptParams {
+  id: string;
 }
 
 interface CreateMessageBody {
@@ -66,6 +119,75 @@ interface CreateSessionBody {
 }
 
 interface TaskParams {
+  id: string;
+}
+
+interface LibraryParams {
+  id: string;
+}
+
+interface ArtifactParams {
+  id: string;
+}
+
+interface CreateTaskBody {
+  taskType: TaskType;
+  sessionId?: string | null;
+  title?: string;
+  sourcePath?: string;
+  sourceKind?: SourceKind;
+  documentKind?: DocumentKind;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+}
+
+interface RunSkillBody {
+  sessionId?: string | null;
+  title?: string;
+  sourcePath?: string;
+  sourceKind?: SourceKind;
+  documentKind?: DocumentKind;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+}
+
+interface RunRuntimeScriptBody {
+  sessionId?: string | null;
+  title?: string;
+  args?: string[];
+  cwd?: string;
+}
+
+interface LibraryBlocksQuery {
+  sectionKey?: string;
+}
+
+interface LibrarySearchQuery {
+  q?: string;
+  libraryItemId?: string;
+  limit?: string;
+}
+
+interface ArtifactQuery {
+  libraryItemId?: string;
+  limit?: string;
+}
+
+interface SandboxRunQuery {
+  limit?: string;
+}
+
+interface MemoryQuery {
+  limit?: string;
+}
+
+interface MemoryParams {
+  id: string;
+}
+
+interface SandboxRunParams {
   id: string;
 }
 
@@ -123,15 +245,263 @@ export async function createServer() {
   }));
 
   server.get(shellOverviewRoute, async () => getShellOverview());
+  server.get("/api/attention", async () => getAttentionState());
+  server.get<{ Querystring: MemoryQuery }>("/api/memories", async (request) => listMemoryNotes(parseLimitValue(request.query.limit, 50)));
+  server.get<{ Params: MemoryParams }>("/api/memories/:id", async (request, reply) => {
+    const memory = getMemoryNote(request.params.id);
+    if (!memory) {
+      return reply.code(404).send({
+        error: "memory_not_found",
+      });
+    }
+
+    return memory;
+  });
+  server.get("/api/skills", async () => listSkillDefinitions());
+  server.get<{ Params: SkillParams }>("/api/skills/:id", async (request, reply) => {
+    const skill = getSkillDefinition(request.params.id);
+    if (!skill) {
+      return reply.code(404).send({
+        error: "skill_not_found",
+      });
+    }
+
+    return skill;
+  });
+  server.post<{ Params: SkillParams; Body: RunSkillBody }>("/api/skills/:id/run", async (request, reply) => {
+    const skill = getSkillDefinition(request.params.id);
+    if (!skill) {
+      return reply.code(404).send({
+        error: "skill_not_found",
+      });
+    }
+
+    if (skill.status !== "available" || !skill.taskType || skill.taskType === "study-artifact") {
+      return reply.code(409).send({
+        error: "skill_not_runnable",
+        skill,
+      });
+    }
+
+    const body = request.body;
+
+    switch (skill.taskType) {
+      case "document-ingest":
+        if (!body.sourcePath?.trim()) {
+          return reply.code(400).send({
+            error: "sourcePath_required",
+          });
+        }
+
+        return runManagedTask({
+          taskType: "document-ingest",
+          title: body.title,
+          sourcePath: body.sourcePath.trim(),
+          sourceKind: body.sourceKind,
+          documentKind: body.documentKind,
+        });
+      case "review-coach":
+        return runManagedTask({
+          taskType: "review-coach",
+          sessionId: body.sessionId ?? null,
+          title: body.title,
+        });
+      case "script-runner":
+        if (skill.runtimeScriptId) {
+          const runtimeScript = getStoredRuntimeScriptDefinition(skill.runtimeScriptId);
+          if (!runtimeScript || runtimeScript.status !== "available") {
+            return reply.code(409).send({
+              error: "skill_not_runnable",
+              skill,
+            });
+          }
+
+          return runManagedTask({
+            taskType: "script-runner",
+            sessionId: body.sessionId ?? null,
+            title: body.title ?? `运行脚本 · ${runtimeScript.label}`,
+            command: runtimeScript.launchCommand,
+            args: [...runtimeScript.launchArgsPrefix, runtimeScript.entryPath, ...runtimeScript.defaultArgs, ...(Array.isArray(body.args) ? body.args : [])],
+            cwd: body.cwd ?? runtimeScript.defaultCwd,
+          });
+        }
+
+        if (!body.command?.trim()) {
+          return reply.code(400).send({
+            error: "command_required",
+          });
+        }
+
+        return runManagedTask({
+          taskType: "script-runner",
+          sessionId: body.sessionId ?? null,
+          title: body.title,
+          command: body.command.trim(),
+          args: Array.isArray(body.args) ? body.args : [],
+          cwd: body.cwd,
+        });
+      default:
+        return reply.code(409).send({
+          error: "skill_not_runnable",
+          skill,
+        });
+    }
+  });
+  server.get("/api/mcp/servers", async () => listMcpServerDefinitions());
+  server.get<{ Params: McpServerParams }>("/api/mcp/servers/:id", async (request, reply) => {
+    const serverDefinition = getMcpServerDefinition(request.params.id);
+    if (!serverDefinition) {
+      return reply.code(404).send({
+        error: "mcp_server_not_found",
+      });
+    }
+
+    return serverDefinition;
+  });
+  server.get("/api/runtime/scripts", async () => listRuntimeScriptDefinitions());
+  server.get<{ Params: RuntimeScriptParams }>("/api/runtime/scripts/:id", async (request, reply) => {
+    const script = getRuntimeScriptDefinition(request.params.id);
+    if (!script) {
+      return reply.code(404).send({
+        error: "runtime_script_not_found",
+      });
+    }
+
+    return script;
+  });
+  server.post<{ Params: RuntimeScriptParams; Body: RunRuntimeScriptBody }>("/api/runtime/scripts/:id/run", async (request, reply) => {
+    const script = getStoredRuntimeScriptDefinition(request.params.id);
+    if (!script || script.status !== "available") {
+      return reply.code(404).send({
+        error: "runtime_script_not_found",
+      });
+    }
+
+    const body = request.body;
+    return runManagedTask({
+      taskType: "script-runner",
+      sessionId: body.sessionId ?? null,
+      title: body.title ?? `运行脚本 · ${script.label}`,
+      command: script.launchCommand,
+      args: [...script.launchArgsPrefix, script.entryPath, ...script.defaultArgs, ...(Array.isArray(body.args) ? body.args : [])],
+      cwd: body.cwd ?? script.defaultCwd,
+    });
+  });
+
+  server.get("/api/library", async () => listLibraryItems());
+  server.get<{ Querystring: ArtifactQuery }>("/api/artifacts", async (request) => {
+    return listStudyArtifacts({
+      libraryItemId: request.query.libraryItemId,
+      limit: parseLimitValue(request.query.limit, 50),
+    });
+  });
+  server.get<{ Params: ArtifactParams }>("/api/artifacts/:id", async (request, reply) => {
+    const artifact = getStudyArtifact(request.params.id);
+    if (!artifact) {
+      return reply.code(404).send({
+        error: "artifact_not_found",
+      });
+    }
+
+    return artifact;
+  });
+
+  server.get<{ Params: LibraryParams }>("/api/library/:id/structure", async (request, reply) => {
+    const structure = getDocumentStructure(request.params.id);
+    if (!structure) {
+      return reply.code(404).send({
+        error: "library_structure_not_found",
+      });
+    }
+
+    return {
+      structure,
+      sections: listSectionSpans(request.params.id),
+    } as { structure: DocumentStructure; sections: SectionSpan[] };
+  });
+
+  server.get<{ Params: LibraryParams; Querystring: LibraryBlocksQuery }>("/api/library/:id/blocks", async (request) => {
+    return listContentBlocks({
+      libraryItemId: request.params.id,
+      sectionKey: request.query.sectionKey,
+    }) as ContentBlock[];
+  });
+
+  server.get<{ Params: LibraryParams }>("/api/library/:id/cross-references", async (request) => {
+    return listCrossReferences(request.params.id) as CrossReference[];
+  });
+
+  server.get<{ Querystring: LibrarySearchQuery }>("/api/library/search", async (request) => {
+    return searchContentBlocks({
+      query: request.query.q ?? "",
+      libraryItemId: request.query.libraryItemId,
+      limit: parseLimitValue(request.query.limit, 20),
+    });
+  });
 
   server.get("/api/sessions", async () => listSessionThreads());
 
   server.post<{ Body: CreateSessionBody }>("/api/sessions", async (request) => createSession(request.body?.title));
 
-  server.get<{ Querystring: { sessionId?: string; limit?: string } }>("/api/tasks", async (request) => {
+  server.get<{ Querystring: { sessionId?: string; taskType?: TaskType; status?: TaskStatus; limit?: string } }>(
+    "/api/tasks",
+    async (request) => {
     return listTaskRuns({
       sessionId: request.query.sessionId,
+      taskType: request.query.taskType,
+      status: request.query.status,
       limit: parseLimitValue(request.query.limit, 100),
+    });
+    },
+  );
+
+  server.post<{ Body: CreateTaskBody }>("/api/tasks", async (request, reply) => {
+    const body = request.body;
+
+    if (body.taskType === "document-ingest") {
+      if (!body.sourcePath?.trim()) {
+        return reply.code(400).send({
+          error: "sourcePath_required",
+        });
+      }
+
+      return runManagedTask({
+        taskType: "document-ingest",
+        title: body.title,
+        sourcePath: body.sourcePath.trim(),
+        sourceKind: body.sourceKind,
+        documentKind: body.documentKind,
+      });
+    }
+
+    if (body.taskType === "review-coach") {
+      return runManagedTask({
+        taskType: "review-coach",
+        sessionId: body.sessionId ?? null,
+        title: body.title,
+      });
+    }
+
+    if (body.taskType === "script-runner") {
+      if (!body.command?.trim()) {
+        return reply.code(400).send({
+          error: "command_required",
+        });
+      }
+
+      return runManagedTask({
+        taskType: "script-runner",
+        sessionId: body.sessionId ?? null,
+        title: body.title,
+        command: body.command.trim(),
+        args: Array.isArray(body.args) ? body.args : [],
+        cwd: body.cwd,
+      });
+    }
+
+    return reply.code(400).send({
+      error: "unsupported_task_type",
+      supportedTaskTypes: ["document-ingest", "review-coach", "script-runner"],
     });
   });
 
@@ -220,7 +590,7 @@ export async function createServer() {
     }
 
     if (role === "user" && result.created) {
-      void runMiniMaxReply(request.params.id);
+      void runProviderReply(request.params.id);
     }
 
     return {
@@ -250,7 +620,13 @@ export async function createServer() {
     const attachmentId = randomUUID();
     const safeName = sanitizeFileName(fileName);
     const storagePath = join(getUploadsDir(), `${attachmentId}-${safeName}`);
-    writeFileSync(storagePath, binary);
+    const sandbox = createPermissionSandboxExecutor({
+      label: `attachment:${request.params.id}:${fileName}`,
+    });
+    await sandbox.writeBinaryFile({
+      targetPath: storagePath,
+      content: binary,
+    });
 
     const result = createAttachment({
       sessionId: request.params.id,
@@ -272,6 +648,25 @@ export async function createServer() {
   });
 
   server.get("/api/runtime/presence", async () => getRuntimePresence());
+  server.get<{ Querystring: SandboxRunQuery }>("/api/runtime/catalog", async (request) => {
+    return getRuntimeCatalogSnapshot(parseLimitValue(request.query.limit, 10));
+  });
+
+  server.get<{ Querystring: SandboxRunQuery }>("/api/runtime/sandbox-runs", async (request) => {
+    return listSandboxRuns(parseLimitValue(request.query.limit, 50));
+  });
+  server.get<{ Params: SandboxRunParams }>("/api/runtime/sandbox-runs/:id", async (request, reply) => {
+    const sandboxRun = getSandboxRun(request.params.id);
+    if (!sandboxRun) {
+      return reply.code(404).send({
+        error: "sandbox_run_not_found",
+      });
+    }
+
+    return sandboxRun;
+  });
+
+  server.get("/api/providers", async () => listProviderConfigs());
 
   server.get<{ Params: ProviderParams }>("/api/providers/:id", async (request) => {
     return getProviderConfig(request.params.id);
