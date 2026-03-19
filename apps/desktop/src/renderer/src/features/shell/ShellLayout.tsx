@@ -711,37 +711,47 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
           <form ref={composerRef} className="composer" onSubmit={submitComposer}>
             {activeToolApproval ? (
-              <div className="composer__approval">
-                <div className="composer__approval-header">
-                  <div>
-                    <strong>等待确认 bash 指令</strong>
-                    <span>{activeToolApproval.detail}</span>
+              <div className="approval-card">
+                <div className="approval-card__accent" />
+                <div className="approval-card__body">
+                  <div className="approval-card__head">
+                    <div className="approval-card__title-row">
+                      <svg className="approval-card__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <rect x="1" y="2" width="14" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.4" />
+                        <circle cx="3.8" cy="4.6" r="0.8" fill="#ef6b5e" />
+                        <circle cx="5.8" cy="4.6" r="0.8" fill="#f5bf4f" />
+                        <circle cx="7.8" cy="4.6" r="0.8" fill="#61c554" />
+                        <path d="M4 8h3M4 10.5h5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+                      </svg>
+                      <strong>Bash 指令确认</strong>
+                      <span className="approval-card__chip">需人工确认</span>
+                    </div>
+                    {activeToolApproval.detail ? (
+                      <p className="approval-card__detail">{activeToolApproval.detail}</p>
+                    ) : null}
                   </div>
-                  <span className="composer__approval-chip">必须人工确认</span>
-                </div>
-                <pre className="composer__approval-command">
-                  <code>{activeToolApproval.commandLine}</code>
-                </pre>
-                <div className="composer__approval-meta">
-                  <span>工作目录：{activeToolApproval.cwd}</span>
-                </div>
-                <div className="composer__approval-actions">
-                  <button
-                    type="button"
-                    className="settings-actions__button"
-                    onClick={() => void resolveToolApproval("reject")}
-                    disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
-                  >
-                    拒绝
-                  </button>
-                  <button
-                    type="button"
-                    className="settings-actions__button settings-actions__button--primary"
-                    onClick={() => void resolveToolApproval("approve")}
-                    disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
-                  >
-                    {conversation.resolvingToolApprovalId === activeToolApproval.id ? "处理中..." : "允许执行"}
-                  </button>
+                  <div className="approval-card__command-wrap">
+                    <pre className="approval-card__command"><code><span className="approval-card__prompt">$</span> {activeToolApproval.commandLine}</code></pre>
+                    <span className="approval-card__cwd">{activeToolApproval.cwd}</span>
+                  </div>
+                  <div className="approval-card__actions">
+                    <button
+                      type="button"
+                      className="approval-card__btn approval-card__btn--reject"
+                      onClick={() => void resolveToolApproval("reject")}
+                      disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
+                    >
+                      拒绝
+                    </button>
+                    <button
+                      type="button"
+                      className="approval-card__btn approval-card__btn--approve"
+                      onClick={() => void resolveToolApproval("approve")}
+                      disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
+                    >
+                      {conversation.resolvingToolApprovalId === activeToolApproval.id ? "处理中…" : "允许执行"}
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : null}

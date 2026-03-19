@@ -1243,74 +1243,158 @@ button {
   color: var(--gray-500);
 }
 
-.composer__approval {
-  display: grid;
-  gap: 12px;
-  padding: 14px 16px;
-  border-radius: 16px;
-  background: rgba(247, 249, 252, 0.98);
-  border: 1px solid rgba(92, 112, 143, 0.14);
+/* ── Tool-approval card ─────────────────────────────────── */
+
+.approval-card {
+  display: flex;
+  overflow: hidden;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(250, 252, 255, 0.97), rgba(243, 247, 253, 0.97));
+  border: 1px solid rgba(92, 112, 143, 0.12);
+  box-shadow: 0 2px 12px rgba(80, 100, 140, 0.06);
 }
 
-.composer__approval-header,
-.composer__approval-meta,
-.composer__approval-actions {
+.approval-card__accent {
+  flex-shrink: 0;
+  width: 4px;
+  background: linear-gradient(180deg, #d4a54a 0%, #c08b30 100%);
+}
+
+.approval-card__body {
+  flex: 1;
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+
+/* ── head ── */
+
+.approval-card__head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.approval-card__title-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
-.composer__approval-header {
-  align-items: flex-start;
+.approval-card__icon {
+  flex-shrink: 0;
+  color: var(--gray-500);
 }
 
-.composer__approval-header strong {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 14px;
+.approval-card__title-row strong {
+  font-size: 13px;
+  font-weight: 650;
   color: var(--text-primary);
+  letter-spacing: -0.01em;
 }
 
-.composer__approval-header span,
-.composer__approval-meta {
-  font-size: 12px;
-  line-height: 1.5;
-  color: #627084;
-}
-
-.composer__approval-chip {
+.approval-card__chip {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: 999px;
-  background: rgba(140, 171, 189, 0.18);
-  color: #31576b;
-  font-size: 12px;
+  margin-left: auto;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-lg);
+  background: rgba(212, 165, 74, 0.13);
+  color: #96701e;
+  font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
 }
 
-.composer__approval-command {
+.approval-card__detail {
   margin: 0;
-  padding: 14px 16px;
-  overflow: auto;
-  border-radius: 14px;
-  background: #101826;
-  color: #ecf4ff;
-  border: 1px solid rgba(15, 23, 42, 0.24);
-  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--gray-500);
+  padding-left: 24px; /* icon (16) + gap (8) */
 }
 
-.composer__approval-command code {
+/* ── command block ── */
+
+.approval-card__command-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.approval-card__command {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: #0f1720;
+  color: #dde8f8;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.approval-card__command code {
   font-family: inherit;
 }
 
-.composer__approval-actions {
+.approval-card__prompt {
+  color: #6b9fc8;
+  margin-right: 8px;
+  user-select: none;
+}
+
+.approval-card__cwd {
+  font-size: 11px;
+  color: var(--gray-400);
+  padding-left: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── actions ── */
+
+.approval-card__actions {
+  display: flex;
   justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.approval-card__btn {
+  min-height: 34px;
+  padding: 0 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.approval-card__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval-card__btn--reject {
+  background: rgba(200, 210, 225, 0.35);
+  color: var(--gray-700);
+}
+.approval-card__btn--reject:not(:disabled):hover {
+  background: rgba(200, 210, 225, 0.55);
+}
+
+.approval-card__btn--approve {
+  background: linear-gradient(135deg, #3a7bc8, #2e6ab8);
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(46, 106, 184, 0.2);
+}
+.approval-card__btn--approve:not(:disabled):hover {
+  background: linear-gradient(135deg, #4488d4, #3572c0);
 }
 
 .status-banner {
