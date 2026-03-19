@@ -184,6 +184,7 @@ export const previewSessionSnapshot: SessionSnapshot = {
       createdAt: "2026-03-17T07:27:00.000Z",
     },
   ],
+  pendingToolApprovals: [],
   jobs: [
     {
       id: "job-seed-1",

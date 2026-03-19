@@ -13,4 +13,15 @@
   --radius-card: 18px;
   --radius-pill: 999px;
   --font-sans: "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+
+  /* Gray scale – 4 semantic tiers */
+  --gray-900: #111827;
+  --gray-700: #374151;
+  --gray-500: #6b7280;
+  --gray-400: #9ca3af;
+
+  /* Radius – 3 tiers */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 999px;
 }

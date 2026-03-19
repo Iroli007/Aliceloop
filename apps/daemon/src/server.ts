@@ -10,6 +10,7 @@ import {
   type DocumentKind,
   type DocumentStructure,
   type ProviderKind,
+  type SandboxPermissionProfile,
   type ProviderTransportKind,
   type SectionSpan,
   type SessionRole,
@@ -63,10 +64,16 @@ import {
   listSessionThreads,
   listSessionEventsSince,
 } from "./repositories/sessionRepository";
+import { getRuntimeSettings, updateRuntimeSettings } from "./repositories/runtimeSettingsRepository";
 import { backfillTaskRunsFromJobs, getTaskRun, listTaskRuns } from "./repositories/taskRunRepository";
 import { abortAgentForSession } from "./runtime/agentRuntime";
 import { runProviderReply } from "./services/providerRunner";
 import { createPermissionSandboxExecutor } from "./services/sandboxExecutor";
+import {
+  approveSessionToolApproval,
+  rejectSessionToolApproval,
+  ToolApprovalNotFoundError,
+} from "./services/sessionToolApprovalService";
 import { runManagedTask } from "./services/taskRunner";
 
 interface SessionParams {
@@ -87,6 +94,11 @@ interface McpServerParams {
 
 interface RuntimeScriptParams {
   id: string;
+}
+
+interface ToolApprovalParams {
+  id: string;
+  approvalId: string;
 }
 
 interface CreateMessageBody {
@@ -123,6 +135,10 @@ interface UpdateProviderBody {
 
 interface CreateSessionBody {
   title?: string;
+}
+
+interface UpdateRuntimeSettingsBody {
+  sandboxProfile?: SandboxPermissionProfile;
 }
 
 interface TaskParams {
@@ -492,6 +508,44 @@ export async function createServer() {
     return getSessionSnapshot(request.params.id);
   });
 
+  server.post<{ Params: ToolApprovalParams }>("/api/session/:id/tool-approvals/:approvalId/approve", async (request, reply) => {
+    try {
+      return {
+        approval: approveSessionToolApproval(request.params.id, request.params.approvalId),
+      };
+    } catch (error) {
+      if (error instanceof ToolApprovalNotFoundError) {
+        return reply.code(404).send({
+          error: "tool_approval_not_found",
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  server.post<{ Params: ToolApprovalParams }>("/api/session/:id/tool-approvals/:approvalId/reject", async (request, reply) => {
+    try {
+      return {
+        approval: rejectSessionToolApproval(request.params.id, request.params.approvalId),
+      };
+    } catch (error) {
+      if (error instanceof ToolApprovalNotFoundError) {
+        return reply.code(404).send({
+          error: "tool_approval_not_found",
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  server.post<{ Params: SessionParams }>("/api/session/:id/abort", async (request) => {
+    return {
+      aborted: abortAgentForSession(request.params.id),
+    };
+  });
+
   server.get<{ Params: SessionParams; Querystring: { since?: string } }>("/api/session/:id/stream", (request, reply) => {
     const sessionId = request.params.id;
     const since = Math.max(
@@ -616,8 +670,10 @@ export async function createServer() {
     const attachmentId = randomUUID();
     const safeName = sanitizeFileName(fileName);
     const storagePath = join(getUploadsDir(), `${attachmentId}-${safeName}`);
+    const runtimeSettings = getRuntimeSettings();
     const sandbox = createPermissionSandboxExecutor({
       label: `attachment:${request.params.id}:${fileName}`,
+      permissionProfile: runtimeSettings.sandboxProfile,
     });
     await sandbox.writeBinaryFile({
       targetPath: storagePath,
@@ -644,6 +700,12 @@ export async function createServer() {
   });
 
   server.get("/api/runtime/presence", async () => getRuntimePresence());
+  server.get("/api/runtime/settings", async () => getRuntimeSettings());
+  server.put<{ Body: UpdateRuntimeSettingsBody }>("/api/runtime/settings", async (request) => {
+    return updateRuntimeSettings({
+      sandboxProfile: request.body?.sandboxProfile,
+    });
+  });
   server.get<{ Querystring: SandboxRunQuery }>("/api/runtime/catalog", async (request) => {
     return getRuntimeCatalogSnapshot(parseLimitValue(request.query.limit, 10));
   });

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   type Attachment,
   type DevicePresence,
@@ -18,6 +20,7 @@ import {
 import { getDatabase } from "../db/client";
 import { getShellOverview } from "./overviewRepository";
 import { syncTaskRunFromJob } from "./taskRunRepository";
+import { listPendingToolApprovals } from "../services/toolApprovalBroker";
 
 const runtimeHeartbeatWindowMs = 25_000;
 
@@ -196,6 +199,33 @@ function listAttachments(sessionId: string): Attachment[] {
     .all(sessionId) as AttachmentRow[];
 
   return rows.map(toAttachment);
+}
+
+function uniqueSandboxRoots(roots: string[]) {
+  return [...new Set(roots.map((root) => resolve(root)))];
+}
+
+function resolveAttachmentSandboxRoot(storagePath: string) {
+  const targetPath = resolve(storagePath);
+
+  try {
+    const stats = statSync(targetPath);
+    if (stats.isDirectory()) {
+      return {
+        readRoot: targetPath,
+        writeRoot: targetPath,
+        cwdRoot: targetPath,
+      };
+    }
+  } catch {
+    // Fall back to file-style access when the path is not stat-able yet.
+  }
+
+  return {
+    readRoot: targetPath,
+    writeRoot: targetPath,
+    cwdRoot: null,
+  };
 }
 
 function listMessages(sessionId: string, attachments: Attachment[]): SessionMessage[] {
@@ -666,12 +696,35 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     },
     messages,
     attachments,
+    pendingToolApprovals: listPendingToolApprovals(sessionId),
     jobs,
     devices,
     runtimePresence,
     artifacts: overview.artifacts,
     overview,
     lastEventSeq: lastEvent.seq,
+  };
+}
+
+export function listSessionAttachmentSandboxRoots(sessionId: string) {
+  const attachments = listAttachments(sessionId);
+  const readRoots: string[] = [];
+  const writeRoots: string[] = [];
+  const cwdRoots: string[] = [];
+
+  for (const attachment of attachments) {
+    const roots = resolveAttachmentSandboxRoot(attachment.storagePath);
+    readRoots.push(roots.readRoot);
+    writeRoots.push(roots.writeRoot);
+    if (roots.cwdRoot) {
+      cwdRoots.push(roots.cwdRoot);
+    }
+  }
+
+  return {
+    readRoots: uniqueSandboxRoots(readRoots),
+    writeRoots: uniqueSandboxRoots(writeRoots),
+    cwdRoots: uniqueSandboxRoots(cwdRoots),
   };
 }
 

@@ -1,4 +1,5 @@
 import {
+  type Attachment,
   previewSessionSnapshot,
   previewSessionThreads,
   primarySessionId,
@@ -9,6 +10,7 @@ import {
   type SessionSnapshot,
   type SessionThreadSummary,
   type StudyArtifact,
+  type ToolApproval,
 } from "@aliceloop/runtime-core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getDesktopBridge } from "../../platform/desktopBridge";
@@ -27,6 +29,10 @@ interface CreateSessionResult extends SendResult {
   sessionId?: string;
 }
 
+interface UploadResult extends SendResult {
+  attachment?: Attachment;
+}
+
 export interface ShellConversationState {
   status: "loading" | "ready" | "error";
   sessionId: string;
@@ -37,11 +43,20 @@ export interface ShellConversationState {
   latestReply: SessionMessage | null;
   latestJob: JobRunDetail | null;
   latestArtifact: StudyArtifact | null;
+  pendingToolApprovals: ToolApproval[];
   pending: boolean;
+  pendingUpload: boolean;
+  isResponding: boolean;
+  stoppingResponse: boolean;
+  resolvingToolApprovalId: string | null;
   error?: string;
   selectSession(sessionId: string): void;
   createSession(): Promise<CreateSessionResult>;
-  sendMessage(content: string): Promise<SendResult>;
+  sendMessage(content: string, attachmentIds?: string[]): Promise<SendResult>;
+  uploadAttachment(file: File): Promise<UploadResult>;
+  stopResponse(): Promise<SendResult>;
+  approveToolApproval(approvalId: string): Promise<SendResult>;
+  rejectToolApproval(approvalId: string): Promise<SendResult>;
 }
 
 function getStableDesktopSessionDeviceId() {
@@ -101,6 +116,22 @@ function upsertArtifact(artifacts: StudyArtifact[], artifact: StudyArtifact) {
   return next;
 }
 
+function upsertAttachment(attachments: Attachment[], attachment: Attachment) {
+  const next = attachments.filter((item) => item.id !== attachment.id);
+  next.push(attachment);
+  next.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return next;
+}
+
+function upsertToolApproval(approvals: ToolApproval[], approval: ToolApproval) {
+  const next = approvals.filter((item) => item.id !== approval.id);
+  if (approval.status === "pending") {
+    next.push(approval);
+  }
+  next.sort((left, right) => left.requestedAt.localeCompare(right.requestedAt));
+  return next;
+}
+
 function upsertThread(threads: SessionThreadSummary[], thread: SessionThreadSummary) {
   const next = threads.filter((item) => item.id !== thread.id);
   next.unshift(thread);
@@ -121,6 +152,23 @@ function buildThreadFromSnapshot(snapshot: SessionSnapshot): SessionThreadSummar
   };
 }
 
+function isProviderCompletionActive(job: JobRunDetail | null) {
+  return job?.status === "running" || job?.status === "queued";
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const [, base64 = ""] = result.split(",", 2);
+      resolve(base64);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
   const now = new Date().toISOString();
 
@@ -134,6 +182,7 @@ function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
     },
     messages: [],
     attachments: [],
+    pendingToolApprovals: [],
     jobs: [],
     artifacts: [],
     lastEventSeq: 0,
@@ -151,6 +200,7 @@ function createEmptySnapshotFromThread(thread: SessionThreadSummary, current: Se
     },
     messages: [],
     attachments: [],
+    pendingToolApprovals: [],
     jobs: [],
     artifacts: [],
     lastEventSeq: 0,
@@ -185,6 +235,29 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
       return {
         ...snapshot,
         jobs: upsertJob(snapshot.jobs, job),
+      };
+    }
+    case "attachment.ready": {
+      const attachment = (event.payload as { attachment?: Attachment }).attachment;
+      if (!attachment) {
+        return snapshot;
+      }
+
+      return {
+        ...snapshot,
+        attachments: upsertAttachment(snapshot.attachments, attachment),
+      };
+    }
+    case "tool.approval.requested":
+    case "tool.approval.resolved": {
+      const approval = (event.payload as { approval?: ToolApproval }).approval;
+      if (!approval) {
+        return snapshot;
+      }
+
+      return {
+        ...snapshot,
+        pendingToolApprovals: upsertToolApproval(snapshot.pendingToolApprovals, approval),
       };
     }
     case "artifact.created":
@@ -243,6 +316,9 @@ export function useShellConversation(): ShellConversationState {
   const [status, setStatus] = useState<ShellConversationState["status"]>("loading");
   const [daemonBaseUrl, setDaemonBaseUrl] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [pendingUpload, setPendingUpload] = useState(false);
+  const [stoppingResponse, setStoppingResponse] = useState(false);
+  const [resolvingToolApprovalId, setResolvingToolApprovalId] = useState<string | null>(null);
   const [error, setError] = useState<string>();
 
   useEffect(() => {
@@ -454,6 +530,61 @@ export function useShellConversation(): ShellConversationState {
     setActiveSessionId(sessionId);
   }
 
+  function activateCreatedThread(createdThread: SessionThreadSummary) {
+    setSnapshot((current) => createEmptySnapshotFromThread(createdThread, current));
+    lastEventSeqRef.current = 0;
+    setStatus("ready");
+    setError(undefined);
+    setActiveSessionId(createdThread.id);
+  }
+
+  async function refreshThreadsSafely(baseUrl: string) {
+    try {
+      const nextThreads = await fetchSessionThreads(baseUrl);
+      if (nextThreads.length > 0) {
+        setThreads(nextThreads);
+      }
+    } catch {
+      // Keep the locally updated thread list if the background refresh fails.
+    }
+  }
+
+  async function ensureTargetSession(baseUrl: string): Promise<
+    | { ok: true; sessionId: string }
+    | { ok: false; error: string }
+  > {
+    if (activeSessionId !== localDraftSessionId) {
+      return {
+        ok: true,
+        sessionId: activeSessionId,
+      };
+    }
+
+    const createResponse = await fetch(`${baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+
+    const createdPayload = (await createResponse.json()) as SessionThreadSummary & { error?: string };
+    if (!createResponse.ok) {
+      return {
+        ok: false,
+        error: createdPayload.error ?? "新建线程失败",
+      };
+    }
+
+    activateCreatedThread(createdPayload);
+    void refreshThreadsSafely(baseUrl);
+
+    return {
+      ok: true,
+      sessionId: createdPayload.id,
+    };
+  }
+
   async function createSession(): Promise<CreateSessionResult> {
     if (activeSessionId === localDraftSessionId) {
       return {
@@ -473,7 +604,7 @@ export function useShellConversation(): ShellConversationState {
     };
   }
 
-  async function sendMessage(content: string): Promise<SendResult> {
+  async function sendMessage(content: string, attachmentIds: string[] = []): Promise<SendResult> {
     if (!daemonBaseUrl) {
       return {
         ok: false,
@@ -484,29 +615,15 @@ export function useShellConversation(): ShellConversationState {
     setPending(true);
 
     try {
-      let targetSessionId = activeSessionId;
-      let createdThread: SessionThreadSummary | null = null;
-
-      if (activeSessionId === localDraftSessionId) {
-        const createResponse = await fetch(`${daemonBaseUrl}/api/sessions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({}),
-        });
-
-        const createdPayload = (await createResponse.json()) as SessionThreadSummary & { error?: string };
-        if (!createResponse.ok) {
-          return {
-            ok: false,
-            error: createdPayload.error ?? "新建线程失败",
-          };
-        }
-
-        targetSessionId = createdPayload.id;
-        createdThread = createdPayload;
+      const ensuredSession = await ensureTargetSession(daemonBaseUrl);
+      if (!ensuredSession.ok) {
+        return {
+          ok: false,
+          error: ensuredSession.error,
+        };
       }
+
+      const targetSessionId = ensuredSession.sessionId;
 
       const response = await fetch(`${daemonBaseUrl}/api/session/${targetSessionId}/messages`, {
         method: "POST",
@@ -516,6 +633,7 @@ export function useShellConversation(): ShellConversationState {
         body: JSON.stringify({
           clientMessageId: `${deviceIdRef.current}-${Date.now()}`,
           content,
+          attachmentIds,
           deviceId: deviceIdRef.current,
           deviceType: "desktop",
         }),
@@ -528,18 +646,17 @@ export function useShellConversation(): ShellConversationState {
       };
 
       if (!response.ok) {
+        if (payload.runtimePresence) {
+          setSnapshot((current) => ({
+            ...current,
+            runtimePresence: payload.runtimePresence ?? current.runtimePresence,
+          }));
+        }
+
         return {
           ok: false,
           error: payload.error ?? "发送失败",
         };
-      }
-
-      if (createdThread) {
-        setSnapshot((current) => createEmptySnapshotFromThread(createdThread as SessionThreadSummary, current));
-        lastEventSeqRef.current = 0;
-        setStatus("ready");
-        setError(undefined);
-        setActiveSessionId(createdThread.id);
       }
 
       if (payload.message) {
@@ -555,14 +672,7 @@ export function useShellConversation(): ShellConversationState {
         }));
       }
 
-      try {
-        const nextThreads = await fetchSessionThreads(daemonBaseUrl);
-        if (nextThreads.length > 0) {
-          setThreads(nextThreads);
-        }
-      } catch {
-        // Keep the locally updated thread list if the background refresh fails.
-      }
+      await refreshThreadsSafely(daemonBaseUrl);
 
       return { ok: true };
     } catch (sendError) {
@@ -575,12 +685,202 @@ export function useShellConversation(): ShellConversationState {
     }
   }
 
+  async function uploadAttachment(file: File): Promise<UploadResult> {
+    if (!daemonBaseUrl) {
+      return {
+        ok: false,
+        error: "本地 daemon 还没连上。",
+      };
+    }
+
+    setPendingUpload(true);
+
+    try {
+      const ensuredSession = await ensureTargetSession(daemonBaseUrl);
+      if (!ensuredSession.ok) {
+        return {
+          ok: false,
+          error: ensuredSession.error,
+        };
+      }
+
+      const contentBase64 = await fileToBase64(file);
+      const response = await fetch(`${daemonBaseUrl}/api/session/${ensuredSession.sessionId}/attachments`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fileName: file.name,
+          mimeType: file.type || "application/octet-stream",
+          contentBase64,
+          deviceId: deviceIdRef.current,
+          deviceType: "desktop",
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        error?: string;
+        attachment?: Attachment;
+        jobs?: JobRunDetail[];
+        runtimePresence?: RuntimePresence;
+      };
+
+      if (!response.ok) {
+        if (payload.runtimePresence) {
+          setSnapshot((current) => ({
+            ...current,
+            runtimePresence: payload.runtimePresence ?? current.runtimePresence,
+          }));
+        }
+
+        return {
+          ok: false,
+          error: payload.error ?? "上传失败",
+        };
+      }
+
+      if (payload.attachment) {
+        setSnapshot((current) => {
+          let nextJobs = current.jobs;
+          for (const job of payload.jobs ?? []) {
+            nextJobs = upsertJob(nextJobs, job);
+          }
+
+          return {
+            ...current,
+            attachments: upsertAttachment(current.attachments, payload.attachment as Attachment),
+            jobs: nextJobs,
+          };
+        });
+      }
+
+      await refreshThreadsSafely(daemonBaseUrl);
+
+      return {
+        ok: true,
+        attachment: payload.attachment as Attachment | undefined,
+      };
+    } catch (uploadError) {
+      return {
+        ok: false,
+        error: uploadError instanceof Error ? uploadError.message : "上传失败",
+      };
+    } finally {
+      setPendingUpload(false);
+    }
+  }
+
+  async function stopResponse(): Promise<SendResult> {
+    if (!daemonBaseUrl || activeSessionId === localDraftSessionId) {
+      return {
+        ok: false,
+        error: "当前没有可停止输出的会话。",
+      };
+    }
+
+    const currentLatestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
+    if (!isProviderCompletionActive(currentLatestJob)) {
+      return {
+        ok: false,
+        error: "当前没有正在输出的 agent。",
+      };
+    }
+
+    setStoppingResponse(true);
+
+    try {
+      const response = await fetch(`${daemonBaseUrl}/api/session/${activeSessionId}/abort`, {
+        method: "POST",
+      });
+      const payload = (await response.json()) as {
+        aborted?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        setStoppingResponse(false);
+        return {
+          ok: false,
+          error: payload.error ?? "停止失败",
+        };
+      }
+
+      if (!payload.aborted) {
+        setStoppingResponse(false);
+        return {
+          ok: false,
+          error: "当前没有正在输出的 agent。",
+        };
+      }
+
+      return { ok: true };
+    } catch (stopError) {
+      setStoppingResponse(false);
+      return {
+        ok: false,
+        error: stopError instanceof Error ? stopError.message : "停止失败",
+      };
+    }
+  }
+
+  async function resolveToolApproval(approvalId: string, action: "approve" | "reject"): Promise<SendResult> {
+    if (!daemonBaseUrl || activeSessionId === localDraftSessionId) {
+      return {
+        ok: false,
+        error: "当前没有可处理命令审批的会话。",
+      };
+    }
+
+    setResolvingToolApprovalId(approvalId);
+
+    try {
+      const response = await fetch(`${daemonBaseUrl}/api/session/${activeSessionId}/tool-approvals/${approvalId}/${action}`, {
+        method: "POST",
+      });
+      const payload = (await response.json()) as {
+        error?: string;
+        approval?: ToolApproval;
+      };
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: payload.error ?? "命令审批失败",
+        };
+      }
+
+      if (payload.approval) {
+        setSnapshot((current) => ({
+          ...current,
+          pendingToolApprovals: upsertToolApproval(current.pendingToolApprovals, payload.approval as ToolApproval),
+        }));
+      }
+
+      return { ok: true };
+    } catch (approvalError) {
+      return {
+        ok: false,
+        error: approvalError instanceof Error ? approvalError.message : "命令审批失败",
+      };
+    } finally {
+      setResolvingToolApprovalId(null);
+    }
+  }
+
   const latestReply = [...snapshot.messages].reverse().find((message) => message.role !== "user") ?? null;
   const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
   const latestArtifact = snapshot.artifacts[0] ?? null;
+  const isResponding = isProviderCompletionActive(latestJob);
   const sessionTitle =
     (activeSessionId === localDraftSessionId ? null : threads.find((thread) => thread.id === activeSessionId)?.title) ??
     snapshot.session.title;
+
+  useEffect(() => {
+    if (!isResponding) {
+      setStoppingResponse(false);
+    }
+  }, [isResponding]);
 
   return {
     status,
@@ -592,10 +892,19 @@ export function useShellConversation(): ShellConversationState {
     latestReply,
     latestJob,
     latestArtifact,
+    pendingToolApprovals: snapshot.pendingToolApprovals,
     pending,
+    pendingUpload,
+    isResponding,
+    stoppingResponse,
+    resolvingToolApprovalId,
     error,
     selectSession,
     createSession,
     sendMessage,
+    uploadAttachment,
+    stopResponse,
+    approveToolApproval: (approvalId: string) => resolveToolApproval(approvalId, "approve"),
+    rejectToolApproval: (approvalId: string) => resolveToolApproval(approvalId, "reject"),
   };
 }

@@ -19,6 +19,7 @@ import { getDataDir } from "../db/client";
 import { createMemoryNote, upsertMemoryNote } from "../context/memory/memoryRepository";
 import { getPrimaryLibraryContext, getShellOverview } from "../repositories/overviewRepository";
 import { markLibraryAsFocused, persistIngestedLibrary } from "../repositories/libraryRepository";
+import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import { upsertTaskRun } from "../repositories/taskRunRepository";
 import { createPermissionSandboxExecutor } from "./sandboxExecutor";
 
@@ -187,6 +188,7 @@ function canUseTextFallback(sourcePath: string) {
 async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<TaskRunnerResult> {
   const taskId = randomUUID();
   const title = inferLibraryTitle(input.sourcePath, input.title);
+  const runtimeSettings = getRuntimeSettings();
 
   writeTaskRun(taskId, "document-ingest", "queued", `准备接收资料 · ${title}`, "资料已经登记到任务中心，准备写入本地图书馆。", null);
   writeTaskRun(taskId, "document-ingest", "running", `正在解析资料 · ${title}`, "正在抽取章节结构、块级正文和检索索引。", null);
@@ -196,6 +198,7 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
     const libraryItemId = `library-${randomUUID()}`;
     const sandbox = createPermissionSandboxExecutor({
       label: `document-ingest:${title}`,
+      permissionProfile: runtimeSettings.sandboxProfile,
       extraReadRoots: [dirname(input.sourcePath)],
     });
     const fallbackText = canUseTextFallback(input.sourcePath)
@@ -314,6 +317,7 @@ async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRu
   const args = input.args ?? [];
   const cwd = input.cwd?.trim() || getDataDir();
   const title = input.title?.trim() || `运行脚本 · ${command}`;
+  const runtimeSettings = getRuntimeSettings();
 
   writeTaskRun(taskId, "script-runner", "queued", title, "脚本任务已经入队，等待进入权限型沙箱执行。", input.sessionId ?? null);
   writeTaskRun(taskId, "script-runner", "running", title, "正在通过权限型沙箱执行本地命令。", input.sessionId ?? null);
@@ -321,6 +325,7 @@ async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRu
   try {
     const sandbox = createPermissionSandboxExecutor({
       label: `script-runner:${title}`,
+      permissionProfile: runtimeSettings.sandboxProfile,
       extraReadRoots: [cwd],
       extraWriteRoots: [cwd],
       extraCwdRoots: [cwd],

@@ -238,6 +238,13 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS runtime_settings (
+      id TEXT PRIMARY KEY,
+      sandbox_profile TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS mcp_server_installs (
       server_id TEXT PRIMARY KEY,
       install_source TEXT NOT NULL,

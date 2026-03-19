@@ -17,8 +17,10 @@ export type SessionMessageStatus = "pending" | "acked" | "error";
 export type AttachmentStatus = "ready" | "failed";
 export type ProviderKind = "minimax" | "aihubmix" | "openai" | "anthropic" | "openrouter";
 export type ProviderTransportKind = "auto" | "openai-compatible" | "anthropic";
+export type SandboxPermissionProfile = "restricted" | "full-access";
 export type SandboxPrimitive = "read" | "write" | "edit" | "bash";
 export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
+export type ToolApprovalStatus = "pending" | "approved" | "rejected";
 export type SkillStatus = "available" | "planned";
 export type SkillMode = "instructional" | "task";
 export type McpServerStatus = "available" | "planned";
@@ -38,6 +40,8 @@ export type SessionEventType =
   | "attachment.ready"
   | "presence.updated"
   | "runtime.offline"
+  | "tool.approval.requested"
+  | "tool.approval.resolved"
   | "tool.call.started"
   | "tool.call.completed";
 
@@ -225,6 +229,16 @@ export interface ProviderConfig {
   updatedAt: string | null;
 }
 
+export interface RuntimeSettings {
+  sandboxProfile: SandboxPermissionProfile;
+  updatedAt: string | null;
+}
+
+export const defaultRuntimeSettings: RuntimeSettings = {
+  sandboxProfile: "restricted",
+  updatedAt: null,
+};
+
 export interface SkillDefinition {
   id: string;
   label: string;
@@ -311,10 +325,26 @@ export interface SandboxRun {
   finishedAt: string | null;
 }
 
+export interface ToolApproval {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  title: string;
+  detail: string;
+  commandLine: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  status: ToolApprovalStatus;
+  requestedAt: string;
+  resolvedAt: string | null;
+}
+
 export interface SessionSnapshot {
   session: Session;
   messages: SessionMessage[];
   attachments: Attachment[];
+  pendingToolApprovals: ToolApproval[];
   jobs: JobRunDetail[];
   devices: DevicePresence[];
   runtimePresence: RuntimePresence;

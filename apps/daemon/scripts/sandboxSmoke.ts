@@ -45,6 +45,26 @@ async function main() {
   });
   assert.equal(edited, "alpha\ngamma\n");
 
+  let approvalCount = 0;
+  const approvedSandbox = createPermissionSandboxExecutor({
+    label: "sandbox-smoke-approved",
+    extraReadRoots: [tempDataDir],
+    extraWriteRoots: [tempDataDir],
+    extraCwdRoots: [tempDataDir],
+    allowedCommands: ["cat"],
+    requestBashApproval: async () => {
+      approvalCount += 1;
+    },
+  });
+
+  const approvedBash = await approvedSandbox.runBash({
+    command: "cat",
+    args: [outputPath],
+    cwd: tempDataDir,
+  });
+  assert.equal(approvedBash.stdout, "alpha\ngamma\n");
+  assert.equal(approvalCount, 1, "bash approval hook should run before command execution");
+
   const bashResult = await sandbox.runBash({
     command: "cat",
     args: [outputPath],
@@ -86,6 +106,23 @@ async function main() {
     blockedBash = error instanceof SandboxViolationError;
   }
   assert.equal(blockedBash, true, "sandbox should block bash path arguments outside allowed roots");
+
+  const fullAccessSandbox = createPermissionSandboxExecutor({
+    label: "sandbox-smoke-full-access",
+    permissionProfile: "full-access",
+  });
+
+  const hosts = await fullAccessSandbox.readTextFile({
+    targetPath: "/etc/hosts",
+  });
+  assert(hosts.length > 0, "full access sandbox should read arbitrary host files");
+
+  const fullAccessBash = await fullAccessSandbox.runBash({
+    command: "/bin/echo",
+    args: ["full-access-ok"],
+    cwd: process.cwd(),
+  });
+  assert.equal(fullAccessBash.stdout.trim(), "full-access-ok");
 
   const logs = listSandboxRuns(20);
   assert(logs.some((run) => run.primitive === "read" && run.status === "done"), "read run should be logged");

@@ -28,8 +28,10 @@ export const dockNav: ShellNavItem[] = [
 ];
 
 export const settingsNav: SettingsNavItem[] = [
-  { id: "providers", label: "模型网关", shortLabel: "▣" },
-  { id: "memory", label: "记忆", shortLabel: "◍" },
-  { id: "mcp", label: "MCP 服务器", shortLabel: "⌁" },
+  { id: "general", label: "常规", shortLabel: "⚙" },
+  { id: "providers", label: "模型提供商", shortLabel: "▣" },
+  { id: "mcp", label: "MCP 服务器", shortLabel: "🔗" },
+  { id: "sandbox", label: "沙箱", shortLabel: "⌂" },
+  { id: "memory", label: "记忆", shortLabel: "🧠" },
   { id: "skills", label: "技能", shortLabel: "⌘" },
 ];

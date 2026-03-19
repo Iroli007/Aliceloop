@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { SandboxPrimitive, SandboxRun } from "@aliceloop/runtime-core";
+import type { SandboxPermissionProfile, SandboxPrimitive, SandboxRun } from "@aliceloop/runtime-core";
 import { getDataDir, getUploadsDir } from "../db/client";
 import { createSandboxRun, finishSandboxRun } from "../repositories/sandboxRunRepository";
 
@@ -14,10 +14,25 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(currentDir, "../../../../");
 
 const defaultAllowedReadRoots = [projectRoot, getDataDir(), getUploadsDir()];
-const defaultAllowedWriteRoots = [getDataDir(), getUploadsDir()];
+const defaultAllowedWriteRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedCwdRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedCommands = ["cat", "find", "git", "head", "ls", "node", "npm", "pwd", "rg", "sed", "tsx", "wc"];
 const tsxCliPath = resolve(projectRoot, "node_modules/tsx/dist/cli.mjs");
+const restrictedFindDisallowedArgs = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const restrictedNpmAllowedSubcommands = new Set([
+  "help",
+  "root",
+  "prefix",
+  "bin",
+  "version",
+  "view",
+  "query",
+  "search",
+  "ls",
+  "outdated",
+  "explain",
+  "pkg",
+]);
 
 export class SandboxViolationError extends Error {
   constructor(message: string) {
@@ -28,11 +43,13 @@ export class SandboxViolationError extends Error {
 
 interface SandboxExecutorOptions {
   label: string;
+  permissionProfile?: SandboxPermissionProfile;
   extraReadRoots?: string[];
   extraWriteRoots?: string[];
   extraCwdRoots?: string[];
   allowedCommands?: string[];
   defaultTimeoutMs?: number;
+  requestBashApproval?: (input: { command: string; args: string[]; cwd: string }) => Promise<void>;
 }
 
 interface ReadTextFileInput {
@@ -114,9 +131,46 @@ function collectPathArguments(command: string, args: string[]) {
     case "node":
     case "tsx":
       return nonFlagArgs.slice(0, 1);
+    case "find": {
+      const pathArgs: string[] = [];
+      for (const arg of args) {
+        if (!arg) {
+          continue;
+        }
+
+        if (arg === "!" || arg === "(" || arg === ")" || arg === ",") {
+          break;
+        }
+
+        if (arg.startsWith("-")) {
+          break;
+        }
+
+        pathArgs.push(arg);
+      }
+      return pathArgs;
+    }
     default:
       return [];
   }
+}
+
+function getNpmSubcommand(args: string[]) {
+  for (const arg of args) {
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === "--") {
+      break;
+    }
+
+    if (!arg.startsWith("-")) {
+      return arg;
+    }
+  }
+
+  return null;
 }
 
 function resolveExecution(command: string, args: string[]) {
@@ -141,9 +195,11 @@ function resolveExecution(command: string, args: string[]) {
 }
 
 export function createPermissionSandboxExecutor(options: SandboxExecutorOptions) {
-  const allowedReadRoots = uniqueRoots([...defaultAllowedReadRoots, ...(options.extraReadRoots ?? [])]);
-  const allowedWriteRoots = uniqueRoots([...defaultAllowedWriteRoots, ...(options.extraWriteRoots ?? [])]);
-  const allowedCwdRoots = uniqueRoots([...defaultAllowedCwdRoots, ...(options.extraCwdRoots ?? [])]);
+  const permissionProfile = options.permissionProfile ?? "restricted";
+  const fullAccess = permissionProfile === "full-access";
+  const allowedReadRoots = fullAccess ? null : uniqueRoots([...defaultAllowedReadRoots, ...(options.extraReadRoots ?? [])]);
+  const allowedWriteRoots = fullAccess ? null : uniqueRoots([...defaultAllowedWriteRoots, ...(options.extraWriteRoots ?? [])]);
+  const allowedCwdRoots = fullAccess ? null : uniqueRoots([...defaultAllowedCwdRoots, ...(options.extraCwdRoots ?? [])]);
   const allowedCommands = [...new Set([...(options.allowedCommands ?? []), ...defaultAllowedCommands])];
 
   async function withRun<T>(input: {
@@ -187,34 +243,63 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
   }
 
   function assertReadable(targetPath: string) {
-    if (!isPathAllowed(targetPath, allowedReadRoots)) {
+    if (allowedReadRoots && !isPathAllowed(targetPath, allowedReadRoots)) {
       throw new SandboxViolationError(`read denied for path outside allowed roots: ${targetPath}`);
     }
   }
 
   function assertWritable(targetPath: string) {
-    if (!isPathAllowed(targetPath, allowedWriteRoots)) {
+    if (allowedWriteRoots && !isPathAllowed(targetPath, allowedWriteRoots)) {
       throw new SandboxViolationError(`write denied for path outside allowed roots: ${targetPath}`);
     }
   }
 
   function assertCwd(cwd: string) {
-    if (!isPathAllowed(cwd, allowedCwdRoots)) {
+    if (allowedCwdRoots && !isPathAllowed(cwd, allowedCwdRoots)) {
       throw new SandboxViolationError(`bash denied for cwd outside allowed roots: ${cwd}`);
     }
   }
 
   function assertCommand(command: string) {
+    if (!command || /\s/.test(command)) {
+      throw new SandboxViolationError(`bash denied for invalid command: ${command}`);
+    }
+
+    if (fullAccess) {
+      return;
+    }
+
     if (command.includes("/") || !allowedCommands.includes(command)) {
       throw new SandboxViolationError(`bash denied for command outside allowlist: ${command}`);
     }
   }
 
   function assertCommandArguments(command: string, args: string[], cwd: string) {
+    if (fullAccess) {
+      return;
+    }
+
+    if (command === "find") {
+      for (const arg of args) {
+        if (restrictedFindDisallowedArgs.has(arg)) {
+          throw new SandboxViolationError(`bash denied for dangerous find expression: ${arg}`);
+        }
+      }
+    }
+
+    if (command === "npm") {
+      const subcommand = getNpmSubcommand(args);
+      if (subcommand && !restrictedNpmAllowedSubcommands.has(subcommand)) {
+        throw new SandboxViolationError(
+          `bash denied for npm subcommand in restricted mode: ${subcommand}`,
+        );
+      }
+    }
+
     const pathLikeArgs = collectPathArguments(command, args);
     for (const value of pathLikeArgs) {
       const candidatePath = resolve(cwd, value);
-      if (!isPathAllowed(candidatePath, [...allowedReadRoots, ...allowedWriteRoots])) {
+      if (!isPathAllowed(candidatePath, [...(allowedReadRoots ?? []), ...(allowedWriteRoots ?? [])])) {
         throw new SandboxViolationError(`bash denied for path argument outside allowed roots: ${value}`);
       }
     }
@@ -310,6 +395,13 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
           assertCommand(command);
           assertCwd(cwd);
           assertCommandArguments(command, args, cwd);
+          if (options.requestBashApproval) {
+            await options.requestBashApproval({
+              command,
+              args,
+              cwd,
+            });
+          }
           const execution = resolveExecution(command, args);
           const { stdout, stderr } = await execFileAsync(execution.executable, execution.args, {
             cwd,
@@ -332,10 +424,12 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
     describePolicy() {
       return {
         label: options.label,
-        allowedReadRoots,
-        allowedWriteRoots,
-        allowedCwdRoots,
-        allowedCommands,
+        permissionProfile,
+        requiresBashApproval: Boolean(options.requestBashApproval),
+        allowedReadRoots: allowedReadRoots ?? ["<all>"],
+        allowedWriteRoots: allowedWriteRoots ?? ["<all>"],
+        allowedCwdRoots: allowedCwdRoots ?? ["<all>"],
+        allowedCommands: fullAccess ? ["<all>"] : allowedCommands,
       };
     },
   };

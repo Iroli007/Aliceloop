@@ -4,7 +4,10 @@ import { buildMemoryBlock } from "./memory/memoryContext";
 import { buildSessionMessages, getLatestUserMessage } from "./session/sessionContext";
 import { buildSkillContextBlock } from "./skills/skillLoader";
 import { buildToolSet } from "./tools/toolRegistry";
+import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
+import { listSessionAttachmentSandboxRoots } from "../repositories/sessionRepository";
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
+import { requestSessionBashApproval } from "../services/sessionToolApprovalService";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -33,9 +36,23 @@ export function loadContext(
   const memory = buildMemoryBlock(sessionId, userQuery ?? undefined);
   const skills = buildSkillContextBlock();
   const messages = buildSessionMessages(sessionId);
+  const runtimeSettings = getRuntimeSettings();
+  const attachmentRoots = listSessionAttachmentSandboxRoots(sessionId);
 
   const sandbox = createPermissionSandboxExecutor({
     label: `agent:${sessionId}`,
+    permissionProfile: runtimeSettings.sandboxProfile,
+    extraReadRoots: attachmentRoots.readRoots,
+    extraWriteRoots: attachmentRoots.writeRoots,
+    extraCwdRoots: attachmentRoots.cwdRoots,
+    requestBashApproval: ({ command, args, cwd }) =>
+      requestSessionBashApproval({
+        sessionId,
+        command,
+        args,
+        cwd,
+        abortSignal,
+      }),
   });
   const tools = buildToolSet(sandbox);
 
