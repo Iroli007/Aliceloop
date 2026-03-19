@@ -47,17 +47,21 @@ function normalizeSecretText(value: string) {
   return value.trim();
 }
 
-function inferProviderTransport(baseUrl: string | undefined, fallback: ProviderTransportKind): ProviderTransportKind {
-  if (!baseUrl) {
-    return fallback;
+function normalizeGatewayBaseUrl(value: string) {
+  const normalized = normalizeConfigText(value).replace(/\/+$/, "");
+  if (!normalized) {
+    return "";
   }
 
-  const normalized = baseUrl.trim().toLowerCase();
-  if (normalized.includes("/anthropic")) {
-    return "anthropic";
+  if (normalized.endsWith("/v1/messages")) {
+    return normalized.slice(0, -"/messages".length);
   }
 
-  return fallback;
+  if (normalized.endsWith("/v1")) {
+    return normalized;
+  }
+
+  return `${normalized}/v1`;
 }
 
 function maskApiKey(apiKey: string | null) {
@@ -116,7 +120,7 @@ function toStoredProviderConfig(row: ProviderConfigRow | undefined, providerId: 
   return {
     id: definition.id,
     label: definition.label,
-    transport: row?.transport ?? inferProviderTransport(baseUrl, definition.transport),
+    transport: row?.transport ?? definition.transport,
     baseUrl,
     model: row?.model ?? defaultConfig.model,
     apiKey: resolveProviderApiKey(providerId, row?.legacyApiKey ?? null),
@@ -184,8 +188,8 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
   const now = new Date().toISOString();
   const next: StoredProviderConfig = {
     ...current,
-    transport: input.transport ?? inferProviderTransport(input.baseUrl ?? current.baseUrl, current.transport),
-    baseUrl: input.baseUrl !== undefined ? normalizeConfigText(input.baseUrl) || current.baseUrl : current.baseUrl,
+    transport: input.transport ?? current.transport,
+    baseUrl: input.baseUrl !== undefined ? normalizeGatewayBaseUrl(input.baseUrl) || current.baseUrl : current.baseUrl,
     model: input.model !== undefined ? normalizeConfigText(input.model) || current.model : current.model,
     apiKey: current.apiKey,
     enabled: input.enabled ?? current.enabled,

@@ -82,12 +82,14 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [sidebarMotion, setSidebarMotion] = useState<"opening" | "closing" | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState("providers");
-  const [activeProviderId, setActiveProviderId] = useState("minimax");
+  const [activeProviderId, setActiveProviderId] = useState("");
   const [providerApiKeyInput, setProviderApiKeyInput] = useState("");
   const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("");
   const [providerModelInput, setProviderModelInput] = useState("");
   const [providerEnabled, setProviderEnabled] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
+  const [mcpView, setMcpView] = useState<"marketplace" | "installed">("marketplace");
+  const [mcpNotice, setMcpNotice] = useState<string | null>(null);
   const [composerDraft, setComposerDraft] = useState("");
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(176);
@@ -106,6 +108,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const providers = providerState.providers;
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
   const enabledProvider = providers.find((item) => item.enabled) ?? null;
+  const installedMcpServers = runtimeCatalogs.mcpServers.filter((server) => server.installStatus === "installed");
+  const visibleMcpServers = (mcpView === "installed" ? installedMcpServers : runtimeCatalogs.mcpServers)
+    .slice()
+    .sort((left, right) => Number(right.featured) - Number(left.featured) || left.label.localeCompare(right.label, "zh-CN"));
   const shellMainStyle = {
     "--composer-height": `${composerHeight}px`,
     "--composer-reserve-space": `${composerReserveSpace}px`,
@@ -295,7 +301,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
   async function saveActiveProvider() {
     if (!activeProvider) {
-      setProviderNotice("当前还没有可编辑的 provider。");
+      setProviderNotice("当前还没有可编辑的模型网关配置。");
       return;
     }
 
@@ -314,7 +320,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }
 
     setProviderApiKeyInput("");
-    setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存。现在主界面和 companion 都可以发真实消息。`);
+    setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存。后续真实消息会通过当前启用的模型网关发出。`);
   }
 
   async function submitComposerDraft() {
@@ -357,6 +363,28 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     if (!result.ok) {
       setThreadNotice(result.error ?? "新建线程失败");
     }
+  }
+
+  async function installMcpServer(serverId: string) {
+    setMcpNotice(null);
+    const result = await runtimeCatalogs.installMcpServer(serverId);
+    if (!result.ok) {
+      setMcpNotice(result.error ?? "安装 MCP 服务器失败");
+      return;
+    }
+
+    setMcpNotice(`${result.server?.label ?? serverId} 已加入 Aliceloop 的 MCP 已安装列表。`);
+  }
+
+  async function uninstallMcpServer(serverId: string) {
+    setMcpNotice(null);
+    const result = await runtimeCatalogs.uninstallMcpServer(serverId);
+    if (!result.ok) {
+      setMcpNotice(result.error ?? "移除 MCP 服务器失败");
+      return;
+    }
+
+    setMcpNotice(`${result.server?.label ?? serverId} 已从 Aliceloop 的 MCP 已安装列表移除。`);
   }
 
   return (
@@ -533,7 +561,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
             <div className="composer__toolbar">
               <span className="composer__action">⌘</span>
               <span className="composer__meta">
-                {enabledProvider ? enabledProvider.model : "Provider 未启用"}
+                {enabledProvider ? `${enabledProvider.label} · ${enabledProvider.model}` : "模型网关未启用"}
               </span>
               <span className="composer__spacer" />
               {conversation.latestJob ? (
@@ -632,10 +660,21 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             </div>
                           </div>
 
+                        <div className="provider-field">
+                          <label>当前策略</label>
+                          <div className="provider-field__box">
+                              Aliceloop 负责 session、sandbox、skills 和事件流；模型网关只负责推理与协议适配。
+                          </div>
+                        </div>
+
                           <div className="provider-field">
-                            <label>当前策略</label>
+                            <label>路由模式</label>
                             <div className="provider-field__box">
-                              内置 coding agent 负责调度四原语和 skills；provider 只负责推理，不接管 Aliceloop 的 session、sandbox 和事件流。
+                              {activeProvider.transport === "auto"
+                                ? "自动：Claude 系列走 Anthropic 兼容接口，其余模型默认走 OpenAI 兼容接口。"
+                                : activeProvider.transport === "anthropic"
+                                  ? "固定走 Anthropic 兼容接口。"
+                                  : "固定走 OpenAI 兼容接口。"}
                             </div>
                           </div>
 
@@ -674,12 +713,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             />
                           </div>
 
-                          <div className="provider-field">
-                            <label>状态</label>
-                            <div className="provider-field__box">
-                              {providerEnabled ? "已启用，可接真实推理" : "未启用，保存后仍可先保留配置"}
-                            </div>
+                        <div className="provider-field">
+                          <label>状态</label>
+                          <div className="provider-field__box">
+                              {providerEnabled ? "已启用，可通过当前网关发起真实推理" : "未启用，保存后仍可先保留网关配置"}
                           </div>
+                        </div>
 
                           {providerNotice ? <div className="provider-notice">{providerNotice}</div> : null}
                           {providerState.error ? <div className="provider-notice provider-notice--error">{providerState.error}</div> : null}
@@ -699,9 +738,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                         </>
                       ) : (
                         <div className="provider-field">
-                          <label>Provider</label>
+                          <label>模型网关</label>
                           <div className="provider-field__box">
-                            还没有从 daemon 读到可编辑的 provider。
+                            还没有从 daemon 读到可编辑的模型网关配置。
                           </div>
                         </div>
                       )}
@@ -734,24 +773,96 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <h3>MCP 服务器</h3>
-                    <span>{runtimeCatalogs.mcpServers.length} 个条目</span>
+                    <span>{runtimeCatalogs.mcpServers.length} 个条目 / 已安装 {installedMcpServers.length}</span>
+                  </div>
+                  <div className="provider-notice">
+                    Aliceloop 只做 MCP client。这里的“安装”是在 Aliceloop 内登记已安装状态，真正的 MCP 服务仍由用户从应用市场自行下载和配置。
                   </div>
                   {runtimeCatalogs.error && runtimeCatalogs.status === "error" ? (
                     <div className="provider-notice provider-notice--error">{runtimeCatalogs.error}</div>
                   ) : null}
+                  {mcpNotice ? <div className="provider-notice">{mcpNotice}</div> : null}
+                  <div className="mcp-toggle">
+                    <button
+                      className={`mcp-toggle__button${mcpView === "marketplace" ? " mcp-toggle__button--active" : ""}`}
+                      onClick={() => setMcpView("marketplace")}
+                    >
+                      应用市场
+                    </button>
+                    <button
+                      className={`mcp-toggle__button${mcpView === "installed" ? " mcp-toggle__button--active" : ""}`}
+                      onClick={() => setMcpView("installed")}
+                    >
+                      已安装
+                    </button>
+                  </div>
                   <div className="settings-panel__list">
-                    {runtimeCatalogs.mcpServers.map((server) => (
-                      <div key={server.id} className="settings-panel__item">
-                        <strong>{server.label}</strong>
-                        <span>
-                          {server.transport}
-                          {" · "}
-                          {server.capabilities.join(" / ")}
-                          {" · "}
-                          {server.status}
-                        </span>
+                    {visibleMcpServers.length > 0 ? (
+                      visibleMcpServers.map((server) => (
+                        <div key={server.id} className="settings-panel__item">
+                          <div className="mcp-card__header">
+                            <div className="mcp-card__title">
+                              <strong>{server.label}</strong>
+                              <span>{server.author}</span>
+                            </div>
+                            <div className="mcp-card__badges">
+                              {server.verified ? <span className="mcp-card__badge">已验证</span> : null}
+                              {server.featured ? <span className="mcp-card__badge mcp-card__badge--featured">精选</span> : null}
+                              <span className="mcp-card__badge">{server.transport}</span>
+                            </div>
+                          </div>
+                          <span>{server.description}</span>
+                          <span>
+                            {server.capabilities.join(" / ")}
+                            {" · "}
+                            {server.status === "available" ? "可接入" : "规划中"}
+                            {" · "}
+                            {server.installStatus === "installed" ? "已安装" : "未安装"}
+                          </span>
+                          <div className="mcp-card__tags">
+                            {server.tags.map((tag) => (
+                              <span key={`${server.id}-${tag}`} className="mcp-card__tag">
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                          <div className="mcp-card__actions">
+                            {server.homepageUrl ? (
+                              <a href={server.homepageUrl} target="_blank" rel="noreferrer">
+                                查看项目
+                              </a>
+                            ) : (
+                              <span className="mcp-card__hint">暂无外部页面</span>
+                            )}
+                            <button
+                              className="settings-actions__button settings-actions__button--primary"
+                              onClick={() => {
+                                if (server.installStatus === "installed") {
+                                  void uninstallMcpServer(server.id);
+                                  return;
+                                }
+
+                                void installMcpServer(server.id);
+                              }}
+                              disabled={runtimeCatalogs.mutatingMcpServerId === server.id || server.status !== "available"}
+                            >
+                              {runtimeCatalogs.mutatingMcpServerId === server.id
+                                ? "处理中..."
+                                : server.status !== "available"
+                                  ? "规划中"
+                                  : server.installStatus === "installed"
+                                    ? "移除"
+                                    : "安装"}
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="settings-panel__item">
+                        <strong>还没有已安装的 MCP 服务器</strong>
+                        <span>先从应用市场挑一个加入 Aliceloop，后面再继续补真实连接参数。</span>
                       </div>
-                    ))}
+                    )}
                   </div>
                 </div>
               ) : null}

@@ -9,19 +9,22 @@
 - `runtime/agentRuntime.ts` 多步 agent loop
 - 四原语 sandbox：`read` / `write` / `edit` / `bash`
 - `context/skills/` 下的 `SKILL.md` catalog
-- managed task tools、runtime scripts、provider config catalog
+- managed task tools、runtime scripts、model gateway config catalog
 - SSE session stream 与桌面端同步
 - artifact 与 memory distillation 编排
 
-当前 provider 层：
+当前模型网关层：
 
 - `MiniMax`
+- `AIHubMix`
 - `OpenAI`
 - `Anthropic`
 - `OpenRouter`
+- `AIHubMix` 默认走 `https://aihubmix.com/v1`
+- `transport=auto` 时，`claude*` 模型走 Anthropic 兼容接口，其余模型走 OpenAI 兼容接口
 
 后续扩展方向：
 
-- MCP client 集成：只连接用户从应用市场安装的 MCP 服务，不暴露 Aliceloop 自身为 MCP server
+- MCP client 深化：继续把已安装目录接到真实 transport，不暴露 Aliceloop 自身为 MCP server
 - ACP 兼容的外部 engine adapters
 - Claude Code / Codex / Gemini CLI 接入

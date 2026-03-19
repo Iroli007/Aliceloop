@@ -7,7 +7,7 @@ Aliceloop is a desktop-first local coding and computer-use agent.
 Core idea:
 
 - Aliceloop owns the host runtime
-- providers only supply reasoning
+- model gateways only supply reasoning
 - the built-in agent loop operates through four atomic primitives: `read`, `write`, `edit`, `bash`
 - session state, events, memories, artifacts, and sandbox runs stay inside the local daemon
 
@@ -24,7 +24,7 @@ packages/pdf-ingest
 
 Responsibilities:
 
-- `apps/desktop`: Electron shell, session UI, provider settings, runtime catalogs
+- `apps/desktop`: Electron shell, session UI, model gateway settings, runtime catalogs
 - `apps/daemon`: Fastify daemon, built-in agent runtime, context loading, persistence, SSE
 - `packages/runtime-core`: shared types and preview contracts
 - `packages/pdf-ingest`: document ingest and structure extraction
@@ -50,7 +50,7 @@ The daemon remains the source of truth for:
 - artifacts
 - memories
 - sandbox audit trail
-- provider configs
+- model gateway configs
 
 ## 4. Context Layer
 
@@ -86,7 +86,7 @@ Current shape:
 - tool lifecycle events persisted into `session_events`
 - post-turn memory reflection
 
-This replaced the old MiniMax-specific reply path.
+This replaced the old vendor-specific reply path.
 
 ## 6. Tool Model
 
@@ -115,22 +115,18 @@ Managed task tools currently cover:
 - review coach
 - runtime scripts
 
-## 7. Provider Layer
+## 7. Gateway Layer
 
-Provider orchestration is unified behind Vercel AI SDK.
-
-Supported provider kinds:
-
-- `minimax`
-- `openai`
-- `anthropic`
-- `openrouter`
+Model orchestration is unified behind Vercel AI SDK, with a centralized gateway registry.
 
 Current implementation rules:
 
-- `MiniMax`, `OpenAI`, and `OpenRouter` use OpenAI-compatible transport
-- `Anthropic` uses the Anthropic SDK transport
-- provider settings stay user-editable in the desktop shell
+- supported gateway profiles are `minimax`, `aihubmix`, `openai`, `anthropic`, and `openrouter`
+- `aihubmix` defaults to `transport=auto`
+- `claude*` models use the Anthropic-compatible path when `transport=auto`
+- all other models use the OpenAI-compatible path when `transport=auto`
+- direct providers keep explicit transports in the registry
+- gateway settings stay user-editable in the desktop shell
 
 ## 8. Persistence and Safety
 
@@ -162,14 +158,15 @@ Completed now:
 
 - Phase 1: `context/` skeleton and loader
 - Phase 2: built-in runtime and safety guard
-- Phase 3: provider/domain/schema updates
-- Phase 4: daemon wiring and MiniMax-specific cleanup
+- Phase 3: gateway/domain/schema updates
+- Phase 4: daemon wiring and vendor-specific cleanup
 - Phase 5: memory injection and basic reflection
 - Phase 6: `SKILL.md` catalog moved into `apps/daemon/src/context/skills/`
+- Phase 7: MCP marketplace catalog + installed-state flow
 
 Still pending:
 
-- first-class MCP client integration with app-market install flow for user-installed servers
+- real MCP transport wiring for user-installed servers
 - external engine adapters
 - browser / web skill adapters behind ACP or native tool bridges
 
@@ -198,7 +195,6 @@ apps/daemon/src/runtime/safetyGuard.ts
 Files now intentionally removed from the old path:
 
 ```text
-apps/daemon/src/services/minimaxRunner.ts
 apps/daemon/src/repositories/memoryRepository.ts
 ```
 

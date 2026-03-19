@@ -237,4 +237,12 @@ export const schemaStatements = [
       finished_at TEXT
     )
   `,
+  `
+    CREATE TABLE IF NOT EXISTS mcp_server_installs (
+      server_id TEXT PRIMARY KEY,
+      install_source TEXT NOT NULL,
+      installed_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `,
 ];

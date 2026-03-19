@@ -56,13 +56,13 @@ function buildLocalFallbackReply(userMessage: string | null) {
   const normalized = userMessage?.trim();
 
   if (!normalized) {
-    return "已收到你的消息。当前还没有配置 AI provider，所以这里先返回本地组装的 assistant 回复，确认 Aliceloop 的最小闭环已经打通。";
+    return "已收到你的消息。当前还没有配置可用的模型网关，所以这里先返回本地组装的 assistant 回复，确认 Aliceloop 的最小闭环已经打通。";
   }
 
   return [
     "已收到你的消息，Aliceloop 的最小闭环是通的。",
     `我收到的是：${normalized}`,
-    "当前还没有配置 AI provider，所以这里先返回本地组装的 assistant 回复。配置 API key 后，这里会切换成真实模型生成。",
+    "当前还没有配置可用的模型网关，所以这里先返回本地组装的 assistant 回复。配置 API key 后，这里会切换成真实模型生成。",
   ].join("\n\n");
 }
 
@@ -106,7 +106,7 @@ export async function runAgent(sessionId: string) {
         kind: "provider-completion",
         status: "done",
         title: "Local fallback reply",
-        detail: "No provider is configured, so Aliceloop returned a local assembled assistant reply.",
+        detail: "No enabled model gateway with an API key is configured, so Aliceloop returned a local assembled assistant reply.",
       });
       return;
     }

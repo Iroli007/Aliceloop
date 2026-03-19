@@ -15,13 +15,15 @@ export type DeviceStatus = "online" | "offline";
 export type SessionRole = "user" | "assistant" | "system";
 export type SessionMessageStatus = "pending" | "acked" | "error";
 export type AttachmentStatus = "ready" | "failed";
-export type ProviderKind = "minimax" | "openai" | "anthropic" | "openrouter";
-export type ProviderTransportKind = "openai-compatible" | "anthropic";
+export type ProviderKind = "minimax" | "aihubmix" | "openai" | "anthropic" | "openrouter";
+export type ProviderTransportKind = "auto" | "openai-compatible" | "anthropic";
 export type SandboxPrimitive = "read" | "write" | "edit" | "bash";
 export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
 export type SkillStatus = "available" | "planned";
 export type SkillMode = "instructional" | "task";
 export type McpServerStatus = "available" | "planned";
+export type McpInstallStatus = "not-installed" | "installed";
+export type McpServerSource = "marketplace" | "manual";
 export type RuntimeScriptStatus = "available" | "planned";
 export type SessionEventType =
   | "message.created"
@@ -237,9 +239,18 @@ export interface SkillDefinition {
 export interface McpServerDefinition {
   id: string;
   label: string;
+  description: string;
+  author: string;
   transport: "builtin" | "stdio" | "http";
   status: McpServerStatus;
   capabilities: string[];
+  tags: string[];
+  verified: boolean;
+  featured: boolean;
+  homepageUrl: string | null;
+  installStatus: McpInstallStatus;
+  installSource: McpServerSource;
+  installedAt: string | null;
 }
 
 export interface RuntimeScriptDefinition {

@@ -576,7 +576,7 @@ button {
   min-height: 100vh;
   height: 100vh;
   padding: 18px 0 16px;
-  background: #fcfcfb;
+  background: #ffffff;
   overflow: hidden;
   will-change: transform, filter;
 }
@@ -713,10 +713,10 @@ button {
   pointer-events: none;
   background: linear-gradient(
     180deg,
-    rgba(252, 252, 251, 0) 0%,
-    rgba(252, 252, 251, 0.78) 42%,
-    rgba(252, 252, 251, 0.94) 70%,
-    rgba(252, 252, 251, 1) 100%
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.78) 42%,
+    rgba(255, 255, 255, 0.94) 70%,
+    rgba(255, 255, 255, 1) 100%
   );
   z-index: 1;
 }
@@ -767,7 +767,7 @@ button {
 .workspace__message-body {
   padding: var(--workspace-message-padding-y) var(--workspace-message-padding-x);
   border-radius: 18px;
-  background: rgba(248, 248, 247, 0.96);
+  background: #ffffff;
   border: 1px solid rgba(15, 23, 42, 0.08);
   color: #1f2937;
   font-size: var(--workspace-message-font-size);
@@ -784,14 +784,14 @@ button {
 }
 
 .workspace__message--user .workspace__message-body {
-  background: rgba(238, 242, 246, 0.98);
+  background: #ffffff;
   border-color: rgba(121, 137, 160, 0.16);
 }
 
 .workspace__message--system .workspace__message-body {
   padding: 10px 14px;
   border-radius: 14px;
-  background: rgba(247, 242, 235, 0.9);
+  background: #ffffff;
   border-color: rgba(158, 131, 101, 0.16);
   color: #71523a;
   font-size: var(--workspace-system-font-size);
@@ -844,7 +844,7 @@ button {
   width: auto;
   padding: 16px 20px 14px;
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.92);
+  background: #ffffff;
   border: 1px solid rgba(15, 23, 42, 0.08);
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
   backdrop-filter: blur(20px);
@@ -1308,6 +1308,74 @@ button {
 
 .settings-panel__item a:hover {
   text-decoration: underline;
+}
+
+.mcp-toggle {
+  display: inline-flex;
+  gap: 10px;
+  padding: 6px;
+  border-radius: 18px;
+  background: rgba(240, 244, 248, 0.9);
+  width: fit-content;
+}
+
+.mcp-toggle__button {
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 14px;
+  background: transparent;
+  color: #607086;
+  font-weight: 600;
+}
+
+.mcp-toggle__button--active {
+  background: #ffffff;
+  color: #1f2937;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+}
+
+.mcp-card__header,
+.mcp-card__actions,
+.mcp-card__badges,
+.mcp-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.mcp-card__header,
+.mcp-card__actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mcp-card__title {
+  display: grid;
+  gap: 4px;
+}
+
+.mcp-card__title span,
+.mcp-card__hint {
+  color: #6b7788;
+  font-size: 13px;
+}
+
+.mcp-card__badge,
+.mcp-card__tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(239, 244, 249, 0.95);
+  color: #516174;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mcp-card__badge--featured {
+  background: rgba(140, 171, 189, 0.18);
+  color: #31576b;
 }
 
 .settings-actions {

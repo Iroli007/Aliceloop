@@ -2,12 +2,12 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
-  McpServerDefinition,
   RuntimeCatalogSnapshot,
   RuntimeScriptDefinition,
 } from "@aliceloop/runtime-core";
 import { getSkillDefinition, listSkillDefinitions } from "../context/skills/skillLoader";
 import { getDatabase } from "../db/client";
+import { listMcpServerDefinitions } from "./mcpServerRepository";
 import { listProviderConfigs } from "./providerRepository";
 import { listSandboxRuns } from "./sandboxRunRepository";
 import { getRuntimePresence } from "./sessionRepository";
@@ -26,23 +26,6 @@ const runtimeScriptsDir = resolveExistingPath([
 const daemonRoot = dirname(runtimeScriptsDir);
 const workspaceRoot = resolve(daemonRoot, "../..");
 const tsxCliPath = resolve(workspaceRoot, "node_modules/tsx/dist/cli.mjs");
-
-const mcpServers: McpServerDefinition[] = [
-  {
-    id: "filesystem-bridge",
-    label: "Filesystem Bridge",
-    transport: "builtin",
-    status: "planned",
-    capabilities: ["read", "write", "edit"],
-  },
-  {
-    id: "task-center-bridge",
-    label: "Task Center Bridge",
-    transport: "builtin",
-    status: "planned",
-    capabilities: ["tasks", "jobs", "artifacts"],
-  },
-];
 
 interface StoredRuntimeScriptDefinition extends RuntimeScriptDefinition {
   entryPath: string;
@@ -80,15 +63,7 @@ const runtimeScripts: StoredRuntimeScriptDefinition[] = [
   },
 ];
 
-export function listMcpServerDefinitions() {
-  return [...mcpServers];
-}
-
 export { getSkillDefinition, listSkillDefinitions };
-
-export function getMcpServerDefinition(serverId: string) {
-  return mcpServers.find((server) => server.id === serverId) ?? null;
-}
 
 function toPublicRuntimeScript(script: StoredRuntimeScriptDefinition): RuntimeScriptDefinition {
   return {

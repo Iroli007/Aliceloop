@@ -12,9 +12,16 @@ const providerDefinitions: ProviderDefinition[] = [
   {
     id: "minimax",
     label: "MiniMax",
-    transport: "openai-compatible",
-    defaultBaseUrl: "https://api.minimaxi.com/v1",
-    defaultModel: "MiniMax-M2.5",
+    transport: "anthropic",
+    defaultBaseUrl: "https://api.minimaxi.com/anthropic/v1",
+    defaultModel: "MiniMax-M2.7-highspeed",
+  },
+  {
+    id: "aihubmix",
+    label: "AIHubMix",
+    transport: "auto",
+    defaultBaseUrl: "https://aihubmix.com/v1",
+    defaultModel: "gpt-4o-mini",
   },
   {
     id: "openai",
