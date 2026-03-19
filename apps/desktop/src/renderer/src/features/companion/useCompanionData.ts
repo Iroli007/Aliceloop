@@ -93,6 +93,10 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
 
       return {
         ...snapshot,
+        session: {
+          ...snapshot.session,
+          updatedAt: event.createdAt,
+        },
         messages: upsertMessage(snapshot.messages, message),
       };
     }

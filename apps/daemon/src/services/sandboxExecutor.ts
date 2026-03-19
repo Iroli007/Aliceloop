@@ -16,7 +16,7 @@ const projectRoot = resolve(currentDir, "../../../../");
 const defaultAllowedReadRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedWriteRoots = [getDataDir(), getUploadsDir()];
 const defaultAllowedCwdRoots = [projectRoot, getDataDir(), getUploadsDir()];
-const defaultAllowedCommands = ["cat", "head", "tail", "ls", "node", "rg", "sed", "tsx", "wc"];
+const defaultAllowedCommands = ["cat", "find", "git", "head", "ls", "node", "npm", "pwd", "rg", "sed", "tsx", "wc"];
 const tsxCliPath = resolve(projectRoot, "node_modules/tsx/dist/cli.mjs");
 
 export class SandboxViolationError extends Error {

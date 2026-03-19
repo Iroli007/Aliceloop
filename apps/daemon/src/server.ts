@@ -59,6 +59,7 @@ import {
   listSessionEventsSince,
 } from "./repositories/sessionRepository";
 import { backfillTaskRunsFromJobs, getTaskRun, listTaskRuns } from "./repositories/taskRunRepository";
+import { abortAgentForSession } from "./runtime/agentRuntime";
 import { runProviderReply } from "./services/providerRunner";
 import { createPermissionSandboxExecutor } from "./services/sandboxExecutor";
 import { runManagedTask } from "./services/taskRunner";
@@ -276,76 +277,11 @@ export async function createServer() {
       });
     }
 
-    if (skill.status !== "available" || !skill.taskType || skill.taskType === "study-artifact") {
-      return reply.code(409).send({
-        error: "skill_not_runnable",
-        skill,
-      });
-    }
-
-    const body = request.body;
-
-    switch (skill.taskType) {
-      case "document-ingest":
-        if (!body.sourcePath?.trim()) {
-          return reply.code(400).send({
-            error: "sourcePath_required",
-          });
-        }
-
-        return runManagedTask({
-          taskType: "document-ingest",
-          title: body.title,
-          sourcePath: body.sourcePath.trim(),
-          sourceKind: body.sourceKind,
-          documentKind: body.documentKind,
-        });
-      case "review-coach":
-        return runManagedTask({
-          taskType: "review-coach",
-          sessionId: body.sessionId ?? null,
-          title: body.title,
-        });
-      case "script-runner":
-        if (skill.runtimeScriptId) {
-          const runtimeScript = getStoredRuntimeScriptDefinition(skill.runtimeScriptId);
-          if (!runtimeScript || runtimeScript.status !== "available") {
-            return reply.code(409).send({
-              error: "skill_not_runnable",
-              skill,
-            });
-          }
-
-          return runManagedTask({
-            taskType: "script-runner",
-            sessionId: body.sessionId ?? null,
-            title: body.title ?? `运行脚本 · ${runtimeScript.label}`,
-            command: runtimeScript.launchCommand,
-            args: [...runtimeScript.launchArgsPrefix, runtimeScript.entryPath, ...runtimeScript.defaultArgs, ...(Array.isArray(body.args) ? body.args : [])],
-            cwd: body.cwd ?? runtimeScript.defaultCwd,
-          });
-        }
-
-        if (!body.command?.trim()) {
-          return reply.code(400).send({
-            error: "command_required",
-          });
-        }
-
-        return runManagedTask({
-          taskType: "script-runner",
-          sessionId: body.sessionId ?? null,
-          title: body.title,
-          command: body.command.trim(),
-          args: Array.isArray(body.args) ? body.args : [],
-          cwd: body.cwd,
-        });
-      default:
-        return reply.code(409).send({
-          error: "skill_not_runnable",
-          skill,
-        });
-    }
+    return reply.code(409).send({
+      error: "skill_not_runnable",
+      detail: "Project skills are instructional SKILL.md entries. Use /api/tasks or /api/runtime/scripts for executable actions.",
+      skill,
+    });
   });
   server.get("/api/mcp/servers", async () => listMcpServerDefinitions());
   server.get<{ Params: McpServerParams }>("/api/mcp/servers/:id", async (request, reply) => {
@@ -538,15 +474,38 @@ export async function createServer() {
       Vary: "Origin",
     });
 
-    const initialEvents = listSessionEventsSince(sessionId, since);
     reply.raw.write("retry: 2000\n\n");
+
+    let ready = false;
+    const bufferedEvents: ReturnType<typeof listSessionEventsSince> = [];
+
+    const unsubscribe = subscribeToSession(sessionId, (event) => {
+      if (!ready) {
+        bufferedEvents.push(event);
+        return;
+      }
+
+      writeSseEvent(reply.raw.write.bind(reply.raw), event, event.seq);
+    });
+
+    const initialEvents = listSessionEventsSince(sessionId, since);
 
     for (const event of initialEvents) {
       writeSseEvent(reply.raw.write.bind(reply.raw), event, event.seq);
     }
 
-    const unsubscribe = subscribeToSession(sessionId, (event) => {
-      writeSseEvent(reply.raw.write.bind(reply.raw), event, event.seq);
+    const initialSeqs = new Set(initialEvents.map((event) => event.seq));
+    bufferedEvents
+      .filter((event) => event.seq > since && !initialSeqs.has(event.seq))
+      .sort((left, right) => left.seq - right.seq)
+      .forEach((event) => {
+        writeSseEvent(reply.raw.write.bind(reply.raw), event, event.seq);
+      });
+
+    ready = true;
+
+    request.raw.on("error", () => {
+      unsubscribe();
     });
 
     const keepAlive = setInterval(() => {
@@ -590,6 +549,7 @@ export async function createServer() {
     }
 
     if (role === "user" && result.created) {
+      abortAgentForSession(request.params.id);
       void runProviderReply(request.params.id);
     }
 

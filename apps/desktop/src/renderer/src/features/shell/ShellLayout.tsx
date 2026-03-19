@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent } from "react";
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
 import { useShellConversation } from "./useShellConversation";
@@ -14,6 +14,9 @@ interface ThreadGroup {
   label: string;
   threads: ReturnType<typeof useShellConversation>["threads"];
 }
+
+const sidebarMotionDurationMs = 240;
+const bottomStickThresholdPx = 96;
 
 function formatThreadId(threadId: string) {
   if (threadId.length <= 18) {
@@ -81,26 +84,91 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [activeSettingsTab, setActiveSettingsTab] = useState("providers");
   const [activeProviderId, setActiveProviderId] = useState("minimax");
   const [providerApiKeyInput, setProviderApiKeyInput] = useState("");
-  const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("https://api.minimaxi.com/v1");
-  const [providerModelInput, setProviderModelInput] = useState("MiniMax-M2.5");
+  const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("");
+  const [providerModelInput, setProviderModelInput] = useState("");
   const [providerEnabled, setProviderEnabled] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
   const [composerDraft, setComposerDraft] = useState("");
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
+  const [composerHeight, setComposerHeight] = useState(176);
+  const [composerReserveSpace, setComposerReserveSpace] = useState(192);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
   const motionTimerRef = useRef<number | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
+  const messagesContentRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLFormElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const previousSessionIdRef = useRef<string | null>(null);
+  const previousViewportHeightRef = useRef<number | null>(null);
+  const scrollSyncFrameRef = useRef<number | null>(null);
+  const scrollSyncTimeoutRef = useRef<number | null>(null);
   const providers = providerState.providers;
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
   const enabledProvider = providers.find((item) => item.enabled) ?? null;
+  const shellMainStyle = {
+    "--composer-height": `${composerHeight}px`,
+    "--composer-reserve-space": `${composerReserveSpace}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     return () => {
       if (motionTimerRef.current) {
         window.clearTimeout(motionTimerRef.current);
       }
+
+      if (scrollSyncFrameRef.current) {
+        window.cancelAnimationFrame(scrollSyncFrameRef.current);
+      }
+
+      if (scrollSyncTimeoutRef.current) {
+        window.clearTimeout(scrollSyncTimeoutRef.current);
+      }
     };
   }, []);
+
+  const syncViewportToBottom = (force = false) => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    if (!force && !shouldStickToBottomRef.current) {
+      return;
+    }
+
+    viewport.scrollTo({
+      top: viewport.scrollHeight,
+      behavior: "auto",
+    });
+    shouldStickToBottomRef.current = true;
+  };
+
+  const scheduleViewportBottomSync = (force = false) => {
+    if (!force && !shouldStickToBottomRef.current) {
+      return;
+    }
+
+    if (scrollSyncFrameRef.current) {
+      window.cancelAnimationFrame(scrollSyncFrameRef.current);
+    }
+
+    if (scrollSyncTimeoutRef.current) {
+      window.clearTimeout(scrollSyncTimeoutRef.current);
+    }
+
+    scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+      syncViewportToBottom(force);
+      scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+        syncViewportToBottom(force);
+      });
+    });
+
+    scrollSyncTimeoutRef.current = window.setTimeout(() => {
+      syncViewportToBottom(force);
+      scrollSyncTimeoutRef.current = null;
+    }, 140);
+  };
 
   useEffect(() => {
     if (!activeProvider) {
@@ -128,11 +196,88 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       return;
     }
 
-    viewport.scrollTo({
-      top: viewport.scrollHeight,
-      behavior: "smooth",
+    const updateStickiness = () => {
+      const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      shouldStickToBottomRef.current = distanceFromBottom <= bottomStickThresholdPx;
+    };
+
+    updateStickiness();
+    viewport.addEventListener("scroll", updateStickiness, { passive: true });
+
+    return () => {
+      viewport.removeEventListener("scroll", updateStickiness);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const sessionChanged = previousSessionIdRef.current !== conversation.sessionId;
+    previousSessionIdRef.current = conversation.sessionId;
+
+    if (!sessionChanged && !shouldStickToBottomRef.current) {
+      return;
+    }
+
+    scheduleViewportBottomSync(sessionChanged);
+  }, [composerHeight, composerReserveSpace, conversation.sessionId, conversation.messages, conversation.latestJob?.updatedAt]);
+
+  useEffect(() => {
+    const content = messagesContentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (!shouldStickToBottomRef.current) {
+        return;
+      }
+
+      scheduleViewportBottomSync();
     });
-  }, [conversation.messages.length, conversation.latestJob?.updatedAt]);
+
+    resizeObserver.observe(content);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const composer = composerRef.current;
+    const viewport = messagesViewportRef.current;
+    if (!composer || !viewport) {
+      return;
+    }
+
+    const updateComposerLayout = () => {
+      const viewportRect = viewport.getBoundingClientRect();
+      const composerRect = composer.getBoundingClientRect();
+      const nextViewportHeight = Math.ceil(viewportRect.height);
+      const nextHeight = Math.ceil(composer.getBoundingClientRect().height);
+      const nextReserveSpace = Math.max(nextHeight, Math.ceil(viewportRect.bottom - composerRect.top));
+      const viewportShrunk =
+        previousViewportHeightRef.current !== null && nextViewportHeight < previousViewportHeightRef.current;
+
+      previousViewportHeightRef.current = nextViewportHeight;
+      setComposerHeight((current) => (current === nextHeight ? current : nextHeight));
+      setComposerReserveSpace((current) => (current === nextReserveSpace ? current : nextReserveSpace));
+
+      if (viewportShrunk && shouldStickToBottomRef.current) {
+        scheduleViewportBottomSync(true);
+      }
+    };
+
+    updateComposerLayout();
+
+    const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateComposerLayout) : null;
+    resizeObserver?.observe(composer);
+    resizeObserver?.observe(viewport);
+    window.addEventListener("resize", updateComposerLayout);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateComposerLayout);
+    };
+  }, []);
 
   function toggleSidebar() {
     const nextCollapsed = !isSidebarCollapsed;
@@ -145,7 +290,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
     motionTimerRef.current = window.setTimeout(() => {
       setSidebarMotion(null);
-    }, 260);
+    }, sidebarMotionDurationMs);
   }
 
   async function saveActiveProvider() {
@@ -331,7 +476,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           </footer>
         </aside>
 
-        <main className="shell__main">
+        <main className="shell__main" style={shellMainStyle}>
           <header className="main__header">
             <div className="main__title">
               <strong>{conversation.sessionTitle}</strong>
@@ -340,9 +485,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
             </div>
           </header>
 
-          <section className="workspace">
+          <section ref={messagesViewportRef} className="workspace">
             <div className="workspace__thread">
-              <div ref={messagesViewportRef} className="workspace__messages">
+              <div ref={messagesContentRef} className="workspace__messages">
                 {conversation.messages.map((message) => (
                   <article
                     key={message.id}
@@ -370,11 +515,13 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     <span>{conversation.latestJob.title}</span>
                   </div>
                 ) : null}
+
+                <div ref={messagesEndRef} className="workspace__end-anchor" aria-hidden="true" />
               </div>
             </div>
           </section>
 
-          <form className="composer" onSubmit={submitComposer}>
+          <form ref={composerRef} className="composer" onSubmit={submitComposer}>
             <textarea
               className="composer__input composer__input--field"
               value={composerDraft}
@@ -488,7 +635,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                           <div className="provider-field">
                             <label>当前策略</label>
                             <div className="provider-field__box">
-                              先让 provider 稳定跑通真实会话，再继续把 artifact、skills 和更完整的 runtime loop 往上接。
+                              内置 coding agent 负责调度四原语和 skills；provider 只负责推理，不接管 Aliceloop 的 session、sandbox 和事件流。
                             </div>
                           </div>
 
@@ -513,7 +660,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                               className="provider-field__input"
                               value={providerBaseUrlInput}
                               onChange={(event) => setProviderBaseUrlInput(event.target.value)}
-                              placeholder="https://api.minimaxi.com/v1"
+                              placeholder={activeProvider.baseUrl}
                             />
                           </div>
 
@@ -523,7 +670,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                               className="provider-field__input"
                               value={providerModelInput}
                               onChange={(event) => setProviderModelInput(event.target.value)}
-                              placeholder="MiniMax-M2.5"
+                              placeholder={activeProvider.model}
                             />
                           </div>
 
@@ -622,12 +769,20 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     {runtimeCatalogs.skills.map((skill) => (
                       <div key={skill.id} className="settings-panel__item">
                         <strong>{skill.label}</strong>
+                        <span>{skill.description}</span>
                         <span>
-                          {skill.description}
+                          {skill.status}
                           {" · "}
-                          {skill.usesSandbox ? "uses sandbox" : "in-process"}
-                          {skill.taskType ? ` · ${skill.taskType}` : ""}
+                          {skill.mode}
+                          {" · "}
+                          {skill.allowedTools.length > 0 ? skill.allowedTools.join(" / ") : "no tools listed"}
                         </span>
+                        <span>{skill.sourcePath}</span>
+                        {skill.sourceUrl ? (
+                          <a href={skill.sourceUrl} target="_blank" rel="noreferrer">
+                            source
+                          </a>
+                        ) : null}
                       </div>
                     ))}
                   </div>

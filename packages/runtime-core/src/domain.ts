@@ -15,10 +15,12 @@ export type DeviceStatus = "online" | "offline";
 export type SessionRole = "user" | "assistant" | "system";
 export type SessionMessageStatus = "pending" | "acked" | "error";
 export type AttachmentStatus = "ready" | "failed";
-export type ProviderKind = "minimax";
+export type ProviderKind = "minimax" | "openai" | "anthropic" | "openrouter";
+export type ProviderTransportKind = "openai-compatible" | "anthropic";
 export type SandboxPrimitive = "read" | "write" | "edit" | "bash";
 export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
 export type SkillStatus = "available" | "planned";
+export type SkillMode = "instructional" | "task";
 export type McpServerStatus = "available" | "planned";
 export type RuntimeScriptStatus = "available" | "planned";
 export type SessionEventType =
@@ -33,7 +35,9 @@ export type SessionEventType =
   | "artifact.updated"
   | "attachment.ready"
   | "presence.updated"
-  | "runtime.offline";
+  | "runtime.offline"
+  | "tool.call.started"
+  | "tool.call.completed";
 
 export interface LibraryItem {
   id: string;
@@ -223,9 +227,10 @@ export interface SkillDefinition {
   label: string;
   description: string;
   status: SkillStatus;
-  taskType: TaskType | null;
-  usesSandbox: boolean;
-  runtimeScriptId: string | null;
+  mode: SkillMode;
+  sourcePath: string;
+  sourceUrl: string | null;
+  allowedTools: string[];
 }
 
 export interface McpServerDefinition {

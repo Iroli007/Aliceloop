@@ -15,6 +15,7 @@ import { getDesktopBridge } from "../../platform/desktopBridge";
 
 const desktopSessionDeviceStorageKey = "aliceloop-shell-session-device-id";
 const activeSessionStorageKey = "aliceloop-shell-active-session-id";
+const localDraftSessionId = "__local_draft__";
 const streamRetryMs = 2_000;
 
 interface SendResult {
@@ -71,6 +72,11 @@ function rememberActiveSessionId(sessionId: string) {
     return;
   }
 
+  if (sessionId === localDraftSessionId) {
+    window.localStorage.removeItem(activeSessionStorageKey);
+    return;
+  }
+
   window.localStorage.setItem(activeSessionStorageKey, sessionId);
 }
 
@@ -115,6 +121,25 @@ function buildThreadFromSnapshot(snapshot: SessionSnapshot): SessionThreadSummar
   };
 }
 
+function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
+  const now = new Date().toISOString();
+
+  return {
+    ...current,
+    session: {
+      id: localDraftSessionId,
+      title: "新对话",
+      createdAt: now,
+      updatedAt: now,
+    },
+    messages: [],
+    attachments: [],
+    jobs: [],
+    artifacts: [],
+    lastEventSeq: 0,
+  };
+}
+
 function createEmptySnapshotFromThread(thread: SessionThreadSummary, current: SessionSnapshot): SessionSnapshot {
   return {
     ...current,
@@ -132,10 +157,6 @@ function createEmptySnapshotFromThread(thread: SessionThreadSummary, current: Se
   };
 }
 
-function isPristineSession(snapshot: SessionSnapshot) {
-  return snapshot.messages.length === 0 && snapshot.attachments.length === 0 && snapshot.jobs.length === 0;
-}
-
 function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): SessionSnapshot {
   switch (event.type) {
     case "message.created":
@@ -150,7 +171,7 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
         ...snapshot,
         session: {
           ...snapshot.session,
-          updatedAt: message.createdAt,
+          updatedAt: event.createdAt,
         },
         messages: upsertMessage(snapshot.messages, message),
       };
@@ -236,12 +257,17 @@ export function useShellConversation(): ShellConversationState {
         const { daemonBaseUrl: baseUrl } = await bridge.getAppMeta();
         const nextThreads = await fetchSessionThreads(baseUrl);
         const preferredSessionId = nextThreads.find((thread) => thread.id === getStoredActiveSessionId())?.id;
-        const fallbackSessionId = nextThreads[0]?.id ?? previewSessionSnapshot.session.id;
+        const fallbackSessionId = nextThreads[0]?.id ?? localDraftSessionId;
 
         if (!cancelled) {
           setDaemonBaseUrl(baseUrl);
-          setThreads(nextThreads.length > 0 ? nextThreads : previewSessionThreads);
+          setThreads(nextThreads);
           setActiveSessionId(preferredSessionId ?? fallbackSessionId);
+          if (nextThreads.length === 0) {
+            setSnapshot((current) => createLocalDraftSnapshot(current));
+            lastEventSeqRef.current = 0;
+            setStatus("ready");
+          }
           setError(undefined);
         }
       } catch (loadError) {
@@ -260,7 +286,10 @@ export function useShellConversation(): ShellConversationState {
   }, [bridge]);
 
   useEffect(() => {
-    if (!daemonBaseUrl || !activeSessionId) {
+    if (!daemonBaseUrl || !activeSessionId || activeSessionId === localDraftSessionId) {
+      if (activeSessionId === localDraftSessionId) {
+        setStatus("ready");
+      }
       return;
     }
 
@@ -294,11 +323,15 @@ export function useShellConversation(): ShellConversationState {
   }, [activeSessionId, daemonBaseUrl]);
 
   useEffect(() => {
+    if (snapshot.session.id === localDraftSessionId || snapshot.messages.length === 0) {
+      return;
+    }
+
     setThreads((current) => upsertThread(current, buildThreadFromSnapshot(snapshot)));
   }, [snapshot]);
 
   useEffect(() => {
-    if (!daemonBaseUrl || !activeSessionId) {
+    if (!daemonBaseUrl || !activeSessionId || activeSessionId === localDraftSessionId) {
       return;
     }
 
@@ -307,6 +340,8 @@ export function useShellConversation(): ShellConversationState {
     let disposed = false;
     let retryTimer: number | null = null;
     let source: EventSource | null = null;
+    let reconciling = false;
+    let reconcileQueued = false;
 
     const refreshThreads = async () => {
       try {
@@ -319,12 +354,45 @@ export function useShellConversation(): ShellConversationState {
       }
     };
 
+    const reconcileSnapshot = async () => {
+      if (reconciling) {
+        reconcileQueued = true;
+        return;
+      }
+
+      reconciling = true;
+
+      do {
+        reconcileQueued = false;
+
+        try {
+          const nextSnapshot = await fetchSessionSnapshot(currentBaseUrl, currentSessionId);
+          if (!disposed) {
+            lastEventSeqRef.current = Math.max(lastEventSeqRef.current, nextSnapshot.lastEventSeq);
+            setSnapshot(nextSnapshot);
+            setStatus("ready");
+            setError(undefined);
+          }
+        } catch {
+          // Keep the live stream state when a background reconciliation fails.
+        }
+      } while (!disposed && reconcileQueued);
+
+      reconciling = false;
+    };
+
     const connect = () => {
       if (disposed) {
         return;
       }
 
       source = new EventSource(`${currentBaseUrl}/api/session/${currentSessionId}/stream?since=${lastEventSeqRef.current}`);
+
+      source.onopen = () => {
+        if (!disposed) {
+          void reconcileSnapshot();
+        }
+      };
 
       source.addEventListener("session", (event) => {
         const messageEvent = event as MessageEvent<string>;
@@ -337,8 +405,7 @@ export function useShellConversation(): ShellConversationState {
 
         if (
           sessionEvent.type === "message.created" ||
-          sessionEvent.type === "message.acked" ||
-          sessionEvent.type === "message.updated"
+          sessionEvent.type === "message.acked"
         ) {
           void refreshThreads();
         }
@@ -354,6 +421,18 @@ export function useShellConversation(): ShellConversationState {
       };
     };
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void reconcileSnapshot();
+      }
+    };
+
+    const handleWindowFocus = () => {
+      void reconcileSnapshot();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleWindowFocus);
     connect();
 
     return () => {
@@ -361,6 +440,8 @@ export function useShellConversation(): ShellConversationState {
       if (retryTimer) {
         window.clearTimeout(retryTimer);
       }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleWindowFocus);
       source?.close();
     };
   }, [activeSessionId, daemonBaseUrl]);
@@ -374,53 +455,22 @@ export function useShellConversation(): ShellConversationState {
   }
 
   async function createSession(): Promise<CreateSessionResult> {
-    if (!daemonBaseUrl) {
-      return {
-        ok: false,
-        error: "本地 daemon 还没连上。",
-      };
-    }
-
-    if (snapshot.session.id === activeSessionId && isPristineSession(snapshot)) {
+    if (activeSessionId === localDraftSessionId) {
       return {
         ok: true,
         sessionId: activeSessionId,
       };
     }
 
-    try {
-      const response = await fetch(`${daemonBaseUrl}/api/sessions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({}),
-      });
-
-      const thread = (await response.json()) as SessionThreadSummary;
-      if (!response.ok) {
-        return {
-          ok: false,
-          error: "新建线程失败",
-        };
-      }
-
-      setThreads((current) => upsertThread(current, thread));
-      setSnapshot((current) => createEmptySnapshotFromThread(thread, current));
-      lastEventSeqRef.current = 0;
-      setStatus("ready");
-      setError(undefined);
-      setActiveSessionId(thread.id);
-      return {
-        ok: true,
-        sessionId: thread.id,
-      };
-    } catch (createError) {
-      return {
-        ok: false,
-        error: createError instanceof Error ? createError.message : "新建线程失败",
-      };
-    }
+    setSnapshot((current) => createLocalDraftSnapshot(current));
+    lastEventSeqRef.current = 0;
+    setStatus("ready");
+    setError(undefined);
+    setActiveSessionId(localDraftSessionId);
+    return {
+      ok: true,
+      sessionId: localDraftSessionId,
+    };
   }
 
   async function sendMessage(content: string): Promise<SendResult> {
@@ -434,7 +484,31 @@ export function useShellConversation(): ShellConversationState {
     setPending(true);
 
     try {
-      const response = await fetch(`${daemonBaseUrl}/api/session/${activeSessionId}/messages`, {
+      let targetSessionId = activeSessionId;
+      let createdThread: SessionThreadSummary | null = null;
+
+      if (activeSessionId === localDraftSessionId) {
+        const createResponse = await fetch(`${daemonBaseUrl}/api/sessions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({}),
+        });
+
+        const createdPayload = (await createResponse.json()) as SessionThreadSummary & { error?: string };
+        if (!createResponse.ok) {
+          return {
+            ok: false,
+            error: createdPayload.error ?? "新建线程失败",
+          };
+        }
+
+        targetSessionId = createdPayload.id;
+        createdThread = createdPayload;
+      }
+
+      const response = await fetch(`${daemonBaseUrl}/api/session/${targetSessionId}/messages`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -460,11 +534,20 @@ export function useShellConversation(): ShellConversationState {
         };
       }
 
+      if (createdThread) {
+        setSnapshot((current) => createEmptySnapshotFromThread(createdThread as SessionThreadSummary, current));
+        lastEventSeqRef.current = 0;
+        setStatus("ready");
+        setError(undefined);
+        setActiveSessionId(createdThread.id);
+      }
+
       if (payload.message) {
         setSnapshot((current) => ({
           ...current,
           session: {
             ...current.session,
+            id: targetSessionId,
             updatedAt: payload.message?.createdAt ?? current.session.updatedAt,
           },
           messages: upsertMessage(current.messages, payload.message as SessionMessage),
@@ -495,7 +578,9 @@ export function useShellConversation(): ShellConversationState {
   const latestReply = [...snapshot.messages].reverse().find((message) => message.role !== "user") ?? null;
   const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
   const latestArtifact = snapshot.artifacts[0] ?? null;
-  const sessionTitle = threads.find((thread) => thread.id === activeSessionId)?.title ?? snapshot.session.title;
+  const sessionTitle =
+    (activeSessionId === localDraftSessionId ? null : threads.find((thread) => thread.id === activeSessionId)?.title) ??
+    snapshot.session.title;
 
   return {
     status,

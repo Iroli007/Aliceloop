@@ -4,9 +4,7 @@
 
 职责：
 
-- 最小核心 loop
-- 工具原语边界
-- 会话状态
-- 注意力索引更新
-- 高层记忆沉淀
-
+- 共享 domain types
+- session / event / artifact / memory / provider 合约
+- preview snapshot 与桌面预览数据
+- daemon 与 desktop 之间的稳定数据边界

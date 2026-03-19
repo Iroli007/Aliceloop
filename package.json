@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "packageManager": "npm@11.11.0",
-  "description": "Desktop-first AI runtime and study companion for TCM learners.",
+  "description": "Desktop-first local coding and computer-use agent runtime.",
   "scripts": {
     "build": "npm run build --workspace @aliceloop/runtime-core && npm run build --workspace @aliceloop/pdf-ingest && npm run build --workspace @aliceloop/daemon && npm run build --workspace @aliceloop/desktop",
     "dev:daemon": "npm run dev --workspace @aliceloop/daemon",

@@ -144,6 +144,23 @@ function summarizeSessionTitle(content: string) {
   return normalized.length > 24 ? `${normalized.slice(0, 24).trimEnd()}…` : normalized;
 }
 
+function toMessage(row: SessionMessageRow, attachments: Attachment[]): SessionMessage {
+  const attachmentMap = new Map(attachments.map((attachment) => [attachment.id, attachment]));
+
+  return {
+    id: row.id,
+    sessionId: row.sessionId,
+    clientMessageId: row.clientMessageId,
+    role: row.role,
+    content: row.content,
+    attachments: JSON.parse(row.attachmentIds)
+      .map((attachmentId: string) => attachmentMap.get(attachmentId))
+      .filter((attachment: Attachment | undefined): attachment is Attachment => Boolean(attachment)),
+    status: row.status,
+    createdAt: row.createdAt,
+  };
+}
+
 function toAttachment(row: AttachmentRow): Attachment {
   return {
     id: row.id,
@@ -204,20 +221,7 @@ function listMessages(sessionId: string, attachments: Attachment[]): SessionMess
     )
     .all(sessionId) as SessionMessageRow[];
 
-  const attachmentMap = new Map(attachments.map((attachment) => [attachment.id, attachment]));
-
-  return rows.map((row) => ({
-    id: row.id,
-    sessionId: row.sessionId,
-    clientMessageId: row.clientMessageId,
-    role: row.role,
-    content: row.content,
-    attachments: JSON.parse(row.attachmentIds)
-      .map((attachmentId: string) => attachmentMap.get(attachmentId))
-      .filter((attachment: Attachment | undefined): attachment is Attachment => Boolean(attachment)),
-    status: row.status,
-    createdAt: row.createdAt,
-  }));
+  return rows.map((row) => toMessage(row, attachments));
 }
 
 function listJobs(sessionId: string): JobRunDetail[] {
@@ -408,6 +412,7 @@ export function listSessionThreads(): SessionThreadSummary[] {
             ORDER BY created_at DESC, id DESC
             LIMIT 1
           )
+        WHERE COALESCE(message_counts.messageCount, 0) > 0
         ORDER BY sessions.updated_at DESC, sessions.created_at DESC
       `,
     )
@@ -479,19 +484,38 @@ function getMessageByClientMessageId(sessionId: string, clientMessageId: string)
     return null;
   }
 
-  const attachmentMap = new Map(attachments.map((attachment) => [attachment.id, attachment]));
-  return {
-    id: row.id,
-    sessionId: row.sessionId,
-    clientMessageId: row.clientMessageId,
-    role: row.role,
-    content: row.content,
-    attachments: JSON.parse(row.attachmentIds)
-      .map((attachmentId: string) => attachmentMap.get(attachmentId))
-      .filter((attachment: Attachment | undefined): attachment is Attachment => Boolean(attachment)),
-    status: row.status,
-    createdAt: row.createdAt,
-  };
+  return toMessage(row, attachments);
+}
+
+function getMessageById(sessionId: string, messageId: string): SessionMessage | null {
+  const db = getDatabase();
+  const attachments = listAttachments(sessionId);
+  const row = db
+    .prepare(
+      `
+        SELECT
+          id,
+          session_id AS sessionId,
+          client_message_id AS clientMessageId,
+          role,
+          content,
+          attachment_ids AS attachmentIds,
+          status,
+          source_device_id AS sourceDeviceId,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM session_messages
+        WHERE session_id = ?
+          AND id = ?
+      `,
+    )
+    .get(sessionId, messageId) as SessionMessageRow | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  return toMessage(row, attachments);
 }
 
 function recordEvent(
@@ -601,6 +625,19 @@ export function recordArtifactEvent(
 
 export function recordArtifactUpdate(sessionId: string, artifact: StudyArtifact) {
   return recordArtifactEvent(sessionId, "artifact.updated", { artifact }, artifact.updatedAt);
+}
+
+export function appendSessionEvent(
+  sessionId: string,
+  type: SessionEvent["type"],
+  payload: Record<string, unknown>,
+  createdAt = new Date().toISOString(),
+) {
+  const db = getDatabase();
+  return db.transaction(() => {
+    touchSession(sessionId, createdAt);
+    return recordEvent(sessionId, type, payload, createdAt);
+  })();
 }
 
 export function getSessionSnapshot(sessionId: string): SessionSnapshot {
@@ -774,6 +811,45 @@ export function createSessionMessage(input: CreateMessageInput): {
     message: result.message,
     events: result.events,
   };
+}
+
+export function updateSessionMessage(input: {
+  sessionId: string;
+  messageId: string;
+  content: string;
+  status?: SessionMessageStatus;
+}): {
+  message: SessionMessage;
+  event: SessionEvent;
+} {
+  const existing = getMessageById(input.sessionId, input.messageId);
+  if (!existing) {
+    throw new Error(`Message ${input.messageId} was not found in session ${input.sessionId}`);
+  }
+
+  const now = new Date().toISOString();
+  const nextMessage: SessionMessage = {
+    ...existing,
+    content: input.content,
+    status: input.status ?? existing.status,
+  };
+
+  const db = getDatabase();
+  const result = db.transaction(() => {
+    db.prepare(
+      `
+        UPDATE session_messages
+        SET content = ?, status = ?, updated_at = ?
+        WHERE id = ?
+      `,
+    ).run(nextMessage.content, nextMessage.status, now, input.messageId);
+
+    touchSession(input.sessionId, now);
+    const event = recordEvent(input.sessionId, "message.updated", { message: nextMessage }, now);
+    return { message: nextMessage, event };
+  })();
+
+  return result;
 }
 
 export function createAttachment(input: CreateAttachmentInput): {

@@ -134,41 +134,29 @@ async function main() {
 
     const skillsResponse = await fetch(`${baseUrl}/api/skills`);
     assert.equal(skillsResponse.status, 200, "skills endpoint should respond");
-    const skillsPayload = (await skillsResponse.json()) as Array<{ id: string; taskType: string | null; runtimeScriptId: string | null }>;
-    const skillDetailResponse = await fetch(`${baseUrl}/api/skills/script-runner`);
+    const skillsPayload = (await skillsResponse.json()) as Array<{
+      id: string;
+      mode: string;
+      sourcePath: string;
+      allowedTools: string[];
+    }>;
+    const skillDetailResponse = await fetch(`${baseUrl}/api/skills/coding-agent`);
     assert.equal(skillDetailResponse.status, 200, "skill detail endpoint should respond");
-    const skillDetailPayload = (await skillDetailResponse.json()) as { id: string; taskType: string | null; runtimeScriptId: string | null };
-    const skillRunResponse = await fetch(`${baseUrl}/api/skills/review-coach/run`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        title: "通过 skill 入口运行 review-coach",
-      }),
-    });
-    assert.equal(skillRunResponse.status, 200, "skill run endpoint should execute available skills");
-    const skillRunPayload = (await skillRunResponse.json()) as { task?: { taskType?: string; status?: string } };
-    const boundSkillRunResponse = await fetch(`${baseUrl}/api/skills/runtime-overview/run`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        title: "通过绑定 skill 运行 runtime-overview",
-        args: ["--skill-smoke"],
-      }),
-    });
-    assert.equal(boundSkillRunResponse.status, 200, "runtime-script-bound skill should execute");
-    const boundSkillRunPayload = (await boundSkillRunResponse.json()) as { task?: { taskType?: string; detail?: string } };
-    const plannedSkillRunResponse = await fetch(`${baseUrl}/api/skills/study-artifact/run`, {
+    const skillDetailPayload = (await skillDetailResponse.json()) as {
+      id: string;
+      mode: string;
+      sourcePath: string;
+      allowedTools: string[];
+    };
+    const skillRunResponse = await fetch(`${baseUrl}/api/skills/coding-agent/run`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({}),
     });
-    assert.equal(plannedSkillRunResponse.status, 409, "planned skills should not be runnable");
+    assert.equal(skillRunResponse.status, 409, "instructional skills should not expose run semantics");
+    const skillRunPayload = (await skillRunResponse.json()) as { error?: string; detail?: string };
 
     const mcpServersResponse = await fetch(`${baseUrl}/api/mcp/servers`);
     assert.equal(mcpServersResponse.status, 200, "mcp server endpoint should respond");
@@ -235,7 +223,7 @@ async function main() {
     assert(filteredTasks.length >= 1, "filtered task list should include at least one review-coach result");
     assert(
       listTaskRuns({ taskType: "review-coach", status: "done" }).length >= filteredTasks.length,
-      "repository view should include both direct task runs and skill-triggered runs",
+      "repository view should stay aligned with filtered task results",
     );
     assert(structurePayload.sections.length >= 3, "ingest should produce multiple sections");
     assert(blocksPayload.some((block) => block.content.toLowerCase().includes("sandbox")), "blocks should contain source text");
@@ -244,18 +232,16 @@ async function main() {
     assert(searchPayload.length > 0, "FTS search should return matching blocks");
     assert.equal(attentionPayload.currentLibraryItemId, ingestPayload.libraryItem.id, "attention should focus the latest ingested library");
     assert(attentionPayload.concepts.length > 0, "attention should expose inferred concepts");
+    assert(memoriesPayload.some((memory) => memory.source === "attention-index"), "ingest should distill an attention memory note");
     assert(memoriesPayload.some((memory) => memory.source === "review-coach"), "review-coach should create a memory note");
     assert.equal(memoryDetailPayload.source, "review-coach", "memory detail endpoint should resolve saved memory");
-    assert(skillsPayload.some((skill) => skill.id === "script-runner"), "skill catalog should include script-runner");
-    assert(
-      skillsPayload.some((skill) => skill.id === "runtime-overview" && skill.runtimeScriptId === "runtime-overview"),
-      "skill catalog should include runtime-script-bound skills",
-    );
-    assert.equal(skillDetailPayload.id, "script-runner", "skill detail endpoint should resolve the requested skill");
-    assert.equal(skillDetailPayload.runtimeScriptId, null, "generic script-runner should not be pre-bound to a single runtime script");
-    assert.equal(skillRunPayload.task?.taskType, "review-coach", "skill run endpoint should dispatch through task runner");
-    assert.equal(boundSkillRunPayload.task?.taskType, "script-runner", "bound skill should dispatch through script-runner");
-    assert(boundSkillRunPayload.task?.detail?.includes("runtime-overview"), "bound skill should capture runtime script output");
+    assert(skillsPayload.some((skill) => skill.id === "coding-agent"), "skill catalog should include coding-agent");
+    assert(skillsPayload.some((skill) => skill.id === "browser"), "skill catalog should include browser");
+    assert.equal(skillDetailPayload.id, "coding-agent", "skill detail endpoint should resolve the requested skill");
+    assert.equal(skillDetailPayload.mode, "instructional", "coding-agent should be an instructional skill");
+    assert(skillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/coding-agent/SKILL.md"));
+    assert(skillDetailPayload.allowedTools.includes("sandbox_bash"));
+    assert.equal(skillRunPayload.error, "skill_not_runnable", "instructional skill run should reject execution");
     assert(mcpServersPayload.length > 0, "mcp server catalog should expose planned entries");
     assert.equal(mcpServerDetailPayload.id, "filesystem-bridge", "mcp server detail endpoint should resolve requested server");
     assert(mcpServerDetailPayload.capabilities.includes("read"), "mcp server detail should include capabilities");
@@ -265,7 +251,7 @@ async function main() {
     assert(runtimeScriptRunPayload.task?.detail?.includes("runtime-overview"), "runtime script run should capture script output");
     assert(providersPayload.some((provider) => provider.id === "minimax"), "provider list should include minimax");
     assert(runtimeCatalogPayload.providers.some((provider) => provider.id === "minimax"), "runtime catalog should include providers");
-    assert(runtimeCatalogPayload.skills.some((skill) => skill.id === "script-runner"), "runtime catalog should include skills");
+    assert(runtimeCatalogPayload.skills.some((skill) => skill.id === "coding-agent"), "runtime catalog should include skills");
     assert(runtimeCatalogPayload.scripts.some((script) => script.id === "runtime-overview"), "runtime catalog should include runtime scripts");
     assert(runtimeCatalogPayload.mcpServers.some((server) => server.id === "filesystem-bridge"), "runtime catalog should include mcp servers");
     assert(runtimeCatalogPayload.recentSandboxRuns.length > 0, "runtime catalog should include recent sandbox runs");

@@ -1,12 +1,12 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   McpServerDefinition,
   RuntimeCatalogSnapshot,
   RuntimeScriptDefinition,
-  SkillDefinition,
 } from "@aliceloop/runtime-core";
+import { getSkillDefinition, listSkillDefinitions } from "../context/skills/skillLoader";
 import { getDatabase } from "../db/client";
 import { listProviderConfigs } from "./providerRepository";
 import { listSandboxRuns } from "./sandboxRunRepository";
@@ -26,7 +26,6 @@ const runtimeScriptsDir = resolveExistingPath([
 const daemonRoot = dirname(runtimeScriptsDir);
 const workspaceRoot = resolve(daemonRoot, "../..");
 const tsxCliPath = resolve(workspaceRoot, "node_modules/tsx/dist/cli.mjs");
-const projectSkillsDir = resolve(workspaceRoot, "skills");
 
 const mcpServers: McpServerDefinition[] = [
   {
@@ -50,16 +49,6 @@ interface StoredRuntimeScriptDefinition extends RuntimeScriptDefinition {
   defaultCwd: string;
   launchCommand: string;
   launchArgsPrefix: string[];
-}
-
-interface SkillFrontmatter {
-  name?: string;
-  label?: string;
-  description?: string;
-  status?: SkillDefinition["status"];
-  taskType?: SkillDefinition["taskType"];
-  usesSandbox?: string;
-  runtimeScriptId?: string;
 }
 
 const runtimeScripts: StoredRuntimeScriptDefinition[] = [
@@ -91,85 +80,11 @@ const runtimeScripts: StoredRuntimeScriptDefinition[] = [
   },
 ];
 
-function parseSkillFrontmatter(content: string): SkillFrontmatter {
-  const lines = content.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") {
-    return {};
-  }
-
-  const result: SkillFrontmatter = {};
-  for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line.trim() === "---") {
-      break;
-    }
-
-    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (!match) {
-      continue;
-    }
-
-    const [, rawKey, rawValue] = match;
-    const key = rawKey as keyof SkillFrontmatter;
-    result[key] = rawValue.trim() as never;
-  }
-
-  return result;
-}
-
-function coerceBoolean(value: string | undefined) {
-  return value?.trim().toLowerCase() === "true";
-}
-
-function normalizeRuntimeScriptId(value: string | undefined) {
-  const normalized = value?.trim() ?? "";
-  return normalized.length > 0 ? normalized : null;
-}
-
-function readProjectSkills() {
-  if (!existsSync(projectSkillsDir)) {
-    return [] satisfies SkillDefinition[];
-  }
-
-  return readdirSync(projectSkillsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => {
-      const skillPath = join(projectSkillsDir, entry.name, "SKILL.md");
-      if (!existsSync(skillPath)) {
-        return null;
-      }
-
-      const source = readFileSync(skillPath, "utf8");
-      const frontmatter = parseSkillFrontmatter(source);
-      if (!frontmatter.name || !frontmatter.description) {
-        return null;
-      }
-
-      return {
-        id: frontmatter.name,
-        label: frontmatter.label?.trim() || frontmatter.name,
-        description: frontmatter.description,
-        status: frontmatter.status === "planned" ? "planned" : "available",
-        taskType: frontmatter.taskType ?? null,
-        usesSandbox: coerceBoolean(frontmatter.usesSandbox),
-        runtimeScriptId: normalizeRuntimeScriptId(frontmatter.runtimeScriptId),
-      } satisfies SkillDefinition;
-    })
-    .filter((skill): skill is SkillDefinition => Boolean(skill))
-    .sort((left, right) => left.id.localeCompare(right.id));
-}
-
-export function listSkillDefinitions() {
-  return readProjectSkills();
-}
-
-export function getSkillDefinition(skillId: string) {
-  return listSkillDefinitions().find((skill) => skill.id === skillId) ?? null;
-}
-
 export function listMcpServerDefinitions() {
   return [...mcpServers];
 }
+
+export { getSkillDefinition, listSkillDefinitions };
 
 export function getMcpServerDefinition(serverId: string) {
   return mcpServers.find((server) => server.id === serverId) ?? null;

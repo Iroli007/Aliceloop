@@ -1,19 +1,8 @@
-import { type ProviderConfig, type ProviderKind } from "@aliceloop/runtime-core";
+import { listDefaultProviderConfigs, type ProviderConfig, type ProviderKind } from "@aliceloop/runtime-core";
 import { useEffect, useMemo, useState } from "react";
 import { getDesktopBridge } from "../../platform/desktopBridge";
 
-const previewProviderConfigs: ProviderConfig[] = [
-  {
-    id: "minimax",
-    label: "MiniMax",
-    baseUrl: "https://api.minimaxi.com/v1",
-    model: "MiniMax-M2.5",
-    enabled: false,
-    hasApiKey: false,
-    apiKeyMasked: null,
-    updatedAt: null,
-  },
-];
+const previewProviderConfigs: ProviderConfig[] = listDefaultProviderConfigs();
 
 interface SaveProviderInput {
   providerId: ProviderKind;

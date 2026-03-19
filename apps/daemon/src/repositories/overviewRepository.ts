@@ -5,10 +5,10 @@ import {
   type AttentionEvent,
   type AttentionState,
   type LibraryItem,
-  type MemoryNote,
   type ShellOverview,
   type StudyArtifact,
 } from "@aliceloop/runtime-core";
+import { listMemoryNotes } from "../context/memory/memoryRepository";
 import { getDatabase } from "../db/client";
 import { listTaskRuns } from "./taskRunRepository";
 
@@ -78,15 +78,6 @@ interface CreateLibraryItemInput {
   createdAt: string;
   updatedAt: string;
   lastAttentionLabel?: string | null;
-}
-
-interface CreateMemoryNoteInput {
-  id: string;
-  kind: MemoryNote["kind"];
-  title: string;
-  content: string;
-  source: string;
-  updatedAt: string;
 }
 
 export function upsertStudyArtifact(artifact: StudyArtifact) {
@@ -224,76 +215,6 @@ export function upsertLibraryItem(input: CreateLibraryItemInput) {
     .get(input.id) as LibraryItem;
 }
 
-export function createMemoryNote(input: CreateMemoryNoteInput) {
-  const db = getDatabase();
-  db.prepare(
-    `
-      INSERT INTO memory_notes (
-        id, kind, title, content, source, updated_at
-      ) VALUES (
-        @id, @kind, @title, @content, @source, @updatedAt
-      )
-    `,
-  ).run(input);
-
-  return db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        WHERE id = ?
-      `,
-    )
-    .get(input.id) as MemoryNote;
-}
-
-export function listMemoryNotes(limit = 50) {
-  const db = getDatabase();
-  return db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        ORDER BY updated_at DESC
-        LIMIT ?
-      `,
-    )
-    .all(Math.max(1, Math.min(limit, 200))) as MemoryNote[];
-}
-
-export function getMemoryNote(memoryId: string) {
-  const db = getDatabase();
-  const row = db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        WHERE id = ?
-      `,
-    )
-    .get(memoryId) as MemoryNote | undefined;
-
-  return row ?? null;
-}
-
 export function getAttentionState() {
   const db = getDatabase();
   const attentionRow = db
@@ -397,3 +318,5 @@ export function getShellOverview(): ShellOverview {
     taskRuns,
   };
 }
+
+export { createMemoryNote, getMemoryNote, listMemoryNotes, upsertMemoryNote } from "../context/memory/memoryRepository";

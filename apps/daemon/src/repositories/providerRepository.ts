@@ -1,12 +1,19 @@
-import { type ProviderConfig, type ProviderKind } from "@aliceloop/runtime-core";
+import {
+  createDefaultProviderConfig,
+  getProviderDefinition,
+  listProviderDefinitions,
+  type ProviderConfig,
+  type ProviderKind,
+  type ProviderTransportKind,
+} from "@aliceloop/runtime-core";
 import { getDatabase } from "../db/client";
+import { getProviderApiKey, setProviderApiKey } from "../providers/providerSecretStore";
 
 interface ProviderConfigRow {
   providerId: ProviderKind;
-  label: string;
   baseUrl: string;
   model: string;
-  apiKey: string | null;
+  legacyApiKey: string | null;
   enabled: number;
   updatedAt: string;
 }
@@ -22,6 +29,7 @@ interface UpdateProviderInput {
 export interface StoredProviderConfig {
   id: ProviderKind;
   label: string;
+  transport: ProviderTransportKind;
   baseUrl: string;
   model: string;
   apiKey: string | null;
@@ -29,20 +37,12 @@ export interface StoredProviderConfig {
   updatedAt: string | null;
 }
 
-const providerDefaults: Record<ProviderKind, StoredProviderConfig> = {
-  minimax: {
-    id: "minimax",
-    label: "MiniMax",
-    baseUrl: "https://api.minimaxi.com/v1",
-    model: "MiniMax-M2.5",
-    apiKey: null,
-    enabled: false,
-    updatedAt: null,
-  },
-};
-
 function normalizeConfigText(value: string) {
   return value.trim().replace(/^[\s"'“”'`]+|[\s"'“”'`。；，、]+$/g, "");
+}
+
+function normalizeSecretText(value: string) {
+  return value.trim();
 }
 
 function maskApiKey(apiKey: string | null) {
@@ -57,19 +57,55 @@ function maskApiKey(apiKey: string | null) {
   return `${apiKey.slice(0, 4)}••••${apiKey.slice(-4)}`;
 }
 
-function toStoredProviderConfig(row: ProviderConfigRow | undefined, providerId: ProviderKind): StoredProviderConfig {
-  if (!row) {
-    return providerDefaults[providerId];
+function clearLegacyApiKey(providerId: ProviderKind) {
+  const db = getDatabase();
+  db.prepare(
+    `
+      UPDATE provider_configs
+      SET api_key = NULL
+      WHERE provider_id = ?
+    `,
+  ).run(providerId);
+}
+
+function resolveProviderApiKey(providerId: ProviderKind, legacyApiKey: string | null) {
+  const keychainApiKey = getProviderApiKey(providerId);
+  const normalizedLegacyApiKey = legacyApiKey ? normalizeSecretText(legacyApiKey) : "";
+
+  if (keychainApiKey) {
+    if (normalizedLegacyApiKey) {
+      clearLegacyApiKey(providerId);
+    }
+    return keychainApiKey;
   }
 
+  if (!normalizedLegacyApiKey) {
+    return null;
+  }
+
+  try {
+    setProviderApiKey(providerId, normalizedLegacyApiKey);
+    clearLegacyApiKey(providerId);
+  } catch {
+    // Keep the legacy DB value usable if Keychain migration fails.
+  }
+
+  return normalizedLegacyApiKey;
+}
+
+function toStoredProviderConfig(row: ProviderConfigRow | undefined, providerId: ProviderKind): StoredProviderConfig {
+  const definition = getProviderDefinition(providerId);
+  const defaultConfig = createDefaultProviderConfig(providerId);
+
   return {
-    id: row.providerId,
-    label: row.label,
-    baseUrl: row.baseUrl,
-    model: row.model,
-    apiKey: row.apiKey,
-    enabled: Boolean(row.enabled),
-    updatedAt: row.updatedAt,
+    id: definition.id,
+    label: definition.label,
+    transport: definition.transport,
+    baseUrl: row?.baseUrl ?? defaultConfig.baseUrl,
+    model: row?.model ?? defaultConfig.model,
+    apiKey: resolveProviderApiKey(providerId, row?.legacyApiKey ?? null),
+    enabled: Boolean(row?.enabled ?? defaultConfig.enabled),
+    updatedAt: row?.updatedAt ?? defaultConfig.updatedAt,
   };
 }
 
@@ -93,10 +129,9 @@ function getProviderRow(providerId: ProviderKind) {
       `
         SELECT
           provider_id AS providerId,
-          label,
           base_url AS baseUrl,
           model,
-          api_key AS apiKey,
+          api_key AS legacyApiKey,
           enabled,
           updated_at AS updatedAt
         FROM provider_configs
@@ -111,7 +146,7 @@ export function getProviderConfig(providerId: ProviderKind): ProviderConfig {
 }
 
 export function listProviderConfigs() {
-  return (Object.keys(providerDefaults) as ProviderKind[]).map((providerId) => getProviderConfig(providerId));
+  return listProviderDefinitions().map((provider) => getProviderConfig(provider.id));
 }
 
 export function getStoredProviderConfig(providerId: ProviderKind): StoredProviderConfig {
@@ -119,23 +154,32 @@ export function getStoredProviderConfig(providerId: ProviderKind): StoredProvide
 }
 
 export function getActiveProviderConfig() {
-  return (Object.keys(providerDefaults) as ProviderKind[])
-    .map((providerId) => getStoredProviderConfig(providerId))
+  return listProviderDefinitions()
+    .map((provider) => getStoredProviderConfig(provider.id))
     .find((provider) => provider.enabled && provider.apiKey)
     ?? null;
 }
 
 export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig {
   const current = getStoredProviderConfig(input.providerId);
+  const definition = getProviderDefinition(input.providerId);
   const now = new Date().toISOString();
   const next: StoredProviderConfig = {
     ...current,
     baseUrl: input.baseUrl !== undefined ? normalizeConfigText(input.baseUrl) || current.baseUrl : current.baseUrl,
     model: input.model !== undefined ? normalizeConfigText(input.model) || current.model : current.model,
-    apiKey: input.apiKey !== undefined ? normalizeConfigText(input.apiKey) || current.apiKey : current.apiKey,
+    apiKey: current.apiKey,
     enabled: input.enabled ?? current.enabled,
     updatedAt: now,
   };
+
+  if (input.apiKey !== undefined) {
+    const normalizedApiKey = normalizeSecretText(input.apiKey);
+    if (normalizedApiKey) {
+      setProviderApiKey(input.providerId, normalizedApiKey);
+      next.apiKey = normalizedApiKey;
+    }
+  }
 
   const db = getDatabase();
   db.prepare(
@@ -143,22 +187,21 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
       INSERT INTO provider_configs (
         provider_id, label, base_url, model, api_key, enabled, updated_at
       ) VALUES (
-        @providerId, @label, @baseUrl, @model, @apiKey, @enabled, @updatedAt
+        @providerId, @label, @baseUrl, @model, NULL, @enabled, @updatedAt
       )
       ON CONFLICT(provider_id) DO UPDATE SET
         label = excluded.label,
         base_url = excluded.base_url,
         model = excluded.model,
-        api_key = excluded.api_key,
+        api_key = NULL,
         enabled = excluded.enabled,
         updated_at = excluded.updated_at
     `,
   ).run({
     providerId: next.id,
-    label: next.label,
+    label: definition.label,
     baseUrl: next.baseUrl,
     model: next.model,
-    apiKey: next.apiKey,
     enabled: next.enabled ? 1 : 0,
     updatedAt: next.updatedAt,
   });

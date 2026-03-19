@@ -16,7 +16,8 @@ import type {
   TaskType,
 } from "@aliceloop/runtime-core";
 import { getDataDir } from "../db/client";
-import { createMemoryNote, getPrimaryLibraryContext, getShellOverview } from "../repositories/overviewRepository";
+import { createMemoryNote, upsertMemoryNote } from "../context/memory/memoryRepository";
+import { getPrimaryLibraryContext, getShellOverview } from "../repositories/overviewRepository";
 import { markLibraryAsFocused, persistIngestedLibrary } from "../repositories/libraryRepository";
 import { upsertTaskRun } from "../repositories/taskRunRepository";
 import { createPermissionSandboxExecutor } from "./sandboxExecutor";
@@ -139,6 +140,45 @@ function buildReviewCoachContent() {
   return lines.join("\n");
 }
 
+function buildAttentionSummaryMemory(attentionState: AttentionState) {
+  const lines = [
+    `当前关注资料：${attentionState.currentLibraryTitle ?? "未命名资料"}`,
+    attentionState.currentSectionLabel ? `当前章节：${attentionState.currentSectionLabel}` : "当前章节：先从文档起始结构回看。",
+    `聚焦摘要：${attentionState.focusSummary}`,
+    attentionState.concepts.length > 0
+      ? `高频概念：${attentionState.concepts.slice(0, 5).join("、")}`
+      : "高频概念：先围绕最近的章节标题和主题词建立导航。",
+  ];
+
+  return upsertMemoryNote({
+    id: "memory-attention-primary",
+    kind: "attention-summary",
+    title: `关注摘要 · ${attentionState.currentLibraryTitle ?? "当前资料"}`,
+    content: lines.join("\n"),
+    source: "attention-index",
+    updatedAt: attentionState.updatedAt,
+  });
+}
+
+function createFailureMemory(input: {
+  taskType: TaskType;
+  title: string;
+  detail: string;
+  source: string;
+  context: string[];
+}) {
+  const lines = [`任务类型：${input.taskType}`, ...input.context, `失败原因：${input.detail}`];
+
+  return createMemoryNote({
+    id: `memory-${randomUUID()}`,
+    kind: "postmortem",
+    title: `失败复盘 · ${input.title}`,
+    content: lines.join("\n"),
+    source: input.source,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
 function canUseTextFallback(sourcePath: string) {
   const extension = extname(sourcePath).toLowerCase();
   return extension === ".txt" || extension === ".md" || extension === ".markdown";
@@ -197,6 +237,7 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       focusSummary: `刚完成 ${title} 的初版文档结构抽取，后续可以直接围绕章节和块级内容继续定位。`,
       concepts: inferConcepts(sections),
     });
+    const memoryNote = buildAttentionSummaryMemory(attentionState);
 
     const task = writeTaskRun(
       taskId,
@@ -219,11 +260,19 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       contentBlocks: persisted.contentBlocks,
       crossReferences: persisted.crossReferences,
       attentionState,
+      memoryNote,
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "资料解析失败";
     const task = writeTaskRun(taskId, "document-ingest", "failed", `资料解析失败 · ${title}`, detail, null);
-    return { task };
+    const memoryNote = createFailureMemory({
+      taskType: "document-ingest",
+      title,
+      detail,
+      source: "task-runner",
+      context: [`资料路径：${input.sourcePath}`],
+    });
+    return { task, memoryNote };
   }
 }
 
@@ -305,7 +354,17 @@ async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRu
   } catch (error) {
     const detail = error instanceof Error ? error.message : "本地脚本执行失败";
     const task = writeTaskRun(taskId, "script-runner", "failed", title, detail, input.sessionId ?? null);
-    return { task };
+    const memoryNote = createFailureMemory({
+      taskType: "script-runner",
+      title,
+      detail,
+      source: "task-runner",
+      context: [
+        `命令：${command}${args.length > 0 ? ` ${args.join(" ")}` : ""}`,
+        `工作目录：${cwd}`,
+      ],
+    });
+    return { task, memoryNote };
   }
 }
 

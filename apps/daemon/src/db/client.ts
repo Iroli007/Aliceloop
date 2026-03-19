@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  listProviderDefinitions,
   type ProviderKind,
   previewSessionSnapshot,
   previewShellOverview,
@@ -52,7 +53,6 @@ type SeedProviderConfig = {
   label: string;
   baseUrl: string;
   model: string;
-  apiKey: string | null;
   enabled: number;
   updatedAt: string;
 };
@@ -175,17 +175,14 @@ const previewEvents: SessionEvent[] = [
   },
 ];
 
-const seedProviderConfigs: SeedProviderConfig[] = [
-  {
-    providerId: "minimax",
-    label: "MiniMax",
-    baseUrl: "https://api.minimaxi.com/v1",
-    model: "MiniMax-M2.5",
-    apiKey: null,
-    enabled: 0,
-    updatedAt: previewSessionSnapshot.session.updatedAt,
-  },
-];
+const seedProviderConfigs: SeedProviderConfig[] = listProviderDefinitions().map((provider) => ({
+  providerId: provider.id,
+  label: provider.label,
+  baseUrl: provider.defaultBaseUrl,
+  model: provider.defaultModel,
+  enabled: 0,
+  updatedAt: previewSessionSnapshot.session.updatedAt,
+}));
 
 function seedLibraryItem(db: Database.Database, item: LibraryItem) {
   db.prepare(
@@ -245,6 +242,41 @@ function seedMemory(db: Database.Database, memory: MemoryNote) {
       )
     `,
   ).run(memory);
+
+  const row = db
+    .prepare(
+      `
+        SELECT rowid
+        FROM memory_notes
+        WHERE id = ?
+      `,
+    )
+    .get(memory.id) as { rowid: number } | undefined;
+
+  if (!row) {
+    return;
+  }
+
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO memory_notes_fts (
+        rowid,
+        memory_id,
+        kind,
+        content
+      ) VALUES (
+        @rowid,
+        @memoryId,
+        @kind,
+        @content
+      )
+    `,
+  ).run({
+    rowid: row.rowid,
+    memoryId: memory.id,
+    kind: memory.kind,
+    content: `${memory.title}\n${memory.content}`.trim(),
+  });
 }
 
 function seedFtsBlock(db: Database.Database, block: SeedContentBlock) {
@@ -371,7 +403,7 @@ function seedProviderConfig(db: Database.Database, config: SeedProviderConfig) {
       INSERT OR IGNORE INTO provider_configs (
         provider_id, label, base_url, model, api_key, enabled, updated_at
       ) VALUES (
-        @providerId, @label, @baseUrl, @model, @apiKey, @enabled, @updatedAt
+        @providerId, @label, @baseUrl, @model, NULL, @enabled, @updatedAt
       )
     `,
   ).run(config);
@@ -633,6 +665,23 @@ function runMigrations(db: Database.Database) {
           ELSE reason
         END
       WHERE id IN ('event-1', 'event-2')
+    `,
+  ).run();
+  db.prepare("DELETE FROM memory_notes_fts").run();
+  db.prepare(
+    `
+      INSERT INTO memory_notes_fts (
+        rowid,
+        memory_id,
+        kind,
+        content
+      )
+      SELECT
+        rowid,
+        id,
+        kind,
+        trim(title || char(10) || content)
+      FROM memory_notes
     `,
   ).run();
 }

@@ -93,7 +93,16 @@ async function main() {
     args: [scriptPath],
     cwd: tempDataDir,
   });
+  const failingScript = await runManagedTask({
+    taskType: "script-runner",
+    sessionId: session.id,
+    title: "运行失败脚本",
+    command: "node",
+    args: [join(tempDataDir, "missing-script.js")],
+    cwd: tempDataDir,
+  });
   const refreshedTaskList = listTaskRuns({ limit: 20 });
+  const refreshedOverview = getShellOverview();
 
   assert(studyTask, "study-artifact task should exist");
   assert.equal(studyTask.taskType, "study-artifact");
@@ -111,14 +120,27 @@ async function main() {
   assert(documentIngest.libraryItem, "document-ingest task should create a library item");
   assert.equal(documentIngest.task.taskType, "document-ingest");
   assert.equal(documentIngest.task.status, "done");
+  assert.equal(documentIngest.memoryNote?.kind, "attention-summary", "document-ingest should distill attention into memory");
   assert(reviewCoach.memoryNote, "review-coach task should create a memory note");
   assert.equal(reviewCoach.task.taskType, "review-coach");
   assert.equal(localScript.task.taskType, "script-runner");
   assert.equal(localScript.task.status, "done");
   assert(localScript.task.detail.includes("task-runner-ok"), "script-runner should capture stdout");
+  assert.equal(failingScript.task.taskType, "script-runner");
+  assert.equal(failingScript.task.status, "failed");
+  assert.equal(failingScript.memoryNote?.kind, "postmortem", "failed script-runner should create postmortem memory");
+  assert(
+    refreshedOverview.memories.some((memory) => memory.id === documentIngest.memoryNote?.id),
+    "overview should include distilled attention memory",
+  );
+  assert(
+    refreshedOverview.memories.some((memory) => memory.id === failingScript.memoryNote?.id),
+    "overview should include failure postmortem memory",
+  );
   assert(refreshedTaskList.some((task) => task.id === documentIngest.task.id), "task list should include document-ingest task");
   assert(refreshedTaskList.some((task) => task.id === reviewCoach.task.id), "task list should include review-coach task");
   assert(refreshedTaskList.some((task) => task.id === localScript.task.id), "task list should include script-runner task");
+  assert(refreshedTaskList.some((task) => task.id === failingScript.task.id), "task list should include failed script-runner task");
 
   console.log(
     JSON.stringify(

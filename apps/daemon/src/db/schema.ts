@@ -218,6 +218,11 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5(
+      memory_id UNINDEXED, kind UNINDEXED, content
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS sandbox_runs (
       id TEXT PRIMARY KEY,
       primitive TEXT NOT NULL,
