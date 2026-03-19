@@ -10,6 +10,7 @@ import {
   type DocumentKind,
   type DocumentStructure,
   type ProviderKind,
+  type ProviderTransportKind,
   type SectionSpan,
   type SessionRole,
   type SourceKind,
@@ -109,6 +110,7 @@ interface HeartbeatBody {
 }
 
 interface UpdateProviderBody {
+  transport?: ProviderTransportKind;
   baseUrl?: string;
   model?: string;
   apiKey?: string;

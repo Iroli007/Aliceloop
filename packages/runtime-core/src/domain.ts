@@ -214,6 +214,7 @@ export interface RuntimePresence {
 export interface ProviderConfig {
   id: ProviderKind;
   label: string;
+  transport: ProviderTransportKind;
   baseUrl: string;
   model: string;
   enabled: boolean;

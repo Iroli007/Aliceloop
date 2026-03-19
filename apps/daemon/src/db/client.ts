@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   listProviderDefinitions,
   type ProviderKind,
+  type ProviderTransportKind,
   previewSessionSnapshot,
   previewShellOverview,
   type AttentionEvent,
@@ -51,6 +52,7 @@ type SeedCrossReference = {
 type SeedProviderConfig = {
   providerId: ProviderKind;
   label: string;
+  transport: ProviderTransportKind;
   baseUrl: string;
   model: string;
   enabled: number;
@@ -178,6 +180,7 @@ const previewEvents: SessionEvent[] = [
 const seedProviderConfigs: SeedProviderConfig[] = listProviderDefinitions().map((provider) => ({
   providerId: provider.id,
   label: provider.label,
+  transport: provider.transport,
   baseUrl: provider.defaultBaseUrl,
   model: provider.defaultModel,
   enabled: 0,
@@ -401,9 +404,9 @@ function seedProviderConfig(db: Database.Database, config: SeedProviderConfig) {
   db.prepare(
     `
       INSERT OR IGNORE INTO provider_configs (
-        provider_id, label, base_url, model, api_key, enabled, updated_at
+        provider_id, label, transport, base_url, model, api_key, enabled, updated_at
       ) VALUES (
-        @providerId, @label, @baseUrl, @model, NULL, @enabled, @updatedAt
+        @providerId, @label, @transport, @baseUrl, @model, NULL, @enabled, @updatedAt
       )
     `,
   ).run(config);
@@ -509,6 +512,7 @@ function ensureColumn(db: Database.Database, tableName: string, columnName: stri
 
 function runMigrations(db: Database.Database) {
   ensureColumn(db, "study_artifacts", "body", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "provider_configs", "transport", "TEXT");
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");

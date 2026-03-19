@@ -59,6 +59,7 @@ export function createDefaultProviderConfig(providerId: ProviderKind): ProviderC
   return {
     id: definition.id,
     label: definition.label,
+    transport: definition.transport,
     baseUrl: definition.defaultBaseUrl,
     model: definition.defaultModel,
     enabled: false,

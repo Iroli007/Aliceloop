@@ -79,6 +79,7 @@ export const schemaStatements = [
     CREATE TABLE IF NOT EXISTS provider_configs (
       provider_id TEXT PRIMARY KEY,
       label TEXT NOT NULL,
+      transport TEXT,
       base_url TEXT NOT NULL,
       model TEXT NOT NULL,
       api_key TEXT,

@@ -11,6 +11,7 @@ import { getProviderApiKey, setProviderApiKey } from "../providers/providerSecre
 
 interface ProviderConfigRow {
   providerId: ProviderKind;
+  transport: ProviderTransportKind | null;
   baseUrl: string;
   model: string;
   legacyApiKey: string | null;
@@ -20,6 +21,7 @@ interface ProviderConfigRow {
 
 interface UpdateProviderInput {
   providerId: ProviderKind;
+  transport?: ProviderTransportKind;
   baseUrl?: string;
   model?: string;
   apiKey?: string;
@@ -43,6 +45,19 @@ function normalizeConfigText(value: string) {
 
 function normalizeSecretText(value: string) {
   return value.trim();
+}
+
+function inferProviderTransport(baseUrl: string | undefined, fallback: ProviderTransportKind): ProviderTransportKind {
+  if (!baseUrl) {
+    return fallback;
+  }
+
+  const normalized = baseUrl.trim().toLowerCase();
+  if (normalized.includes("/anthropic")) {
+    return "anthropic";
+  }
+
+  return fallback;
 }
 
 function maskApiKey(apiKey: string | null) {
@@ -96,12 +111,13 @@ function resolveProviderApiKey(providerId: ProviderKind, legacyApiKey: string | 
 function toStoredProviderConfig(row: ProviderConfigRow | undefined, providerId: ProviderKind): StoredProviderConfig {
   const definition = getProviderDefinition(providerId);
   const defaultConfig = createDefaultProviderConfig(providerId);
+  const baseUrl = row?.baseUrl ?? defaultConfig.baseUrl;
 
   return {
     id: definition.id,
     label: definition.label,
-    transport: definition.transport,
-    baseUrl: row?.baseUrl ?? defaultConfig.baseUrl,
+    transport: row?.transport ?? inferProviderTransport(baseUrl, definition.transport),
+    baseUrl,
     model: row?.model ?? defaultConfig.model,
     apiKey: resolveProviderApiKey(providerId, row?.legacyApiKey ?? null),
     enabled: Boolean(row?.enabled ?? defaultConfig.enabled),
@@ -113,6 +129,7 @@ function toPublicProviderConfig(config: StoredProviderConfig): ProviderConfig {
   return {
     id: config.id,
     label: config.label,
+    transport: config.transport,
     baseUrl: config.baseUrl,
     model: config.model,
     enabled: config.enabled,
@@ -129,6 +146,7 @@ function getProviderRow(providerId: ProviderKind) {
       `
         SELECT
           provider_id AS providerId,
+          transport,
           base_url AS baseUrl,
           model,
           api_key AS legacyApiKey,
@@ -166,6 +184,7 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
   const now = new Date().toISOString();
   const next: StoredProviderConfig = {
     ...current,
+    transport: input.transport ?? inferProviderTransport(input.baseUrl ?? current.baseUrl, current.transport),
     baseUrl: input.baseUrl !== undefined ? normalizeConfigText(input.baseUrl) || current.baseUrl : current.baseUrl,
     model: input.model !== undefined ? normalizeConfigText(input.model) || current.model : current.model,
     apiKey: current.apiKey,
@@ -185,12 +204,13 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
   db.prepare(
     `
       INSERT INTO provider_configs (
-        provider_id, label, base_url, model, api_key, enabled, updated_at
+        provider_id, label, transport, base_url, model, api_key, enabled, updated_at
       ) VALUES (
-        @providerId, @label, @baseUrl, @model, NULL, @enabled, @updatedAt
+        @providerId, @label, @transport, @baseUrl, @model, NULL, @enabled, @updatedAt
       )
       ON CONFLICT(provider_id) DO UPDATE SET
         label = excluded.label,
+        transport = excluded.transport,
         base_url = excluded.base_url,
         model = excluded.model,
         api_key = NULL,
@@ -200,6 +220,7 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
   ).run({
     providerId: next.id,
     label: definition.label,
+    transport: next.transport,
     baseUrl: next.baseUrl,
     model: next.model,
     enabled: next.enabled ? 1 : 0,
