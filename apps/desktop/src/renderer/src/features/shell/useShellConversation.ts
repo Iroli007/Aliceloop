@@ -12,19 +12,12 @@ import {
   type ToolApproval,
 } from "@aliceloop/runtime-core";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  buildFolderUploadPayload,
-  fileToBase64,
-  type FolderUploadPayload,
-  type PreparedAttachmentInput,
-} from "../uploads/filePayloads";
 import { getDesktopBridge } from "../../platform/desktopBridge";
 
 const desktopSessionDeviceStorageKey = "aliceloop-shell-session-device-id";
 const activeSessionStorageKey = "aliceloop-shell-active-session-id";
 const localDraftSessionId = "__local_draft__";
 const streamRetryMs = 2_000;
-const sessionLoadRetryMs = 2_000;
 
 interface SendResult {
   ok: boolean;
@@ -37,6 +30,15 @@ interface CreateSessionResult extends SendResult {
 
 interface UploadResult extends SendResult {
   attachment?: Attachment;
+}
+
+interface FolderUploadPayload {
+  folderName: string;
+  files: Array<{
+    relativePath: string;
+    mimeType: string;
+    contentBase64: string;
+  }>;
 }
 
 export interface ShellConversationState {
@@ -62,7 +64,11 @@ export interface ShellConversationState {
   sendMessage(content: string, attachmentIds?: string[]): Promise<SendResult>;
   uploadAttachment(file: File): Promise<UploadResult>;
   uploadFolder(files: File[]): Promise<UploadResult>;
-  uploadPreparedAttachment(input: PreparedAttachmentInput): Promise<UploadResult>;
+  uploadPreparedAttachment(input: {
+    fileName: string;
+    mimeType: string;
+    contentBase64: string;
+  }): Promise<UploadResult>;
   uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult>;
   stopResponse(): Promise<SendResult>;
   approveToolApproval(approvalId: string): Promise<SendResult>;
@@ -164,6 +170,62 @@ function buildThreadFromSnapshot(snapshot: SessionSnapshot): SessionThreadSummar
 
 function isProviderCompletionActive(job: JobRunDetail | null) {
   return job?.status === "running" || job?.status === "queued";
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const [, base64 = ""] = result.split(",", 2);
+      resolve(base64);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function buildFolderUploadPayload(files: File[]): Promise<FolderUploadPayload | null> {
+  if (files.length === 0) {
+    return null;
+  }
+
+  const firstRelativePath = files[0].webkitRelativePath;
+  if (!firstRelativePath) {
+    return null;
+  }
+
+  const folderName = firstRelativePath.split("/").filter(Boolean)[0] ?? "folder";
+  const payloadFiles: FolderUploadPayload["files"] = [];
+
+  for (const file of files) {
+    const relativePath = file.webkitRelativePath;
+    if (!relativePath) {
+      return null;
+    }
+
+    const segments = relativePath.split("/").filter(Boolean);
+    const relativeSegments = segments[0] === folderName ? segments.slice(1) : segments;
+    const normalizedRelativePath = relativeSegments.join("/");
+    if (!normalizedRelativePath) {
+      continue;
+    }
+
+    payloadFiles.push({
+      relativePath: normalizedRelativePath,
+      mimeType: file.type || "application/octet-stream",
+      contentBase64: await fileToBase64(file),
+    });
+  }
+
+  if (payloadFiles.length === 0) {
+    return null;
+  }
+
+  return {
+    folderName,
+    files: payloadFiles,
+  };
 }
 
 function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
@@ -325,16 +387,10 @@ export function useShellConversation(): ShellConversationState {
 
   useEffect(() => {
     let cancelled = false;
-    let retryTimer: number | null = null;
 
     async function load() {
       try {
         const { daemonBaseUrl: baseUrl } = await bridge.getAppMeta();
-        if (cancelled) {
-          return;
-        }
-
-        setDaemonBaseUrl(baseUrl);
         const nextThreads = await fetchSessionThreads(baseUrl);
         const preferredSessionId = nextThreads.find((thread) => thread.id === getStoredActiveSessionId())?.id;
         const fallbackSessionId = nextThreads[0]?.id ?? localDraftSessionId;
@@ -354,10 +410,6 @@ export function useShellConversation(): ShellConversationState {
         if (!cancelled) {
           setStatus("error");
           setError(loadError instanceof Error ? loadError.message : "Failed to load shell session");
-          retryTimer = window.setTimeout(() => {
-            retryTimer = null;
-            void load();
-          }, sessionLoadRetryMs);
         }
       }
     }
@@ -366,9 +418,6 @@ export function useShellConversation(): ShellConversationState {
 
     return () => {
       cancelled = true;
-      if (retryTimer) {
-        window.clearTimeout(retryTimer);
-      }
     };
   }, [bridge]);
 
@@ -383,7 +432,6 @@ export function useShellConversation(): ShellConversationState {
     const currentBaseUrl = daemonBaseUrl;
     const currentSessionId = activeSessionId;
     let cancelled = false;
-    let retryTimer: number | null = null;
     setStatus("loading");
 
     async function loadSnapshot() {
@@ -399,10 +447,6 @@ export function useShellConversation(): ShellConversationState {
         if (!cancelled) {
           setStatus("error");
           setError(loadError instanceof Error ? loadError.message : "Failed to load shell session");
-          retryTimer = window.setTimeout(() => {
-            retryTimer = null;
-            void loadSnapshot();
-          }, sessionLoadRetryMs);
         }
       }
     }
@@ -411,9 +455,6 @@ export function useShellConversation(): ShellConversationState {
 
     return () => {
       cancelled = true;
-      if (retryTimer) {
-        window.clearTimeout(retryTimer);
-      }
     };
   }, [activeSessionId, daemonBaseUrl]);
 

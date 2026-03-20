@@ -4,7 +4,6 @@ import { getDesktopBridge } from "../../platform/desktopBridge";
 
 const desktopDeviceStorageKey = "aliceloop-desktop-device-id";
 const HEARTBEAT_INTERVAL_MS = 10_000;
-const SHELL_LOAD_RETRY_MS = 2_000;
 
 export type ShellState =
   | {
@@ -51,16 +50,11 @@ export function useShellData(): ShellState {
 
   useEffect(() => {
     let cancelled = false;
-    let retryTimer: number | null = null;
 
     async function load() {
       try {
-        const [{ daemonBaseUrl: baseUrl }, runtimePing] = await Promise.all([bridge.getAppMeta(), bridge.pingRuntime()]);
-        if (cancelled) {
-          return;
-        }
-
-        setDaemonBaseUrl(baseUrl);
+        const [{ daemonBaseUrl }, runtimePing] = await Promise.all([bridge.getAppMeta(), bridge.pingRuntime()]);
+        setDaemonBaseUrl(daemonBaseUrl);
 
         const runtimeStatus = runtimePing.ok
           ? bridge.mode === "electron"
@@ -68,7 +62,7 @@ export function useShellData(): ShellState {
             : "浏览器预览已连接本地 runtime"
           : runtimePing.message ?? "本地 runtime 未启动";
 
-        const response = await fetch(`${baseUrl}${shellOverviewRoute}`);
+        const response = await fetch(`${daemonBaseUrl}${shellOverviewRoute}`);
         if (!response.ok) {
           throw new Error(`Failed to load shell overview (${response.status})`);
         }
@@ -90,10 +84,6 @@ export function useShellData(): ShellState {
             runtimeStatus: "使用预览数据渲染桌面壳",
             error: error instanceof Error ? error.message : "Unknown shell error",
           });
-          retryTimer = window.setTimeout(() => {
-            retryTimer = null;
-            void load();
-          }, SHELL_LOAD_RETRY_MS);
         }
       }
     }
@@ -102,9 +92,6 @@ export function useShellData(): ShellState {
 
     return () => {
       cancelled = true;
-      if (retryTimer) {
-        window.clearTimeout(retryTimer);
-      }
     };
   }, [bridge]);
 

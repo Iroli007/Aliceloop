@@ -1,6 +1,5 @@
 import type { Attachment } from "@aliceloop/runtime-core";
-import { useMemo, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
-import { getDesktopBridge } from "../../platform/desktopBridge";
+import { useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
 import type { CompanionState } from "./useCompanionData";
 
 interface CompanionLayoutProps {
@@ -53,12 +52,9 @@ function getArtifactBody(body: string | undefined, summary: string) {
 }
 
 export function CompanionLayout({ state }: CompanionLayoutProps) {
-  const desktopBridge = useMemo(() => getDesktopBridge(), []);
   const [draft, setDraft] = useState("");
   const [queuedAttachments, setQueuedAttachments] = useState<Attachment[]>([]);
   const [composerError, setComposerError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const onlineDevices = state.snapshot.devices.filter((device) => device.status === "online");
   const latestJobs = state.snapshot.jobs.slice(0, 3);
@@ -129,73 +125,6 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
     }
 
     input.value = "";
-  }
-
-  async function handleFolderChange(event: ChangeEvent<HTMLInputElement>) {
-    const input = event.currentTarget;
-    const files = Array.from(input.files ?? []);
-    if (files.length === 0) {
-      return;
-    }
-
-    setComposerError(null);
-    const result = await state.uploadFolder(files);
-    if (!result.ok) {
-      setComposerError(result.error ?? "文件夹上传失败");
-      input.value = "";
-      return;
-    }
-
-    const attachment = result.attachment;
-    if (attachment) {
-      setQueuedAttachments((current) => mergeAttachments(current, [attachment]));
-    }
-
-    input.value = "";
-  }
-
-  async function openElectronAttachmentPicker() {
-    if (runtimeOffline || state.pendingUpload || desktopBridge.mode !== "electron") {
-      return;
-    }
-
-    setComposerError(null);
-    const selection = await desktopBridge.openFileOrFolder();
-    if (selection.canceled || selection.entries.length === 0) {
-      return;
-    }
-
-    const uploaded: Attachment[] = [];
-
-    for (const entry of selection.entries) {
-      const result = entry.kind === "file"
-        ? await state.uploadPreparedAttachment({
-            fileName: entry.name,
-            mimeType: entry.mimeType,
-            contentBase64: entry.contentBase64,
-          })
-        : await state.uploadPreparedFolder({
-            folderName: entry.name,
-            files: entry.files.map((file) => ({
-              relativePath: file.relativePath,
-              mimeType: file.mimeType,
-              contentBase64: file.contentBase64,
-            })),
-          });
-
-      if (!result.ok) {
-        setComposerError(result.error ?? `${entry.kind === "file" ? "文件" : "文件夹"}上传失败`);
-        continue;
-      }
-
-      if (result.attachment) {
-        uploaded.push(result.attachment);
-      }
-    }
-
-    if (uploaded.length > 0) {
-      setQueuedAttachments((current) => mergeAttachments(current, uploaded));
-    }
   }
 
   return (
@@ -342,58 +271,16 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
           disabled={state.pendingMessage}
         />
         <div className="companion__composer-actions">
-          <div className="companion__composer-upload-group">
-            {desktopBridge.mode === "electron" ? (
-              <button
-                type="button"
-                className="companion__file-button"
-                onClick={() => {
-                  void openElectronAttachmentPicker();
-                }}
-                disabled={runtimeOffline || state.pendingUpload}
-              >
-                {state.pendingUpload ? "上传中..." : "上传附件"}
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  className="companion__file-button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={runtimeOffline || state.pendingUpload}
-                >
-                  {state.pendingUpload ? "上传中..." : "上传文件"}
-                </button>
-                <button
-                  type="button"
-                  className="companion__file-button"
-                  onClick={() => folderInputRef.current?.click()}
-                  disabled={runtimeOffline || state.pendingUpload}
-                >
-                  {state.pendingUpload ? "上传中..." : "上传文件夹"}
-                </button>
-              </>
-            )}
+          <label className={`companion__file-button${runtimeOffline ? " companion__file-button--disabled" : ""}`}>
             <input
-              ref={fileInputRef}
-              className="companion__file-input"
               type="file"
               multiple
               onChange={handleFileChange}
               disabled={runtimeOffline || state.pendingUpload}
             />
-            <input
-              ref={folderInputRef}
-              className="companion__file-input"
-              type="file"
-              multiple
-              directory=""
-              webkitdirectory=""
-              onChange={handleFolderChange}
-              disabled={runtimeOffline || state.pendingUpload}
-            />
-          </div>
-          <button className="companion__send-button" type="submit" disabled={runtimeOffline || state.pendingMessage}>
+            {state.pendingUpload ? "上传中..." : "上传附件"}
+          </label>
+          <button type="submit" disabled={runtimeOffline || state.pendingMessage}>
             {state.pendingMessage ? "发送中..." : "发送"}
           </button>
         </div>

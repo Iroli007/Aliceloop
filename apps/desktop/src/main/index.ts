@@ -5,9 +5,8 @@ import { fileURLToPath } from "node:url";
 
 const daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? "http://127.0.0.1:3030";
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const goldenHeightToWidthRatio = 0.618;
-const defaultWindowHeight = Math.round(920 * 0.9);
-const defaultWindowWidth = Math.round(defaultWindowHeight / goldenHeightToWidthRatio);
+
+const devServerUrl = process.env.MAIN_WINDOW_VITE_DEV_SERVER_URL;
 
 type DesktopPickedFile = {
   kind: "file";
@@ -113,31 +112,25 @@ async function collectFolderFiles(folderPath: string): Promise<DesktopPickedFold
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    width: defaultWindowWidth,
-    height: defaultWindowHeight,
+    width: 1500,
+    height: 920,
     minWidth: 1120,
     minHeight: 760,
     titleBarStyle: "hiddenInset",
     backgroundColor: "#edf2fb",
     webPreferences: {
-      preload: join(__dirname, "../preload/index.mjs"),
+      preload: join(__dirname, "../preload/index.js"),
       sandbox: false,
     },
   });
 
-  const rendererUrl = process.env.ELECTRON_RENDERER_URL;
-
-  if (!app.isPackaged && rendererUrl) {
-    window.loadURL(rendererUrl);
+  if (devServerUrl) {
+    window.loadURL(devServerUrl);
   } else {
     window.loadFile(join(__dirname, "../renderer/index.html"));
   }
 
   return window;
-}
-
-function getTargetWindow() {
-  return BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null;
 }
 
 ipcMain.handle("app:get-meta", () => ({
@@ -163,10 +156,33 @@ ipcMain.handle("runtime:ping", async () => {
 });
 
 ipcMain.handle("dialog:open-file-or-folder", async () => {
-  const window = getTargetWindow();
+  const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  let properties: Array<"openFile" | "openDirectory" | "multiSelections"> = ["openFile", "openDirectory", "multiSelections"];
+
+  if (process.platform === "darwin") {
+    const choice = await dialog.showMessageBox(window, {
+      type: "question",
+      buttons: ["打开文件", "打开文件夹", "取消"],
+      defaultId: 0,
+      cancelId: 2,
+      message: "选择要上传的内容",
+      detail: "macOS 的原生打开面板在文件和文件夹混选时，对文件夹选择不稳定。这里先明确选择类型，再进入系统对话框。",
+    });
+
+    if (choice.response === 2) {
+      return {
+        canceled: true,
+        entries: [],
+      };
+    }
+
+    properties = choice.response === 1
+      ? ["openDirectory", "multiSelections"]
+      : ["openFile", "multiSelections"];
+  }
+
   const result = await dialog.showOpenDialog(window, {
-    buttonLabel: "上传",
-    properties: ["openFile", "openDirectory", "multiSelections"],
+    properties,
   });
 
   if (result.canceled || result.filePaths.length === 0) {
@@ -196,25 +212,6 @@ ipcMain.handle("dialog:open-file-or-folder", async () => {
     canceled: false,
     entries,
   };
-});
-
-ipcMain.handle("window:minimize", () => {
-  const window = getTargetWindow();
-  window?.minimize();
-});
-
-ipcMain.handle("window:toggle-maximize", () => {
-  const window = getTargetWindow();
-  if (!window) {
-    return;
-  }
-
-  if (window.isMaximized()) {
-    window.unmaximize();
-    return;
-  }
-
-  window.maximize();
 });
 
 app.whenReady().then(() => {

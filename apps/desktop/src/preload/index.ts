@@ -4,6 +4,4 @@ contextBridge.exposeInMainWorld("aliceloopDesktop", {
   getAppMeta: () => ipcRenderer.invoke("app:get-meta"),
   pingRuntime: () => ipcRenderer.invoke("runtime:ping"),
   openFileOrFolder: () => ipcRenderer.invoke("dialog:open-file-or-folder"),
-  minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
-  toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggle-maximize"),
 });
