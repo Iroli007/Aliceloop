@@ -1,4 +1,4 @@
-import type { Attachment } from "@aliceloop/runtime-core";
+import type { Attachment, SandboxPermissionProfile } from "@aliceloop/runtime-core";
 import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
@@ -6,6 +6,7 @@ import { useShellConversation } from "./useShellConversation";
 import { useRuntimeCatalogs } from "./useRuntimeCatalogs";
 import { useRuntimeSettings } from "./useRuntimeSettings";
 import type { ShellState } from "./useShellData";
+import { getDesktopBridge } from "../../platform/desktopBridge";
 
 interface ShellLayoutProps {
   state: ShellState;
@@ -73,6 +74,39 @@ function getThreadDateParts(value: string | null) {
   };
 }
 
+function isImageMimeType(mimeType: string): boolean {
+  return mimeType.startsWith("image/");
+}
+
+function getAttachmentLabel(attachments: Attachment[]): string | null {
+  if (attachments.length === 0) {
+    return null;
+  }
+
+  const images = attachments.filter((a) => isImageMimeType(a.mimeType));
+  const files = attachments.filter((a) => !isImageMimeType(a.mimeType));
+
+  const parts: string[] = [];
+
+  if (images.length > 0) {
+    if (images.length === 1) {
+      parts.push("Image #1");
+    } else {
+      for (let i = 1; i <= images.length; i++) {
+        parts.push(`Image #${i}`);
+      }
+    }
+  }
+
+  if (files.length > 0) {
+    for (let i = 1; i <= files.length; i++) {
+      parts.push(`code #${i}`);
+    }
+  }
+
+  return parts.join(" · ");
+}
+
 function groupThreadsByDate(threads: ReturnType<typeof useShellConversation>["threads"]): ThreadGroup[] {
   const groups: ThreadGroup[] = [];
 
@@ -105,6 +139,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const runtimeCatalogs = useRuntimeCatalogs();
   const runtimeSettings = useRuntimeSettings();
   const conversation = useShellConversation();
+  const desktopBridge = getDesktopBridge();
   const threadGroups = groupThreadsByDate(conversation.threads);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [sidebarMotion, setSidebarMotion] = useState<"opening" | "closing" | null>(null);
@@ -116,7 +151,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [providerModelInput, setProviderModelInput] = useState("");
   const [providerEnabled, setProviderEnabled] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
-  const [sandboxProfileInput, setSandboxProfileInput] = useState<"restricted" | "full-access">("restricted");
+  const [sandboxProfileInput, setSandboxProfileInput] = useState<SandboxPermissionProfile>("development");
   const [sandboxNotice, setSandboxNotice] = useState<string | null>(null);
   const [mcpView, setMcpView] = useState<"marketplace" | "installed">("marketplace");
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
@@ -128,6 +163,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [permissionDropdownOpen, setPermissionDropdownOpen] = useState(false);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const approvalDockRef = useRef<HTMLDivElement | null>(null);
+  const [approvalAttachments, setApprovalAttachments] = useState<Attachment[]>([]);
   const motionTimerRef = useRef<number | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
   const messagesContentRef = useRef<HTMLDivElement | null>(null);
@@ -144,6 +182,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
   const enabledProvider = providers.find((item) => item.enabled) ?? null;
   const activeToolApproval = conversation.pendingToolApprovals[0] ?? null;
+  const isComposerBusy = conversation.isResponding || conversation.isAwaitingToolApproval;
   const installedMcpServers = runtimeCatalogs.mcpServers.filter((server) => server.installStatus === "installed");
   const visibleMcpServers = (mcpView === "installed" ? installedMcpServers : runtimeCatalogs.mcpServers)
     .slice()
@@ -264,7 +303,68 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }
 
     scheduleViewportBottomSync(sessionChanged);
-  }, [composerHeight, composerReserveSpace, conversation.sessionId, conversation.messages, conversation.latestJob?.updatedAt]);
+  }, [composerHeight, composerReserveSpace, conversation.sessionId, conversation.messages, conversation.latestJob?.updatedAt, conversation.pendingToolApprovals]);
+
+  // Scroll approval card into view when it appears
+  useEffect(() => {
+    if (!activeToolApproval) {
+      return;
+    }
+    // Clear attachments from previous approval
+    setApprovalAttachments([]);
+    // Wait for DOM render then scroll
+    const frame = requestAnimationFrame(() => {
+      const viewport = messagesViewportRef.current;
+      if (!viewport) {
+        return;
+      }
+      viewport.scrollTo({
+        top: viewport.scrollHeight,
+        behavior: "smooth",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [conversation.pendingToolApprovals.length]);
+
+  // Handle paste (image drop) on approval dock
+  useEffect(() => {
+    const dock = approvalDockRef.current;
+    if (!dock) {
+      return;
+    }
+
+    function handlePaste(event: ClipboardEvent) {
+      const items = Array.from(event.clipboardData?.items ?? []);
+      const imageItems = items.filter((item) => item.kind === "file" && item.type.startsWith("image/"));
+      if (imageItems.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+
+      for (const item of imageItems) {
+        const file = item.getAsFile();
+        if (!file) {
+          continue;
+        }
+
+        void (async () => {
+          const result = await conversation.uploadAttachment(file);
+          if (result.ok && result.attachment) {
+            setApprovalAttachments((current) => {
+              if (current.find((a) => a.id === result.attachment!.id)) {
+                return current;
+              }
+              return [...current, result.attachment!];
+            });
+          }
+        })();
+      }
+    }
+
+    dock.addEventListener("paste", handlePaste);
+    return () => dock.removeEventListener("paste", handlePaste);
+  }, [conversation]);
 
   useEffect(() => {
     const content = messagesContentRef.current;
@@ -377,8 +477,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
     setSandboxNotice(
       sandboxProfileInput === "full-access"
-        ? "完全访问沙箱已启用。后续 bash 仍然会逐条等待确认。"
-        : "有一定权限的沙箱已启用。默认根目录现在包含项目目录，上传的文件夹也会自动加入授权范围。",
+        ? "完全访问权限已启用。AI Agent 现在会直接按宿主用户权限执行，不再附加路径、命令或逐条 bash 审批限制。"
+        : "开发模式沙箱已启用。默认开放项目目录、数据目录和上传目录，上传的文件夹也会自动加入授权范围。",
     );
   }
 
@@ -404,7 +504,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       return;
     }
 
-    if (conversation.isResponding) {
+    if (isComposerBusy) {
       setComposerNotice(null);
       const result = await conversation.stopResponse();
       if (!result.ok) {
@@ -479,6 +579,17 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     if (!result.ok) {
       setComposerNotice(result.error ?? "命令审批失败");
     }
+    setApprovalAttachments([]);
+  }
+
+  async function handleCopyMessage(messageId: string, content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
+      setTimeout(() => setCopiedMessageId(null), 1800);
+    } catch {
+      // silent fail
+    }
   }
 
   async function handleComposerFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -510,23 +621,112 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     input.value = "";
   }
 
-  function openComposerFilePicker() {
+  async function openComposerFilePicker() {
     if (conversation.pendingUpload || conversation.pending) {
       return;
     }
 
     composerAddFileButtonRef.current?.blur();
-    composerFileInputRef.current?.click();
+    if (desktopBridge.mode !== "electron") {
+      composerFileInputRef.current?.click();
+      return;
+    }
+
+    setComposerNotice(null);
+    const selection = await desktopBridge.openFileOrFolder();
+    if (selection.canceled || selection.entries.length === 0) {
+      return;
+    }
+
+    const uploaded: Attachment[] = [];
+    for (const entry of selection.entries) {
+      const result = entry.kind === "file"
+        ? await conversation.uploadPreparedAttachment({
+            fileName: entry.name,
+            mimeType: entry.mimeType,
+            contentBase64: entry.contentBase64,
+          })
+        : await conversation.uploadPreparedFolder({
+            folderName: entry.name,
+            files: entry.files.map((file) => ({
+              relativePath: file.relativePath,
+              mimeType: file.mimeType,
+              contentBase64: file.contentBase64,
+            })),
+          });
+
+      if (!result.ok) {
+        setComposerNotice(result.error ?? `${entry.kind === "file" ? "文件" : "文件夹"}上传失败`);
+        continue;
+      }
+
+      if (result.attachment) {
+        uploaded.push(result.attachment);
+      }
+    }
+
+    if (uploaded.length > 0) {
+      setQueuedAttachments((current) => mergeAttachments(current, uploaded));
+    }
   }
 
-  const composerPrimaryActionLabel = conversation.isResponding
+  const composerPrimaryActionLabel = conversation.isAwaitingToolApproval
     ? conversation.stoppingResponse
-      ? "正在停止输出"
-      : "停止输出"
-    : "发送消息";
-  const composerPrimaryActionDisabled = conversation.isResponding
+      ? "正在停止等待中的命令审批"
+      : "等待命令确认，点击可停止"
+    : conversation.isResponding
+      ? conversation.stoppingResponse
+        ? "正在停止输出"
+        : "停止输出"
+      : "发送消息";
+  const composerPrimaryActionDisabled = isComposerBusy
     ? conversation.stoppingResponse
     : conversation.pending || !composerDraft.trim();
+  const approvalCard = activeToolApproval ? (
+    <div className="approval-card">
+      <div className="approval-card__accent" />
+      <div className="approval-card__body">
+        <div className="approval-card__head">
+          <div className="approval-card__title-row">
+            <svg className="approval-card__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="1" y="2" width="14" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.4" />
+              <circle cx="3.8" cy="4.6" r="0.8" fill="#ef6b5e" />
+              <circle cx="5.8" cy="4.6" r="0.8" fill="#f5bf4f" />
+              <circle cx="7.8" cy="4.6" r="0.8" fill="#61c554" />
+              <path d="M4 8h3M4 10.5h5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+            </svg>
+            <strong>{activeToolApproval.title}</strong>
+            <span className="approval-card__chip">需人工确认</span>
+          </div>
+          {activeToolApproval.detail ? (
+            <p className="approval-card__detail">{activeToolApproval.detail}</p>
+          ) : null}
+        </div>
+        <div className="approval-card__command-wrap">
+          <pre className="approval-card__command"><code>{activeToolApproval.toolName === "sandbox_bash" ? <><span className="approval-card__prompt">$</span> {activeToolApproval.commandLine}</> : activeToolApproval.commandLine}</code></pre>
+          <span className="approval-card__cwd">{activeToolApproval.cwd}</span>
+        </div>
+        <div className="approval-card__actions">
+          <button
+            type="button"
+            className="approval-card__btn approval-card__btn--reject"
+            onClick={() => void resolveToolApproval("reject")}
+            disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
+          >
+            拒绝
+          </button>
+          <button
+            type="button"
+            className="approval-card__btn approval-card__btn--approve"
+            onClick={() => void resolveToolApproval("approve")}
+            disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
+          >
+            {conversation.resolvingToolApprovalId === activeToolApproval.id ? "处理中…" : "允许执行"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <>
@@ -681,79 +881,71 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           </header>
 
           <section ref={messagesViewportRef} className="workspace">
-            <div className="workspace__thread">
+            <div className={`workspace__thread${activeToolApproval ? " workspace__thread--approval-active" : ""}`}>
               <div ref={messagesContentRef} className="workspace__messages">
                 {conversation.messages.map((message) => (
                   <article
                     key={message.id}
-                    className={`workspace__message workspace__message--${message.role}`}
+                    className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
                   >
-                    <div className="workspace__message-label">
-                      {message.role === "user" ? "You" : message.role === "assistant" ? "Aliceloop" : "System"}
-                    </div>
-                    <div className="workspace__message-body">{message.content}</div>
                     {message.attachments.length > 0 ? (
-                      <div className="workspace__message-attachments">
-                        {message.attachments.map((attachment) => (
-                          <span key={attachment.id} className="workspace__attachment-chip">
-                            {attachment.fileName}
-                          </span>
-                        ))}
+                      <div className="workspace__message-label">
+                        {getAttachmentLabel(message.attachments)}
                       </div>
                     ) : null}
+                    <div className="workspace__message-body">{message.content}</div>
+                    <button
+                      type="button"
+                      className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
+                      onClick={() => void handleCopyMessage(message.id, message.content)}
+                      aria-label="复制"
+                    >
+                      {copiedMessageId === message.id ? (
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                          <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      ) : (
+                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                          <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                          <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                        </svg>
+                      )}
+                    </button>
                   </article>
                 ))}
-
-                {activeToolApproval ? (
-                  <div className="approval-card">
-                    <div className="approval-card__accent" />
-                    <div className="approval-card__body">
-                      <div className="approval-card__head">
-                        <div className="approval-card__title-row">
-                          <svg className="approval-card__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-                            <rect x="1" y="2" width="14" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.4" />
-                            <circle cx="3.8" cy="4.6" r="0.8" fill="#ef6b5e" />
-                            <circle cx="5.8" cy="4.6" r="0.8" fill="#f5bf4f" />
-                            <circle cx="7.8" cy="4.6" r="0.8" fill="#61c554" />
-                            <path d="M4 8h3M4 10.5h5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-                          </svg>
-                          <strong>Bash 指令确认</strong>
-                          <span className="approval-card__chip">需人工确认</span>
-                        </div>
-                        {activeToolApproval.detail ? (
-                          <p className="approval-card__detail">{activeToolApproval.detail}</p>
-                        ) : null}
-                      </div>
-                      <div className="approval-card__command-wrap">
-                        <pre className="approval-card__command"><code><span className="approval-card__prompt">$</span> {activeToolApproval.commandLine}</code></pre>
-                        <span className="approval-card__cwd">{activeToolApproval.cwd}</span>
-                      </div>
-                      <div className="approval-card__actions">
-                        <button
-                          type="button"
-                          className="approval-card__btn approval-card__btn--reject"
-                          onClick={() => void resolveToolApproval("reject")}
-                          disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
-                        >
-                          拒绝
-                        </button>
-                        <button
-                          type="button"
-                          className="approval-card__btn approval-card__btn--approve"
-                          onClick={() => void resolveToolApproval("approve")}
-                          disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
-                        >
-                          {conversation.resolvingToolApprovalId === activeToolApproval.id ? "处理中…" : "允许执行"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
 
                 <div ref={messagesEndRef} className="workspace__end-anchor" aria-hidden="true" />
               </div>
             </div>
           </section>
+
+          {approvalCard ? (
+            <div ref={approvalDockRef} className="composer__approval-dock" role="region" aria-label="命令审批">
+              {approvalCard}
+              {approvalAttachments.length > 0 ? (
+                <div className="composer__attachment-queue" style={{ marginTop: 8 }}>
+                  {approvalAttachments.map((attachment) => (
+                    <div key={attachment.id} className="composer__attachment-pill">
+                      <div className="composer__attachment-copy">
+                        <strong>{attachment.fileName}</strong>
+                        <span>{formatBytes(attachment.byteSize)}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="composer__attachment-remove"
+                        aria-label={`移除 ${attachment.fileName}`}
+                        onClick={() => {
+                          setApprovalAttachments((current) => current.filter((item) => item.id !== attachment.id));
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           <form ref={composerRef} className="composer" onSubmit={submitComposer}>
             {queuedAttachments.length > 0 ? (
@@ -793,12 +985,14 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   type="button"
                   className="composer__add-file-button"
                   aria-label={conversation.pendingUpload ? "上传中" : "添加文件等"}
-                  onClick={openComposerFilePicker}
+                  onClick={() => { void openComposerFilePicker(); }}
                   disabled={conversation.pendingUpload || conversation.pending}
                 >
                   <span className="composer__add-file-button-icon" aria-hidden="true">+</span>
                 </button>
-                <span className="composer__add-file-tooltip">{conversation.pendingUpload ? "上传中..." : "添加文件等"}</span>
+                <span className="composer__add-file-tooltip">
+                  {conversation.pendingUpload ? "上传中..." : "打开文件或文件夹"}
+                </span>
                 <input
                   ref={composerFileInputRef}
                   className="composer__file-input"
@@ -816,7 +1010,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   onClick={() => { setModelDropdownOpen((v) => !v); setPermissionDropdownOpen(false); }}
                 >
                   <span className="composer__toolbar-btn-icon">⚡</span>
-                  <span>{enabledProvider ? enabledProvider.model : "选择模型"}</span>
+                  <span>{enabledProvider ? enabledProvider.label : "模型"}</span>
                   <span className="composer__toolbar-btn-caret">▾</span>
                 </button>
                 {modelDropdownOpen ? (
@@ -847,17 +1041,17 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   className={`composer__toolbar-btn${runtimeSettings.settings.sandboxProfile === "full-access" ? " composer__toolbar-btn--warn" : ""}`}
                   onClick={() => { setPermissionDropdownOpen((v) => !v); setModelDropdownOpen(false); }}
                 >
-                  <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问权限" : "默认权限"}</span>
+                  <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问权限" : "开发模式"}</span>
                   <span className="composer__toolbar-btn-caret">▾</span>
                 </button>
                 {permissionDropdownOpen ? (
                   <div className="composer__dropdown">
                     <button
                       type="button"
-                      className={`composer__dropdown-item${runtimeSettings.settings.sandboxProfile === "restricted" ? " composer__dropdown-item--active" : ""}`}
-                      onClick={() => { void runtimeSettings.save({ sandboxProfile: "restricted" }); setPermissionDropdownOpen(false); }}
+                      className={`composer__dropdown-item${runtimeSettings.settings.sandboxProfile === "development" ? " composer__dropdown-item--active" : ""}`}
+                      onClick={() => { void runtimeSettings.save({ sandboxProfile: "development" }); setPermissionDropdownOpen(false); }}
                     >
-                      默认权限
+                      开发模式
                     </button>
                     <button
                       type="button"
@@ -870,15 +1064,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 ) : null}
               </div>
 
+              {conversation.isAwaitingToolApproval ? (
+                <span className="composer__status-chip">等待命令确认</span>
+              ) : null}
+
               <span className="composer__spacer" />
               <button
                 type="submit"
-                className={`composer__send${conversation.isResponding ? " composer__send--stop" : ""}`}
+                className={`composer__send${conversation.isAwaitingToolApproval ? " composer__send--waiting" : conversation.isResponding ? " composer__send--stop" : ""}`}
                 disabled={composerPrimaryActionDisabled}
                 aria-label={composerPrimaryActionLabel}
                 title={composerPrimaryActionLabel}
               >
-                {conversation.isResponding ? (
+                {isComposerBusy ? (
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <rect x="7.5" y="7.5" width="9" height="9" rx="2.4" fill="currentColor" stroke="none" />
                   </svg>
@@ -1197,27 +1395,29 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               {activeSettingsTab === "sandbox" ? (
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
-                    <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问" : "有一定权限"}</span>
+                    <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问权限" : "开发模式"}</span>
                   </div>
                   <div className="provider-notice">
-                    现在每一次 `bash` 指令都会先进入人工确认，再由你点击是否执行。命令会用单独的命令行底板展示，避免和普通说明混在一起。
+                    {runtimeSettings.settings.sandboxProfile === "full-access"
+                      ? "完全访问权限下，AI Agent 会直接以宿主用户权限执行命令与文件操作，并保留审计日志。"
+                      : "现在每一次 `bash` 指令都会先进入人工确认，再由你点击是否执行。命令会用单独的命令行底板展示，避免和普通说明混在一起。"}
                   </div>
                   {sandboxNotice ? <div className="provider-notice">{sandboxNotice}</div> : null}
                   {runtimeSettings.error ? <div className="provider-notice provider-notice--error">{runtimeSettings.error}</div> : null}
                   <div className="sandbox-profile-list">
                     <button
-                      className={`sandbox-profile-card${sandboxProfileInput === "restricted" ? " sandbox-profile-card--active" : ""}`}
-                      onClick={() => setSandboxProfileInput("restricted")}
+                      className={`sandbox-profile-card${sandboxProfileInput === "development" ? " sandbox-profile-card--active" : ""}`}
+                      onClick={() => setSandboxProfileInput("development")}
                     >
-                      <strong>有一定权限</strong>
-                      <span>默认开放项目目录、数据目录、上传目录。会话里上传的文件夹会整棵加入授权范围。</span>
+                      <strong>开发模式</strong>
+                      <span>默认开放项目目录、数据目录、上传目录，并限制命令白名单和路径范围，适合日常开发。</span>
                     </button>
                     <button
                       className={`sandbox-profile-card${sandboxProfileInput === "full-access" ? " sandbox-profile-card--active" : ""}`}
                       onClick={() => setSandboxProfileInput("full-access")}
                     >
-                      <strong>完全访问</strong>
-                      <span>放开命令和路径限制，但仍然保留审计日志和逐条 bash 人工确认。</span>
+                      <strong>完全访问权限</strong>
+                      <span>AI Agent 直接按宿主用户完整权限执行，保留审计日志，但不再附加路径白名单、命令白名单或逐条 bash 审批。</span>
                     </button>
                   </div>
                   <div className="settings-panel__list">

@@ -9,9 +9,37 @@ type RuntimePing = {
   message?: string;
 };
 
+export type DesktopPickedFile = {
+  kind: "file";
+  name: string;
+  path: string;
+  mimeType: string;
+  contentBase64: string;
+};
+
+export type DesktopPickedFolderFile = {
+  name: string;
+  relativePath: string;
+  mimeType: string;
+  contentBase64: string;
+};
+
+export type DesktopPickedFolder = {
+  kind: "folder";
+  name: string;
+  path: string;
+  files: DesktopPickedFolderFile[];
+};
+
+export type DesktopPickerResult = {
+  canceled: boolean;
+  entries: Array<DesktopPickedFile | DesktopPickedFolder>;
+};
+
 type DesktopBridge = {
   getAppMeta(): Promise<DesktopMeta>;
   pingRuntime(): Promise<RuntimePing>;
+  openFileOrFolder(): Promise<DesktopPickerResult>;
   mode: "electron" | "web-preview";
 };
 
@@ -44,6 +72,12 @@ function createBrowserBridge(): DesktopBridge {
           message: error instanceof Error ? error.message : "Daemon unavailable",
         };
       }
+    },
+    async openFileOrFolder() {
+      return {
+        canceled: true,
+        entries: [],
+      };
     },
   };
 }

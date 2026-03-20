@@ -88,7 +88,7 @@ const seedContentBlocks: SeedContentBlock[] = [
     pageFrom: 33,
     pageTo: 33,
     blockKind: "figure-caption",
-    content: "本图对 read、write、edit、bash 四个原语的边界进行总览，适合作为回忆入口而不是逐句阅读。",
+    content: "本图对 read、grep、glob、write、edit、bash 六个原子命令的边界进行总览，适合作为回忆入口而不是逐句阅读。",
   },
 ];
 
@@ -99,7 +99,7 @@ const seedCrossReferences: SeedCrossReference[] = [
     sourceRef: "sandbox",
     targetKind: "content-block",
     targetRef: "block-figure-runtime",
-    label: "四原语边界图",
+    label: "六原子边界图",
     score: 0.93,
   },
   {
@@ -556,7 +556,7 @@ function runMigrations(db: Database.Database) {
           ELSE summary
         END,
         body = CASE id
-          WHEN 'artifact-study-bianzheng' THEN '1. Session、queue 和 events 组成 runtime 的真相层，负责持续状态和多端同步。'||char(10)||'2. Sandbox 只提供 read、write、edit、bash 四个执行原语，skills 通过它做副作用操作。'||char(10)||'3. Artifact、memory 和 tasks 是提交层结果，不该和底层执行 ABI 混在一起。'
+          WHEN 'artifact-study-bianzheng' THEN '1. Session、queue 和 events 组成 runtime 的真相层，负责持续状态和多端同步。'||char(10)||'2. Sandbox 只提供 read、grep、glob、write、edit、bash 六个执行原子命令，skills 通过它做副作用操作。'||char(10)||'3. Artifact、memory 和 tasks 是提交层结果，不该和底层执行 ABI 混在一起。'
           WHEN 'artifact-review-pack' THEN '今晚先复习三件事：'||char(10)||'1. 先说清 gateway、runtime core 和 sandbox 各自负责什么。'||char(10)||'2. 回忆为什么 policy loop 不是 workflow，而是模型面对统一状态的下一跳决策。'||char(10)||'3. 再看一次 companion 同步链路，确认 snapshot、stream 和 heartbeat 的分工。'
           ELSE body
         END,
@@ -611,7 +611,7 @@ function runMigrations(db: Database.Database) {
         content = CASE id
           WHEN 'block-outline-bianzheng' THEN 'Runtime 设计从 gateway、state plane、execution plane 和 skill layer 四个层级组织，是定位整套系统骨架的上层导航。'
           WHEN 'block-body-bianzheng' THEN 'Session stream 负责把 snapshot、事件流和心跳串起来。真正的副作用执行不应该直接写进 UI，而应该先变成 typed commit 再落到 runtime core。'
-          WHEN 'block-figure-bianzheng' THEN '本图对 read、write、edit、bash 四个原语的边界进行总览，适合作为回忆入口而不是逐句阅读。'
+          WHEN 'block-figure-bianzheng' THEN '本图对 read、grep、glob、write、edit、bash 六个原子命令的边界进行总览，适合作为回忆入口而不是逐句阅读。'
           ELSE content
         END
       WHERE id IN ('block-outline-bianzheng', 'block-body-bianzheng', 'block-figure-bianzheng')
@@ -636,7 +636,7 @@ function runMigrations(db: Database.Database) {
           ELSE source_ref
         END,
         label = CASE id
-          WHEN 'xref-cold-heat-figure' THEN '四原语边界图'
+          WHEN 'xref-cold-heat-figure' THEN '六原子边界图'
           WHEN 'xref-qi-yang' THEN '同步协议回链到正文'
           ELSE label
         END

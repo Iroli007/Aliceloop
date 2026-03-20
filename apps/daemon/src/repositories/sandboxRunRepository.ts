@@ -134,3 +134,20 @@ export function listSandboxRuns(limit = 50) {
 
   return rows.map(toSandboxRun);
 }
+
+export function reconcileRunningSandboxRuns() {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const result = db.prepare(
+    `
+      UPDATE sandbox_runs
+      SET
+        status = 'failed',
+        detail = detail || ' [daemon restarted before this sandbox action completed]',
+        finished_at = COALESCE(finished_at, ?)
+      WHERE status = 'running'
+    `,
+  ).run(now);
+
+  return result.changes;
+}

@@ -32,7 +32,7 @@ export const previewShellOverview: ShellOverview = {
       title: "Runtime 结构整理页",
       summary: "聚焦 session、sandbox、artifact 和 memory 的关系，适合快速回看和后续实现前定位。",
       body:
-        "1. Session、queue 和 events 组成 runtime 的真相层，负责持续状态和多端同步。\n2. Sandbox 只提供 read、write、edit、bash 四个执行原语，skills 通过它做副作用操作。\n3. Artifact、memory 和 tasks 是提交层结果，不该和底层执行 ABI 混在一起。",
+        "1. Session、queue 和 events 组成 runtime 的真相层，负责持续状态和多端同步。\n2. Sandbox 只提供 read、grep、glob、write、edit、bash 六个执行原子命令，skills 通过它做副作用操作。\n3. Artifact、memory 和 tasks 是提交层结果，不该和底层执行 ABI 混在一起。",
       relatedLibraryTitle: "Aliceloop Runtime Notes",
       updatedAt: "2026-03-17T07:23:00.000Z",
       updatedAtLabel: "刚刚更新",

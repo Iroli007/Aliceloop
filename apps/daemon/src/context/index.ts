@@ -5,9 +5,14 @@ import { buildSessionMessages, getLatestUserMessage } from "./session/sessionCon
 import { buildSkillContextBlock } from "./skills/skillLoader";
 import { buildToolSet } from "./tools/toolRegistry";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
+import {
+  isAliceloopGeneratedFile,
+  markGeneratedFileDeleted,
+  markSessionGeneratedFile,
+} from "../repositories/sessionGeneratedFileRepository";
 import { listSessionAttachmentSandboxRoots } from "../repositories/sessionRepository";
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
-import { requestSessionBashApproval } from "../services/sessionToolApprovalService";
+import { requestSessionBashApproval, requestSessionToolApproval } from "../services/sessionToolApprovalService";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -45,14 +50,29 @@ export function loadContext(
     extraReadRoots: attachmentRoots.readRoots,
     extraWriteRoots: attachmentRoots.writeRoots,
     extraCwdRoots: attachmentRoots.cwdRoots,
-    requestBashApproval: ({ command, args, cwd }) =>
-      requestSessionBashApproval({
+    requestBashApproval: runtimeSettings.sandboxProfile === "development"
+      ? ({ command, args, cwd }) =>
+          requestSessionBashApproval({
+            sessionId,
+            command,
+            args,
+            cwd,
+            abortSignal,
+          })
+      : undefined,
+    requestElevatedApproval: (input) =>
+      requestSessionToolApproval({
         sessionId,
-        command,
-        args,
-        cwd,
         abortSignal,
+        ...input,
       }),
+    noteCreatedFile: (targetPath) => {
+      markSessionGeneratedFile(sessionId, targetPath);
+    },
+    canDeleteFile: (targetPath) => isAliceloopGeneratedFile(targetPath),
+    noteDeletedFile: (targetPath) => {
+      markGeneratedFileDeleted(targetPath);
+    },
   });
   const tools = buildToolSet(sandbox);
 

@@ -25,25 +25,29 @@ function summarizeCommandLine(command: string, args: string[]) {
   return [command, ...args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg))].join(" ").trim();
 }
 
-export async function requestSessionBashApproval(input: {
+export async function requestSessionToolApproval(input: {
   sessionId: string;
+  toolName: string;
+  title: string;
+  detail: string;
   command: string;
   args: string[];
   cwd: string;
+  commandLine?: string;
   abortSignal: AbortSignal;
 }) {
   if (input.abortSignal.aborted) {
-    throw new Error("Agent loop aborted before bash approval was requested.");
+    throw new Error("Agent loop aborted before tool approval was requested.");
   }
 
-  const commandLine = summarizeCommandLine(input.command, input.args);
+  const commandLine = input.commandLine ?? summarizeCommandLine(input.command, input.args);
   const { approval, waitForResolution } = createPendingToolApproval(
     {
       id: randomUUID(),
       sessionId: input.sessionId,
-      toolName: "sandbox_bash",
-      title: "等待确认 bash 指令",
-      detail: `将要在 ${input.cwd} 中执行以下命令。确认后才会真正运行。`,
+      toolName: input.toolName,
+      title: input.title,
+      detail: input.detail,
       commandLine,
       command: input.command,
       args: input.args,
@@ -72,10 +76,29 @@ export async function requestSessionBashApproval(input: {
   }
 
   if (input.abortSignal.aborted) {
-    throw new Error("Agent loop aborted while waiting for bash approval.");
+    throw new Error("Agent loop aborted while waiting for tool approval.");
   }
 
-  throw new ToolApprovalRejectedError(`bash command rejected by user: ${resolvedApproval.commandLine}`);
+  throw new ToolApprovalRejectedError(`${input.toolName} rejected by user: ${resolvedApproval.commandLine}`);
+}
+
+export async function requestSessionBashApproval(input: {
+  sessionId: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  abortSignal: AbortSignal;
+}) {
+  return requestSessionToolApproval({
+    sessionId: input.sessionId,
+    toolName: "sandbox_bash",
+    title: "等待确认 bash 指令",
+    detail: `将要在 ${input.cwd} 中执行以下命令。确认后才会真正运行。`,
+    command: input.command,
+    args: input.args,
+    cwd: input.cwd,
+    abortSignal: input.abortSignal,
+  });
 }
 
 function resolveSessionToolApproval(

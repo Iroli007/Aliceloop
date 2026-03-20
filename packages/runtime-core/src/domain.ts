@@ -17,8 +17,10 @@ export type SessionMessageStatus = "pending" | "acked" | "error";
 export type AttachmentStatus = "ready" | "failed";
 export type ProviderKind = "minimax" | "aihubmix" | "openai" | "anthropic" | "openrouter";
 export type ProviderTransportKind = "auto" | "openai-compatible" | "anthropic";
-export type SandboxPermissionProfile = "restricted" | "full-access";
-export type SandboxPrimitive = "read" | "write" | "edit" | "bash";
+export type SandboxPermissionProfile = "development" | "full-access";
+export type LegacySandboxPermissionProfile = "restricted" | "high-privilege";
+export type SandboxExecutionAccess = "standard" | "elevated";
+export type SandboxPrimitive = "read" | "write" | "edit" | "delete" | "bash";
 export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
 export type ToolApprovalStatus = "pending" | "approved" | "rejected";
 export type SkillStatus = "available" | "planned";
@@ -234,8 +236,62 @@ export interface RuntimeSettings {
   updatedAt: string | null;
 }
 
+export interface SandboxProfileDefinition {
+  id: SandboxPermissionProfile;
+  label: string;
+  summary: string;
+  hostAccess: "guarded" | "broad";
+  elevatedBehavior: string;
+}
+
+export interface SandboxExecutionAccessDefinition {
+  id: SandboxExecutionAccess;
+  label: string;
+  summary: string;
+}
+
+export function normalizeSandboxPermissionProfile(
+  profile: string | null | undefined,
+): SandboxPermissionProfile {
+  if (profile === "high-privilege" || profile === "full-access") {
+    return "full-access";
+  }
+
+  return "development";
+}
+
+export const sandboxProfileDefinitions: SandboxProfileDefinition[] = [
+  {
+    id: "development",
+    label: "开发模式",
+    summary: "默认使用受限的宿主机执行策略，适合日常开发与普通文件操作。",
+    hostAccess: "guarded",
+    elevatedBehavior: "允许少量越界动作通过单次 elevated 审批放行，执行后仍回到开发模式。",
+  },
+  {
+    id: "full-access",
+    label: "完全访问权限",
+    summary: "当前会话直接按宿主机当前用户权限执行，不再附加开发模式的路径、命令或删除限制。",
+    hostAccess: "broad",
+    elevatedBehavior: "不再区分开发模式下的单次 elevated；整段会话默认按宿主用户完整权限执行。",
+  },
+];
+
+export const sandboxExecutionAccessDefinitions: SandboxExecutionAccessDefinition[] = [
+  {
+    id: "standard",
+    label: "标准执行",
+    summary: "按当前 profile 的默认宿主机权限执行。",
+  },
+  {
+    id: "elevated",
+    label: "单次 Elevated",
+    summary: "只作为开发模式里的偶发破例动作，不是常驻 profile。",
+  },
+];
+
 export const defaultRuntimeSettings: RuntimeSettings = {
-  sandboxProfile: "restricted",
+  sandboxProfile: "development",
   updatedAt: null,
 };
 

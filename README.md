@@ -16,13 +16,16 @@ User messages enter the daemon, the daemon loads context from `apps/daemon/src/c
 
 The built-in agent currently uses:
 
-- four core sandbox tools: `read`, `write`, `edit`, `bash`
+- six atomic commands: `read`, `grep`, `glob`, `write`, `edit`, `bash`
 - context skills discovered from `apps/daemon/src/context/skills/*/SKILL.md`
+- ephemeral helper files or scripts synthesized with `write` / `edit` and executed with `bash`
 - managed task tools for document ingest, review coaching, and runtime scripts
 - multi-step tool calling via Vercel AI SDK
 - per-session serialized execution
 - persisted session events, jobs, memories, artifacts, and sandbox runs
 - provider configs for `MiniMax`, `OpenAI`, `Anthropic`, and `OpenRouter`
+
+Those helper files are disposable implementation details. They do not register new tools or expand the built-in agent ABI.
 
 ## Current Direction
 

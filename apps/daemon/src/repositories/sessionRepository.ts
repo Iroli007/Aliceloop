@@ -16,6 +16,7 @@ import {
   type SessionSnapshot,
   type SessionThreadSummary,
   type StudyArtifact,
+  type ToolApproval,
 } from "@aliceloop/runtime-core";
 import { getDatabase } from "../db/client";
 import { getShellOverview } from "./overviewRepository";
@@ -613,6 +614,108 @@ function upsertJob(job: JobRunDetail) {
         updated_at = excluded.updated_at
     `,
   ).run(job);
+}
+
+interface PendingApprovalEventRow {
+  sessionId: string;
+  payload: string;
+}
+
+function listPendingApprovalEvents(): ToolApproval[] {
+  const db = getDatabase();
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          session_id AS sessionId,
+          payload
+        FROM session_events
+        WHERE type IN ('tool.approval.requested', 'tool.approval.resolved')
+        ORDER BY seq ASC
+      `,
+    )
+    .all() as PendingApprovalEventRow[];
+
+  const approvals = new Map<string, ToolApproval>();
+  for (const row of rows) {
+    const payload = JSON.parse(row.payload) as { approval?: ToolApproval };
+    const approval = payload.approval;
+    if (!approval) {
+      continue;
+    }
+
+    approvals.set(approval.id, {
+      ...approval,
+      sessionId: row.sessionId,
+    });
+  }
+
+  return [...approvals.values()].filter((approval) => approval.status === "pending");
+}
+
+export function reconcileInterruptedSessionState() {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const runningJobs = db
+    .prepare(
+      `
+        SELECT
+          id,
+          session_id AS sessionId,
+          kind,
+          status,
+          title,
+          detail,
+          updated_at AS updatedAt
+        FROM job_runs
+        WHERE kind = 'provider-completion'
+          AND status = 'running'
+      `,
+    )
+    .all() as JobRunRow[];
+  const pendingApprovals = listPendingApprovalEvents();
+
+  if (runningJobs.length === 0 && pendingApprovals.length === 0) {
+    return {
+      clearedJobs: 0,
+      clearedApprovals: 0,
+    };
+  }
+
+  db.transaction(() => {
+    for (const row of runningJobs) {
+      const job: JobRunDetail = {
+        id: row.id,
+        sessionId: row.sessionId,
+        kind: row.kind,
+        status: "failed",
+        title: "Agent interrupted",
+        detail: "Daemon restarted before this response completed. Please retry the request.",
+        updatedAt: now,
+      };
+      upsertJob(job);
+      syncTaskRunFromJob(job);
+      touchSession(job.sessionId, now);
+      recordEvent(job.sessionId, "job.updated", { job }, now);
+    }
+
+    for (const approval of pendingApprovals) {
+      const resolvedApproval: ToolApproval = {
+        ...approval,
+        status: "rejected",
+        resolvedAt: now,
+      };
+      touchSession(approval.sessionId, now);
+      recordEvent(approval.sessionId, "tool.approval.resolved", {
+        approval: resolvedApproval,
+      }, now);
+    }
+  })();
+
+  return {
+    clearedJobs: runningJobs.length,
+    clearedApprovals: pendingApprovals.length,
+  };
 }
 
 export function upsertSessionJob(input: UpsertJobInput): {

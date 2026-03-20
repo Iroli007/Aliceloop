@@ -238,6 +238,25 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS session_generated_files (
+      session_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT,
+      PRIMARY KEY (session_id, path),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS session_generated_files_session_updated_idx
+    ON session_generated_files (session_id, updated_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS session_generated_files_path_deleted_idx
+    ON session_generated_files (path, deleted_at)
+  `,
+  `
     CREATE TABLE IF NOT EXISTS runtime_settings (
       id TEXT PRIMARY KEY,
       sandbox_profile TEXT NOT NULL,

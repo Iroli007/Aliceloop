@@ -33,7 +33,7 @@ async function main() {
         "Session、queue 和 events 负责持续状态，不能和副作用执行混在一起。",
         "",
         "第2章 Sandbox",
-        "Sandbox 层只暴露 read、write、edit、bash 这四个最小执行 ABI，skills 通过它们做副作用操作。",
+        "Sandbox 层只暴露 read、grep、glob、write、edit、bash 这六个最小执行 ABI，skills 通过它们做副作用操作。",
         "",
         "第3章 Companion Sync",
         "把 snapshot、stream 和 heartbeat 的关系串起来，保持多端共享同一会话。",

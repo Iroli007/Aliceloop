@@ -45,7 +45,7 @@ button {
   --workspace-user-message-width: calc(720px * var(--workspace-history-scale));
   --workspace-message-gap: calc(26px * var(--workspace-history-scale));
   --workspace-message-block-gap: calc(10px * var(--workspace-history-scale));
-  --workspace-message-padding-y: calc(14px * var(--workspace-history-scale));
+  --workspace-message-padding-y: calc(10px * var(--workspace-history-scale));
   --workspace-message-padding-x: calc(18px * var(--workspace-history-scale));
   --workspace-label-font-size: calc(11px * var(--workspace-history-scale));
   --workspace-message-font-size: calc(15px * var(--workspace-history-scale));
@@ -777,6 +777,10 @@ button {
   z-index: 1;
 }
 
+.workspace__thread--approval-active::after {
+  display: none;
+}
+
 .workspace__messages {
   display: grid;
   align-content: start;
@@ -809,7 +813,9 @@ button {
 
 .workspace__message--assistant,
 .workspace__message--system {
-  width: min(var(--workspace-thread-width), 100%);
+  justify-self: start;
+  width: fit-content;
+  max-width: min(var(--workspace-message-width), 100%);
 }
 
 .workspace__message-label {
@@ -818,7 +824,17 @@ button {
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--gray-400);
+  color: #98a2b2;
+}
+
+.workspace__message--has-attachments .workspace__message-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #64748b;
+  padding: 0;
+  margin-bottom: 4px;
 }
 
 .workspace__message-body {
@@ -826,7 +842,7 @@ button {
   border-radius: var(--radius-md);
   background: #ffffff;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  color: var(--gray-700);
+  color: #344154;
   font-size: var(--workspace-message-font-size);
   line-height: 1.75;
   white-space: pre-wrap;
@@ -837,12 +853,14 @@ button {
   border: none;
   border-radius: 0;
   background: transparent;
-  color: var(--gray-900);
+  color: #2a3443;
 }
 
 .workspace__message--user .workspace__message-body {
-  background: #ffffff;
-  border-color: rgba(121, 137, 160, 0.16);
+  background: #f4f6f8;
+  border: 1px solid #d8dee6;
+  border-radius: 12px;
+  color: #334155;
 }
 
 .workspace__message--system .workspace__message-body {
@@ -872,21 +890,59 @@ button {
   font-weight: 500;
 }
 
+.workspace__message-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--gray-400);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.workspace__message:hover .workspace__message-copy,
+.workspace__message-copy:focus-visible {
+  opacity: 1;
+}
+
+.workspace__message-copy:hover {
+  color: var(--gray-700);
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.workspace__message-copy--copied {
+  color: #16a34a;
+  opacity: 1;
+}
+
 .composer {
   display: grid;
   gap: 8px;
   position: absolute;
   left: 24px;
   right: 24px;
-  bottom: 16px;
+  bottom: 32px;
   width: auto;
-  padding: 12px 16px 10px;
-  border-radius: var(--radius-md);
+  padding: 22px 18px 20px;
+  border-radius: 28px;
   background: #ffffff;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.09);
   backdrop-filter: blur(20px);
   z-index: 4;
+}
+
+.composer__approval-dock {
+  position: absolute;
+  left: var(--composer-left-inset);
+  right: var(--composer-right-inset);
+  bottom: calc(16px + var(--composer-height) + 14px);
+  z-index: 5;
 }
 
 .composer__input {
@@ -904,18 +960,18 @@ button {
   border: none;
   outline: none;
   background: transparent;
-  color: var(--text-primary);
+  color: rgba(49, 64, 86, 0.86);
   line-height: 1.6;
 }
 
 .composer__input--field::placeholder {
-  color: var(--gray-400);
+  color: rgba(108, 124, 147, 0.46);
 }
 
 .composer__toolbar {
   display: flex;
   align-items: flex-end;
-  gap: 4px;
+  gap: 2px;
   color: var(--text-muted);
 }
 
@@ -927,6 +983,8 @@ button {
   position: relative;
   display: inline-flex;
   align-items: flex-end;
+  transform: translateY(-2px);
+  z-index: 11;
 }
 
 .composer__add-file-button {
@@ -968,37 +1026,38 @@ button {
 
 .composer__add-file-tooltip {
   position: absolute;
-  left: 0;
-  bottom: calc(100% + 10px);
-  padding: 8px 14px;
-  border-radius: 18px;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  padding: 6px 10px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.98);
   border: 1px solid rgba(15, 23, 42, 0.08);
-  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.08);
-  color: var(--gray-900);
-  font-size: 14px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  color: var(--gray-700);
+  font-size: 12px;
+  line-height: 1;
   white-space: nowrap;
   opacity: 0;
-  transform: translateY(6px);
   pointer-events: none;
+  transform: translate(-50%, 4px);
   transition:
-    opacity 120ms ease,
-    transform 120ms ease;
+    opacity 70ms ease-out,
+    transform 70ms ease-out;
   z-index: 12;
 }
 
-.composer__add-file-button:hover + .composer__add-file-tooltip,
+.composer__add-file:hover .composer__add-file-tooltip,
 .composer__add-file-button:focus-visible + .composer__add-file-tooltip {
   opacity: 1;
-  transform: translateY(0);
+  transform: translate(-50%, 0);
 }
 
 .composer__toolbar-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   height: 28px;
-  padding: 0 8px;
+  padding: 0 6px;
   border-radius: var(--radius-sm);
   font-size: 13px;
   color: var(--gray-700);
@@ -1077,6 +1136,19 @@ button {
   color: var(--gray-500);
 }
 
+.composer__status-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.1);
+  color: #9a3412;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .composer__spacer {
   flex: 1;
 }
@@ -1115,9 +1187,20 @@ button {
   border-color: rgba(154, 52, 18, 0.16);
 }
 
+.composer__send--waiting {
+  background: #fff7ed;
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.18);
+}
+
 .composer__send--stop:hover {
   background: #ffe9dd;
   box-shadow: 0 8px 18px rgba(154, 52, 18, 0.14);
+}
+
+.composer__send--waiting:hover {
+  background: #ffedd5;
+  box-shadow: 0 8px 18px rgba(180, 83, 9, 0.14);
 }
 
 .composer__send:disabled {
@@ -1893,6 +1976,12 @@ button {
     left: 12px;
     right: 12px;
     bottom: 12px;
+  }
+
+  .composer__approval-dock {
+    left: 12px;
+    right: 12px;
+    bottom: calc(12px + var(--composer-height) + 12px);
   }
 
   .workspace__thread {

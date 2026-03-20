@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,24 +8,61 @@ async function main() {
   const externalDir = mkdtempSync(join(tmpdir(), "aliceloop-sandbox-ext-"));
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
 
-  const [{ createPermissionSandboxExecutor, SandboxViolationError }, { listSandboxRuns }] = await Promise.all([
+  const [
+    { createPermissionSandboxExecutor, SandboxViolationError },
+    { listSandboxRuns },
+    { createSession },
+    { isAliceloopGeneratedFile, markGeneratedFileDeleted, markSessionGeneratedFile },
+  ] = await Promise.all([
     import("../src/services/sandboxExecutor.ts"),
     import("../src/repositories/sandboxRunRepository.ts"),
+    import("../src/repositories/sessionRepository.ts"),
+    import("../src/repositories/sessionGeneratedFileRepository.ts"),
   ]);
 
   const sourcePath = join(externalDir, "source.txt");
+  const elevatedOutputPath = join(externalDir, "elevated-note.txt");
   const outputPath = join(tempDataDir, "artifacts", "note.txt");
+  const ownedDeletePath = join(tempDataDir, "artifacts", "generated-delete.txt");
+  const manualFilePath = join(tempDataDir, "artifacts", "manual.txt");
+  const emptyDirPath = join(tempDataDir, "artifacts", "empty-dir");
+  const nonEmptyDirPath = join(tempDataDir, "artifacts", "non-empty-dir");
   const runtimeScriptPath = join(tempDataDir, "runtime-check.ts");
+  const authoringSessionId = createSession("sandbox-smoke-author").id;
+  const cleanupSessionId = createSession("sandbox-smoke-cleanup").id;
 
   writeFileSync(sourcePath, "alpha\nbeta\n", "utf8");
   writeFileSync(runtimeScriptPath, 'console.log("tsx-sandbox-ok");\n', "utf8");
+  mkdirSync(join(tempDataDir, "artifacts"), { recursive: true });
+  writeFileSync(manualFilePath, "manual\n", "utf8");
+  mkdirSync(emptyDirPath, { recursive: true });
+  mkdirSync(nonEmptyDirPath, { recursive: true });
+  writeFileSync(join(nonEmptyDirPath, "keep.txt"), "keep\n", "utf8");
 
   const sandbox = createPermissionSandboxExecutor({
     label: "sandbox-smoke",
     extraReadRoots: [externalDir, tempDataDir],
-    extraWriteRoots: [join(tempDataDir, "artifacts")],
+    extraWriteRoots: [tempDataDir],
     extraCwdRoots: [tempDataDir],
-    allowedCommands: ["cat", "tsx"],
+    allowedCommands: ["cat", "rm", "rmdir", "tsx"],
+    noteCreatedFile: (targetPath) => {
+      markSessionGeneratedFile(authoringSessionId, targetPath);
+    },
+    canDeleteFile: (targetPath) => isAliceloopGeneratedFile(targetPath),
+    noteDeletedFile: (targetPath) => markGeneratedFileDeleted(targetPath),
+  });
+
+  const cleanupSandbox = createPermissionSandboxExecutor({
+    label: "sandbox-smoke-cleanup",
+    extraReadRoots: [externalDir, tempDataDir],
+    extraWriteRoots: [tempDataDir],
+    extraCwdRoots: [tempDataDir],
+    allowedCommands: ["cat", "rm", "rmdir", "tsx"],
+    noteCreatedFile: (targetPath) => {
+      markSessionGeneratedFile(cleanupSessionId, targetPath);
+    },
+    canDeleteFile: (targetPath) => isAliceloopGeneratedFile(targetPath),
+    noteDeletedFile: (targetPath) => markGeneratedFileDeleted(targetPath),
   });
 
   const text = await sandbox.readTextFile({
@@ -39,11 +76,62 @@ async function main() {
   });
   assert.equal(readFileSync(outputPath, "utf8"), "alpha\nbeta\n");
 
+  await sandbox.writeTextFile({
+    targetPath: ownedDeletePath,
+    content: "generated\n",
+  });
+  assert.equal(
+    isAliceloopGeneratedFile(ownedDeletePath),
+    true,
+    "newly generated file should be tracked for safe deletion across sessions",
+  );
+
   const edited = await sandbox.editTextFile({
     targetPath: outputPath,
     transform: (content) => content.replace("beta", "gamma"),
   });
   assert.equal(edited, "alpha\ngamma\n");
+
+  const rmDeleteResult = await cleanupSandbox.runBash({
+    command: "rm",
+    args: [ownedDeletePath],
+    cwd: tempDataDir,
+  });
+  assert(rmDeleteResult.stdout.includes("deleted:"), "rm via sandbox_bash should report deleted path");
+  assert.equal(existsSync(ownedDeletePath), false, "rm via sandbox_bash should remove generated files from a later session");
+  assert.equal(isAliceloopGeneratedFile(ownedDeletePath), false, "deleted generated file should be removed from global ownership tracking");
+
+  const rmdirResult = await cleanupSandbox.runBash({
+    command: "rmdir",
+    args: [emptyDirPath],
+    cwd: tempDataDir,
+  });
+  assert(rmdirResult.stdout.includes("deleted:"), "rmdir via sandbox_bash should report deleted path");
+  assert.equal(existsSync(emptyDirPath), false, "rmdir via sandbox_bash should remove empty directories");
+
+  let blockedManualDelete = false;
+  try {
+    await cleanupSandbox.runBash({
+      command: "rm",
+      args: [manualFilePath],
+      cwd: tempDataDir,
+    });
+  } catch (error) {
+    blockedManualDelete = error instanceof SandboxViolationError;
+  }
+  assert.equal(blockedManualDelete, true, "rm via sandbox_bash should block files that were never generated by Aliceloop");
+
+  let blockedNonEmptyDirDelete = false;
+  try {
+    await cleanupSandbox.runBash({
+      command: "rmdir",
+      args: [nonEmptyDirPath],
+      cwd: tempDataDir,
+    });
+  } catch (error) {
+    blockedNonEmptyDirDelete = error instanceof SandboxViolationError;
+  }
+  assert.equal(blockedNonEmptyDirDelete, true, "rmdir via sandbox_bash should block non-empty directories");
 
   let approvalCount = 0;
   const approvedSandbox = createPermissionSandboxExecutor({
@@ -72,6 +160,12 @@ async function main() {
   });
   assert.equal(bashResult.stdout, "alpha\ngamma\n");
 
+  const lsResult = await sandbox.runBash({
+    command: "ls",
+    cwd: "/etc",
+  });
+  assert(lsResult.stdout.length > 0, "ls should stay standard-allowed even outside the workspace cwd");
+
   const originalPath = process.env.PATH;
   process.env.PATH = "";
   try {
@@ -85,17 +179,17 @@ async function main() {
     process.env.PATH = originalPath;
   }
 
-  let blockedRead = false;
+  let blockedHostRead = false;
   try {
     await sandbox.readTextFile({
       targetPath: "/etc/hosts",
     });
   } catch (error) {
-    blockedRead = error instanceof SandboxViolationError;
+    blockedHostRead = error instanceof SandboxViolationError;
   }
-  assert.equal(blockedRead, true, "sandbox should block reading /etc/hosts");
+  assert.equal(blockedHostRead, true, "development mode should block host reads outside allowed read roots");
 
-  let blockedBash = false;
+  let blockedHostBashRead = false;
   try {
     await sandbox.runBash({
       command: "cat",
@@ -103,19 +197,69 @@ async function main() {
       cwd: tempDataDir,
     });
   } catch (error) {
+    blockedHostBashRead = error instanceof SandboxViolationError;
+  }
+  assert.equal(blockedHostBashRead, true, "development mode should block bash reads outside allowed read roots");
+
+  let blockedBash = false;
+  try {
+    await sandbox.runBash({
+      command: "whoami",
+      cwd: tempDataDir,
+    });
+  } catch (error) {
     blockedBash = error instanceof SandboxViolationError;
   }
-  assert.equal(blockedBash, true, "sandbox should block bash path arguments outside allowed roots");
+  assert.equal(blockedBash, true, "development mode should still block out-of-policy bash without elevated approval");
 
+  let elevatedApprovalCount = 0;
+  const elevatedSandbox = createPermissionSandboxExecutor({
+    label: "sandbox-smoke-elevated",
+    extraCwdRoots: [tempDataDir],
+    allowedCommands: ["cat"],
+    requestElevatedApproval: async () => {
+      elevatedApprovalCount += 1;
+    },
+  });
+
+  const elevatedHosts = await elevatedSandbox.readTextFile({
+    targetPath: "/etc/hosts",
+  });
+  assert(elevatedHosts.length > 0, "development mode should allow host reads through single elevated approval");
+
+  await elevatedSandbox.writeTextFile({
+    targetPath: elevatedOutputPath,
+    content: "elevated-write\n",
+  });
+  assert.equal(readFileSync(elevatedOutputPath, "utf8"), "elevated-write\n");
+
+  const elevatedBash = await elevatedSandbox.runBash({
+    command: "/bin/echo",
+    args: ["elevated-bash-ok"],
+    cwd: tempDataDir,
+  });
+  assert.equal(elevatedBash.stdout.trim(), "elevated-bash-ok");
+  const elevatedBashRead = await elevatedSandbox.runBash({
+    command: "cat",
+    args: ["/etc/hosts"],
+    cwd: tempDataDir,
+  });
+  assert(elevatedBashRead.stdout.length > 0, "bash reads outside roots should also require single elevated approval");
+  assert.equal(elevatedApprovalCount, 4, "each elevated read, write, and bash action should require its own approval");
+
+  let fullAccessApprovalCount = 0;
   const fullAccessSandbox = createPermissionSandboxExecutor({
     label: "sandbox-smoke-full-access",
     permissionProfile: "full-access",
+    requestBashApproval: async () => {
+      fullAccessApprovalCount += 1;
+    },
   });
 
-  const hosts = await fullAccessSandbox.readTextFile({
+  const fullAccessHosts = await fullAccessSandbox.readTextFile({
     targetPath: "/etc/hosts",
   });
-  assert(hosts.length > 0, "full access sandbox should read arbitrary host files");
+  assert(fullAccessHosts.length > 0, "full access sandbox should read arbitrary host files");
 
   const fullAccessBash = await fullAccessSandbox.runBash({
     command: "/bin/echo",
@@ -123,14 +267,27 @@ async function main() {
     cwd: process.cwd(),
   });
   assert.equal(fullAccessBash.stdout.trim(), "full-access-ok");
+  assert.equal(fullAccessApprovalCount, 0, "full access should not require per-command bash approval");
+
+  await fullAccessSandbox.deletePath({
+    targetPath: manualFilePath,
+  });
+  assert.equal(existsSync(manualFilePath), false, "full access should delete arbitrary host-user files");
+
+  await fullAccessSandbox.deletePath({
+    targetPath: nonEmptyDirPath,
+  });
+  assert.equal(existsSync(nonEmptyDirPath), false, "full access should delete non-empty directories recursively");
 
   const logs = listSandboxRuns(20);
   assert(logs.some((run) => run.primitive === "read" && run.status === "done"), "read run should be logged");
   assert(logs.some((run) => run.primitive === "write" && run.status === "done"), "write run should be logged");
   assert(logs.some((run) => run.primitive === "edit" && run.status === "done"), "edit run should be logged");
+  assert(logs.some((run) => run.primitive === "delete" && run.status === "done"), "delete run should be logged");
   assert(logs.some((run) => run.primitive === "bash" && run.status === "done"), "bash run should be logged");
   assert(logs.some((run) => run.command === "tsx" && run.status === "done"), "tsx run should be logged");
   assert(logs.some((run) => run.status === "blocked"), "blocked run should be logged");
+  assert(logs.some((run) => run.detail.includes("[elevated]") && run.status === "done"), "elevated runs should be logged");
 
   console.log(
     JSON.stringify(

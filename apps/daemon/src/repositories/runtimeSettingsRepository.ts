@@ -1,10 +1,15 @@
-import { defaultRuntimeSettings, type RuntimeSettings, type SandboxPermissionProfile } from "@aliceloop/runtime-core";
+import {
+  defaultRuntimeSettings,
+  normalizeSandboxPermissionProfile,
+  type RuntimeSettings,
+  type SandboxPermissionProfile,
+} from "@aliceloop/runtime-core";
 import { getDatabase } from "../db/client";
 
 const runtimeSettingsId = "primary";
 
 interface RuntimeSettingsRow {
-  sandboxProfile: SandboxPermissionProfile;
+  sandboxProfile: string;
   updatedAt: string;
 }
 
@@ -43,7 +48,7 @@ export function getRuntimeSettings(): RuntimeSettings {
   }
 
   return {
-    sandboxProfile: row.sandboxProfile,
+    sandboxProfile: normalizeSandboxPermissionProfile(row.sandboxProfile),
     updatedAt: row.updatedAt,
   };
 }
@@ -53,7 +58,7 @@ export function updateRuntimeSettings(input: {
 }): RuntimeSettings {
   const current = getRuntimeSettings();
   const next: RuntimeSettings = {
-    sandboxProfile: input.sandboxProfile ?? current.sandboxProfile,
+    sandboxProfile: normalizeSandboxPermissionProfile(input.sandboxProfile ?? current.sandboxProfile),
     updatedAt: new Date().toISOString(),
   };
   const db = getDatabase();

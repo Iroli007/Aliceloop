@@ -8,7 +8,7 @@ Core idea:
 
 - Aliceloop owns the host runtime
 - model gateways only supply reasoning
-- the built-in agent loop operates through four atomic primitives: `read`, `write`, `edit`, `bash`
+- the built-in agent loop operates through six atomic commands: `read`, `grep`, `glob`, `write`, `edit`, `bash`
 - session state, events, memories, artifacts, and sandbox runs stay inside the local daemon
 
 This is not a thin wrapper around an external agent SDK.
@@ -90,9 +90,11 @@ This replaced the old vendor-specific reply path.
 
 ## 6. Tool Model
 
-The base capability layer is:
+The base capability layer is the six-command sandbox ABI:
 
 - `sandbox_read`
+- `sandbox_grep`
+- `sandbox_glob`
 - `sandbox_write`
 - `sandbox_edit`
 - `sandbox_bash`
@@ -106,6 +108,10 @@ The base capability layer is:
 - `npm`
 - `node`
 - `tsx`
+
+The model may also synthesize temporary helper files or scripts inside the sandbox, execute them through `sandbox_bash`, and discard them after use. That is an implementation pattern on top of the six-command ABI, not a first-class capability and not a tool-registration surface.
+
+No runtime path should allow the model to register new system tools dynamically. Higher-level capabilities belong in `skills`.
 
 Skills are no longer masquerading as runnable task entries. The `SKILL.md` catalog is injected into context for routing and behavior guidance, while executable capabilities stay in `context/tools/`.
 

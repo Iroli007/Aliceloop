@@ -7,7 +7,8 @@
 - 会话、事件、任务、sandbox run 的 SQLite 真相层
 - `context/` 上下文加载：prompt、session、memory、tools、skills、MCP client 占位
 - `runtime/agentRuntime.ts` 多步 agent loop
-- 四原语 sandbox：`read` / `write` / `edit` / `bash`
+- 六原子命令 sandbox：`read` / `grep` / `glob` / `write` / `edit` / `bash`
+- 允许模型通过 `write` / `edit` + `bash` 生成并执行一次性 helper 脚本，但不扩张系统 tool surface
 - `context/skills/` 下的 `SKILL.md` catalog
 - managed task tools、runtime scripts、model gateway config catalog
 - SSE session stream 与桌面端同步

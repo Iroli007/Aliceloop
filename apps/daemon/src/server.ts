@@ -118,6 +118,17 @@ interface CreateAttachmentBody {
   deviceType: DeviceType;
 }
 
+interface CreateFolderAttachmentBody {
+  folderName: string;
+  files: Array<{
+    relativePath: string;
+    mimeType: string;
+    contentBase64: string;
+  }>;
+  deviceId: string;
+  deviceType: DeviceType;
+}
+
 interface HeartbeatBody {
   deviceId: string;
   deviceType: DeviceType;
@@ -240,6 +251,27 @@ function parseLimitValue(value: string | string[] | undefined, fallback = 50): n
 
 function sanitizeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, "-");
+}
+
+function sanitizeRelativePath(relativePath: string) {
+  const normalized = relativePath.replace(/\\/g, "/").trim();
+  const segments = normalized
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (segments.length === 0) {
+    throw new Error("relativePath is required");
+  }
+
+  const sanitizedSegments = segments.map((segment) => {
+    if (segment === "." || segment === "..") {
+      throw new Error("relativePath cannot contain traversal segments");
+    }
+    return sanitizeFileName(segment);
+  });
+
+  return sanitizedSegments.join("/");
 }
 
 function writeSseEvent(write: (chunk: string) => void, event: unknown, seq: number) {
@@ -686,6 +718,68 @@ export async function createServer() {
       mimeType,
       byteSize: binary.byteLength,
       storagePath,
+    });
+
+    for (const event of result.events) {
+      publishSessionEvent(event);
+    }
+
+    return {
+      attachment: result.attachment,
+      jobs: result.jobs,
+      lastEventSeq: result.events.at(-1)?.seq ?? getSessionSnapshot(request.params.id).lastEventSeq,
+    };
+  });
+
+  server.post<{ Params: SessionParams; Body: CreateFolderAttachmentBody }>("/api/session/:id/attachment-folders", async (request, reply) => {
+    const { folderName, files, deviceType } = request.body;
+
+    if (!folderName || !Array.isArray(files) || files.length === 0) {
+      return reply.code(400).send({
+        error: "folderName and files are required",
+      });
+    }
+
+    if (!canAcceptClientTraffic(deviceType)) {
+      return reply.code(409).send({
+        error: "runtime_offline",
+        runtimePresence: getRuntimePresence(),
+      });
+    }
+
+    const safeFolderName = sanitizeFileName(folderName) || "folder";
+    const folderStoragePath = join(getUploadsDir(), `${randomUUID()}-${safeFolderName}`);
+    const runtimeSettings = getRuntimeSettings();
+    const sandbox = createPermissionSandboxExecutor({
+      label: `attachment-folder:${request.params.id}:${folderName}`,
+      permissionProfile: runtimeSettings.sandboxProfile,
+    });
+
+    let totalBytes = 0;
+
+    for (const file of files) {
+      if (!file?.relativePath || !file.contentBase64) {
+        return reply.code(400).send({
+          error: "each folder file requires relativePath and contentBase64",
+        });
+      }
+
+      const relativePath = sanitizeRelativePath(file.relativePath);
+      const binary = Buffer.from(file.contentBase64, "base64");
+      totalBytes += binary.byteLength;
+
+      await sandbox.writeBinaryFile({
+        targetPath: join(folderStoragePath, relativePath),
+        content: binary,
+      });
+    }
+
+    const result = createAttachment({
+      sessionId: request.params.id,
+      fileName: folderName,
+      mimeType: "inode/directory",
+      byteSize: totalBytes,
+      storagePath: folderStoragePath,
     });
 
     for (const event of result.events) {

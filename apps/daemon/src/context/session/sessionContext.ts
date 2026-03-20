@@ -24,7 +24,12 @@ function serializeMessageContent(message: SessionMessage): string {
   }
 
   const attachmentSummary = message.attachments
-    .map((attachment) => `${attachment.fileName} (${attachment.mimeType})`)
+    .map((attachment) => {
+      const binaryNote = attachment.mimeType.startsWith("image/")
+        ? ", binary image attachment"
+        : "";
+      return `${attachment.fileName} (${attachment.mimeType}, path: ${attachment.storagePath}${binaryNote})`;
+    })
     .join(", ");
 
   if (!message.content.trim()) {

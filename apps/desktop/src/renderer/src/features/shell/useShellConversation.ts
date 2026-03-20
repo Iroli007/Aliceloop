@@ -1,7 +1,6 @@
 import {
   type Attachment,
   previewSessionSnapshot,
-  previewSessionThreads,
   primarySessionId,
   type JobRunDetail,
   type RuntimePresence,
@@ -33,6 +32,15 @@ interface UploadResult extends SendResult {
   attachment?: Attachment;
 }
 
+interface FolderUploadPayload {
+  folderName: string;
+  files: Array<{
+    relativePath: string;
+    mimeType: string;
+    contentBase64: string;
+  }>;
+}
+
 export interface ShellConversationState {
   status: "loading" | "ready" | "error";
   sessionId: string;
@@ -47,6 +55,7 @@ export interface ShellConversationState {
   pending: boolean;
   pendingUpload: boolean;
   isResponding: boolean;
+  isAwaitingToolApproval: boolean;
   stoppingResponse: boolean;
   resolvingToolApprovalId: string | null;
   error?: string;
@@ -54,6 +63,13 @@ export interface ShellConversationState {
   createSession(): Promise<CreateSessionResult>;
   sendMessage(content: string, attachmentIds?: string[]): Promise<SendResult>;
   uploadAttachment(file: File): Promise<UploadResult>;
+  uploadFolder(files: File[]): Promise<UploadResult>;
+  uploadPreparedAttachment(input: {
+    fileName: string;
+    mimeType: string;
+    contentBase64: string;
+  }): Promise<UploadResult>;
+  uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult>;
   stopResponse(): Promise<SendResult>;
   approveToolApproval(approvalId: string): Promise<SendResult>;
   rejectToolApproval(approvalId: string): Promise<SendResult>;
@@ -167,6 +183,49 @@ function fileToBase64(file: File): Promise<string> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+async function buildFolderUploadPayload(files: File[]): Promise<FolderUploadPayload | null> {
+  if (files.length === 0) {
+    return null;
+  }
+
+  const firstRelativePath = files[0].webkitRelativePath;
+  if (!firstRelativePath) {
+    return null;
+  }
+
+  const folderName = firstRelativePath.split("/").filter(Boolean)[0] ?? "folder";
+  const payloadFiles: FolderUploadPayload["files"] = [];
+
+  for (const file of files) {
+    const relativePath = file.webkitRelativePath;
+    if (!relativePath) {
+      return null;
+    }
+
+    const segments = relativePath.split("/").filter(Boolean);
+    const relativeSegments = segments[0] === folderName ? segments.slice(1) : segments;
+    const normalizedRelativePath = relativeSegments.join("/");
+    if (!normalizedRelativePath) {
+      continue;
+    }
+
+    payloadFiles.push({
+      relativePath: normalizedRelativePath,
+      mimeType: file.type || "application/octet-stream",
+      contentBase64: await fileToBase64(file),
+    });
+  }
+
+  if (payloadFiles.length === 0) {
+    return null;
+  }
+
+  return {
+    folderName,
+    files: payloadFiles,
+  };
 }
 
 function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
@@ -308,10 +367,11 @@ async function fetchSessionSnapshot(baseUrl: string, sessionId: string) {
 
 export function useShellConversation(): ShellConversationState {
   const bridge = useMemo(() => getDesktopBridge(), []);
-  const lastEventSeqRef = useRef(previewSessionSnapshot.lastEventSeq);
+  const initialSnapshot = createLocalDraftSnapshot(previewSessionSnapshot);
+  const lastEventSeqRef = useRef(0);
   const deviceIdRef = useRef(getStableDesktopSessionDeviceId());
-  const [snapshot, setSnapshot] = useState<SessionSnapshot>(previewSessionSnapshot);
-  const [threads, setThreads] = useState<SessionThreadSummary[]>(previewSessionThreads);
+  const [snapshot, setSnapshot] = useState<SessionSnapshot>(initialSnapshot);
+  const [threads, setThreads] = useState<SessionThreadSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState(getStoredActiveSessionId());
   const [status, setStatus] = useState<ShellConversationState["status"]>("loading");
   const [daemonBaseUrl, setDaemonBaseUrl] = useState<string | null>(null);
@@ -685,7 +745,11 @@ export function useShellConversation(): ShellConversationState {
     }
   }
 
-  async function uploadAttachment(file: File): Promise<UploadResult> {
+  async function uploadPreparedAttachment(input: {
+    fileName: string;
+    mimeType: string;
+    contentBase64: string;
+  }): Promise<UploadResult> {
     if (!daemonBaseUrl) {
       return {
         ok: false,
@@ -704,16 +768,15 @@ export function useShellConversation(): ShellConversationState {
         };
       }
 
-      const contentBase64 = await fileToBase64(file);
       const response = await fetch(`${daemonBaseUrl}/api/session/${ensuredSession.sessionId}/attachments`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          fileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-          contentBase64,
+          fileName: input.fileName,
+          mimeType: input.mimeType,
+          contentBase64: input.contentBase64,
           deviceId: deviceIdRef.current,
           deviceType: "desktop",
         }),
@@ -769,6 +832,111 @@ export function useShellConversation(): ShellConversationState {
     } finally {
       setPendingUpload(false);
     }
+  }
+
+  async function uploadAttachment(file: File): Promise<UploadResult> {
+    const contentBase64 = await fileToBase64(file);
+    return uploadPreparedAttachment({
+      fileName: file.name,
+      mimeType: file.type || "application/octet-stream",
+      contentBase64,
+    });
+  }
+
+  async function uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult> {
+    if (!daemonBaseUrl) {
+      return {
+        ok: false,
+        error: "本地 daemon 还没连上。",
+      };
+    }
+
+    setPendingUpload(true);
+
+    try {
+      const ensuredSession = await ensureTargetSession(daemonBaseUrl);
+      if (!ensuredSession.ok) {
+        return {
+          ok: false,
+          error: ensuredSession.error,
+        };
+      }
+
+      const response = await fetch(`${daemonBaseUrl}/api/session/${ensuredSession.sessionId}/attachment-folders`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          folderName: input.folderName,
+          files: input.files,
+          deviceId: deviceIdRef.current,
+          deviceType: "desktop",
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        error?: string;
+        attachment?: Attachment;
+        jobs?: JobRunDetail[];
+        runtimePresence?: RuntimePresence;
+      };
+
+      if (!response.ok) {
+        if (payload.runtimePresence) {
+          setSnapshot((current) => ({
+            ...current,
+            runtimePresence: payload.runtimePresence ?? current.runtimePresence,
+          }));
+        }
+
+        return {
+          ok: false,
+          error: payload.error ?? "文件夹上传失败",
+        };
+      }
+
+      if (payload.attachment) {
+        setSnapshot((current) => {
+          let nextJobs = current.jobs;
+          for (const job of payload.jobs ?? []) {
+            nextJobs = upsertJob(nextJobs, job);
+          }
+
+          return {
+            ...current,
+            attachments: upsertAttachment(current.attachments, payload.attachment as Attachment),
+            jobs: nextJobs,
+          };
+        });
+      }
+
+      await refreshThreadsSafely(daemonBaseUrl);
+
+      return {
+        ok: true,
+        attachment: payload.attachment as Attachment | undefined,
+      };
+    } catch (uploadError) {
+      return {
+        ok: false,
+        error: uploadError instanceof Error ? uploadError.message : "文件夹上传失败",
+      };
+    } finally {
+      setPendingUpload(false);
+    }
+  }
+
+  async function uploadFolder(files: File[]): Promise<UploadResult> {
+    const folderPayload = await buildFolderUploadPayload(files);
+    if (!folderPayload) {
+      return {
+        ok: false,
+        error: "当前环境没有返回有效的文件夹层级，暂时无法上传文件夹。",
+      };
+    }
+
+    return uploadPreparedFolder(folderPayload);
   }
 
   async function stopResponse(): Promise<SendResult> {
@@ -871,7 +1039,8 @@ export function useShellConversation(): ShellConversationState {
   const latestReply = [...snapshot.messages].reverse().find((message) => message.role !== "user") ?? null;
   const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
   const latestArtifact = snapshot.artifacts[0] ?? null;
-  const isResponding = isProviderCompletionActive(latestJob);
+  const isAwaitingToolApproval = snapshot.pendingToolApprovals.length > 0;
+  const isResponding = isProviderCompletionActive(latestJob) && !isAwaitingToolApproval;
   const sessionTitle =
     (activeSessionId === localDraftSessionId ? null : threads.find((thread) => thread.id === activeSessionId)?.title) ??
     snapshot.session.title;
@@ -896,6 +1065,7 @@ export function useShellConversation(): ShellConversationState {
     pending,
     pendingUpload,
     isResponding,
+    isAwaitingToolApproval,
     stoppingResponse,
     resolvingToolApprovalId,
     error,
@@ -903,6 +1073,9 @@ export function useShellConversation(): ShellConversationState {
     createSession,
     sendMessage,
     uploadAttachment,
+    uploadFolder,
+    uploadPreparedAttachment,
+    uploadPreparedFolder,
     stopResponse,
     approveToolApproval: (approvalId: string) => resolveToolApproval(approvalId, "approve"),
     rejectToolApproval: (approvalId: string) => resolveToolApproval(approvalId, "reject"),
