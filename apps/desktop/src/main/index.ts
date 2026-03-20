@@ -124,6 +124,10 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  if (process.platform === "darwin") {
+    window.setWindowButtonVisibility(false);
+  }
+
   if (devServerUrl) {
     window.loadURL(devServerUrl);
   } else {
@@ -212,6 +216,33 @@ ipcMain.handle("dialog:open-file-or-folder", async () => {
     canceled: false,
     entries,
   };
+});
+
+ipcMain.handle("window:close", (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.close();
+});
+
+ipcMain.handle("window:minimize", (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.minimize();
+});
+
+ipcMain.handle("window:toggle-fullscreen", (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) {
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    window.setFullScreen(!window.isFullScreen());
+    return;
+  }
+
+  if (window.isMaximized()) {
+    window.unmaximize();
+    return;
+  }
+
+  window.maximize();
 });
 
 app.whenReady().then(() => {

@@ -118,6 +118,7 @@ button {
 }
 
 .shell__sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -138,6 +139,16 @@ button {
     opacity var(--shell-sidebar-motion-fade-duration) ease,
     padding var(--shell-sidebar-motion-duration) var(--shell-sidebar-motion-ease),
     border-color var(--shell-sidebar-motion-duration) ease;
+}
+
+.shell__sidebar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 18px;
+  -webkit-app-region: drag;
 }
 
 .shell__sidebar--collapsed {
@@ -178,25 +189,17 @@ button {
   justify-content: space-between;
 }
 
-.sidebar__titlebar-spacer,
-.settings-sidebar__titlebar-spacer {
-  width: 34px;
-  height: 34px;
-}
-
-.shell__sidebar--collapsed .sidebar__titlebar-spacer {
-  display: none;
-}
-
 .sidebar__header {
   position: relative;
   z-index: 6;
-  min-height: 34px;
+  min-height: 36px;
+  -webkit-app-region: drag;
 }
 
 .sidebar__icons {
   position: relative;
   z-index: 6;
+  min-height: 36px;
   gap: 0;
   transform: none;
 }
@@ -208,8 +211,8 @@ button {
 
 .sidebar__icon-button {
   position: relative;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -271,6 +274,99 @@ button {
 .sidebar__icon-button:hover {
   background: #eef0ec;
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.07);
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 36px;
+}
+
+.window-controls__traffic-group,
+.window-controls__icon-group {
+  display: flex;
+  align-items: center;
+}
+
+.window-controls__traffic-group {
+  gap: 4px;
+}
+
+.window-controls__icon-group {
+  gap: 12px;
+}
+
+.window-controls__traffic-button,
+.window-controls__icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+
+.window-controls__traffic-button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  padding: 7px;
+  border-radius: 999px;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.window-controls__traffic-button:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.window-controls__traffic-dot {
+  width: 16px;
+  height: 16px;
+  display: block;
+  border-radius: 999px;
+}
+
+.window-controls__traffic-dot--close {
+  background: #ff3b30;
+}
+
+.window-controls__traffic-dot--minimize {
+  background: #f4b400;
+}
+
+.window-controls__traffic-dot--fullscreen {
+  background: #00c950;
+}
+
+.window-controls__icon-button {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background: #f7f7f5;
+  color: var(--gray-500);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  transition:
+    background 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.window-controls__icon-button:hover {
+  background: #eef0ec;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.07);
+}
+
+.window-controls__icon-button svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.85;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .sidebar__threads {
@@ -611,10 +707,30 @@ button {
   will-change: transform, filter;
 }
 
+.shell__main::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 18px;
+  -webkit-app-region: drag;
+}
+
 .main__header {
   min-height: 34px;
   padding: 0 26px;
   transition: padding var(--shell-sidebar-motion-duration) var(--shell-sidebar-motion-ease);
+  -webkit-app-region: drag;
+}
+
+.main__header button,
+.main__header input,
+.main__header textarea,
+.main__header select,
+.main__header a,
+.main__header [role="button"] {
+  -webkit-app-region: no-drag;
 }
 
 .main__header-left,
@@ -1511,6 +1627,7 @@ button {
 }
 
 .settings-sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -1519,10 +1636,26 @@ button {
   border-right: 1px solid rgba(15, 23, 42, 0.06);
 }
 
+.settings-sidebar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 22px;
+  -webkit-app-region: drag;
+}
+
 .settings-sidebar__header {
   display: flex;
   align-items: center;
   min-height: 34px;
+  -webkit-app-region: drag;
+}
+
+.settings-sidebar__header button,
+.settings-sidebar__header [role="button"] {
+  -webkit-app-region: no-drag;
 }
 
 .settings-sidebar__list {
@@ -1550,6 +1683,13 @@ button {
   overflow-y: auto;
   padding-right: 6px;
   scrollbar-gutter: stable;
+}
+
+.settings-content__body--providers {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-right: 0;
 }
 
 .settings-content__header {
@@ -1611,7 +1751,12 @@ button {
   display: grid;
   gap: 10px;
   min-height: 0;
-  overflow-y: auto;
+  max-height: 100%;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(122, 143, 161, 0.72) rgba(221, 229, 238, 0.88);
 }
 
 .provider-list__item {
@@ -1669,11 +1814,40 @@ button {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  min-height: 0;
+  max-height: 100%;
   padding: 22px;
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(109, 129, 159, 0.12);
-  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(122, 143, 161, 0.72) rgba(221, 229, 238, 0.88);
+}
+
+.provider-list::-webkit-scrollbar,
+.provider-detail::-webkit-scrollbar {
+  width: 12px;
+}
+
+.provider-list::-webkit-scrollbar-track,
+.provider-detail::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: rgba(221, 229, 238, 0.88);
+}
+
+.provider-list::-webkit-scrollbar-thumb,
+.provider-detail::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(221, 229, 238, 0.88);
+  border-radius: 999px;
+  background: rgba(122, 143, 161, 0.72);
+}
+
+.provider-list::-webkit-scrollbar-thumb:hover,
+.provider-detail::-webkit-scrollbar-thumb:hover {
+  background: rgba(97, 120, 141, 0.88);
 }
 
 .provider-detail__switches {

@@ -40,6 +40,9 @@ type DesktopBridge = {
   getAppMeta(): Promise<DesktopMeta>;
   pingRuntime(): Promise<RuntimePing>;
   openFileOrFolder(): Promise<DesktopPickerResult>;
+  closeWindow(): Promise<void>;
+  minimizeWindow(): Promise<void>;
+  toggleFullscreenWindow(): Promise<void>;
   mode: "electron" | "web-preview";
 };
 
@@ -78,6 +81,20 @@ function createBrowserBridge(): DesktopBridge {
         canceled: true,
         entries: [],
       };
+    },
+    async closeWindow() {
+      window.close();
+    },
+    async minimizeWindow() {
+      return;
+    },
+    async toggleFullscreenWindow() {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+        return;
+      }
+
+      await document.documentElement.requestFullscreen?.();
     },
   };
 }

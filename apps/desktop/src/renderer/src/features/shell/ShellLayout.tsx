@@ -5,6 +5,7 @@ import { settingsNav } from "./nav";
 import { useShellConversation } from "./useShellConversation";
 import { useRuntimeCatalogs } from "./useRuntimeCatalogs";
 import { useRuntimeSettings } from "./useRuntimeSettings";
+import { WindowControls } from "./WindowControls";
 import type { ShellState } from "./useShellData";
 import { getDesktopBridge } from "../../platform/desktopBridge";
 
@@ -739,44 +740,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           .filter(Boolean)
           .join(" ")}
       >
-        {isSidebarCollapsed ? (
-          <button
-            className="shell__sidebar-pin shell__sidebar-pin--floating"
-            type="button"
-            aria-label="展开侧边栏"
-            onClick={toggleSidebar}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <rect x="3.5" y="4.5" width="17" height="15" rx="4.5" />
-              <path d="M8.25 7.5V16.5" />
-            </svg>
-            <span className="sidebar__icon-tooltip">展开侧边栏</span>
-          </button>
-        ) : null}
-
         <aside className={`shell__sidebar${isSidebarCollapsed ? " shell__sidebar--collapsed" : ""}`}>
           <header className="sidebar__header">
-            <div className="sidebar__titlebar-spacer" />
-            <div className="sidebar__icons">
-              <button
-                className="sidebar__icon-button sidebar__icon-button--neutral shell__sidebar-pin"
-                type="button"
-                aria-label="收起侧边栏"
-                onClick={toggleSidebar}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="3.5" y="4.5" width="17" height="15" rx="4.5" />
-                  <path d="M8.25 7.5V16.5" />
-                </svg>
-                <span className="sidebar__icon-tooltip">收起侧边栏</span>
-              </button>
-              <button className="sidebar__icon-button" aria-label="线程搜索" type="button">
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M10.2 18.2c4.42 0 8-3.13 8-6.98s-3.58-6.97-8-6.97s-8 3.12-8 6.97c0 1.92.89 3.66 2.34 4.92l-.73 3.3l3.27-1.44c.96.14 1.69.2 3.12.2Z" />
-                </svg>
-                <span className="sidebar__icon-tooltip">线程搜索</span>
-              </button>
-            </div>
+            <WindowControls
+              sidebarToggle={{
+                label: "收起侧边栏",
+                onClick: toggleSidebar,
+              }}
+              showThreadSearch
+            />
           </header>
 
           <section className="sidebar__threads">
@@ -870,7 +842,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
         <main className="shell__main" style={shellMainStyle}>
           <header className="main__header">
             <div className="main__header-left">
-              <div className="main__window-controls-space" aria-hidden="true" />
+              {isSidebarCollapsed ? (
+                <WindowControls
+                  sidebarToggle={{
+                    label: "展开侧边栏",
+                    onClick: toggleSidebar,
+                  }}
+                  showThreadSearch
+                />
+              ) : null}
               <div className="main__title">
                 <strong>{conversation.sessionTitle}</strong>
                 <span>·</span>
@@ -1107,7 +1087,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           <section className="settings-modal" onClick={(event) => event.stopPropagation()}>
             <aside className="settings-sidebar">
               <div className="settings-sidebar__header">
-                <div className="settings-sidebar__titlebar-spacer" />
+                <WindowControls onClose={() => setIsSettingsOpen(false)} />
               </div>
               <div className="settings-sidebar__list">
                 {settingsNav.map((item) => (
@@ -1263,134 +1243,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <h2>{settingsNav.find((item) => item.id === activeSettingsTab)?.label ?? "设置"}</h2>
               </header>
 
-              <div className="settings-content__body">
-              {activeSettingsTab === "providers" ? (
-                <div className="settings-providers">
-                  <div className="settings-providers__body">
-                    <div className="provider-list">
-                      {providers.map((provider) => (
-                        <button
-                          key={provider.id}
-                          className={`provider-list__item${activeProviderId === provider.id ? " provider-list__item--active" : ""}`}
-                          onClick={() => setActiveProviderId(provider.id)}
-                        >
-                          <div className="provider-list__identity">
-                            <span className="provider-list__logo">{provider.label.slice(0, 2)}</span>
-                            <div>
-                              <div className="provider-list__name">{provider.label}</div>
-                              <div className="provider-list__subtitle">{provider.model}</div>
-                            </div>
-                          </div>
-                          <span className={`provider-list__status provider-list__status--${provider.enabled ? "active" : "inactive"}`} />
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="provider-detail">
-                      {activeProvider ? (
-                        <>
-                          <div className="provider-detail__header">
-                            <div>
-                              <h3>{activeProvider.label}</h3>
-                              <p>{activeProvider.baseUrl}</p>
-                            </div>
-                            <div className="provider-detail__switches">
-                              <button className="provider-detail__icon">ϟ</button>
-                              <button
-                                className={`provider-detail__toggle${providerEnabled ? " provider-detail__toggle--on" : ""}`}
-                                onClick={() => setProviderEnabled((current) => !current)}
-                              />
-                            </div>
-                          </div>
-
-                        <div className="provider-field">
-                          <label>当前策略</label>
-                          <div className="provider-field__box">
-                              Aliceloop 负责 session、sandbox、skills 和事件流；模型网关只负责推理与协议适配。
-                          </div>
-                        </div>
-
-                          <div className="provider-field">
-                            <label>路由模式</label>
-                            <div className="provider-field__box">
-                              {activeProvider.transport === "auto"
-                                ? "自动：Claude 系列走 Anthropic 兼容接口，其余模型默认走 OpenAI 兼容接口。"
-                                : activeProvider.transport === "anthropic"
-                                  ? "固定走 Anthropic 兼容接口。"
-                                  : "固定走 OpenAI 兼容接口。"}
-                            </div>
-                          </div>
-
-                          <div className="provider-field">
-                            <label>API Key</label>
-                            <input
-                              className="provider-field__input"
-                              type="password"
-                              value={providerApiKeyInput}
-                              onChange={(event) => setProviderApiKeyInput(event.target.value)}
-                              placeholder={
-                                activeProvider.hasApiKey
-                                  ? `已保存 ${activeProvider.apiKeyMasked ?? `${activeProvider.label} Key`}，留空则保持不变`
-                                  : `粘贴你的 ${activeProvider.label} API Key`
-                              }
-                            />
-                          </div>
-
-                          <div className="provider-field">
-                            <label>Base URL</label>
-                            <input
-                              className="provider-field__input"
-                              value={providerBaseUrlInput}
-                              onChange={(event) => setProviderBaseUrlInput(event.target.value)}
-                              placeholder={activeProvider.baseUrl}
-                            />
-                          </div>
-
-                          <div className="provider-field">
-                            <label>模型</label>
-                            <input
-                              className="provider-field__input"
-                              value={providerModelInput}
-                              onChange={(event) => setProviderModelInput(event.target.value)}
-                              placeholder={activeProvider.model}
-                            />
-                          </div>
-
-                        <div className="provider-field">
-                          <label>状态</label>
-                          <div className="provider-field__box">
-                              {providerEnabled ? "已启用，可通过当前网关发起真实推理" : "未启用，保存后仍可先保留网关配置"}
-                          </div>
-                        </div>
-
-                          {providerNotice ? <div className="provider-notice">{providerNotice}</div> : null}
-                          {providerState.error ? <div className="provider-notice provider-notice--error">{providerState.error}</div> : null}
-
-                          <div className="provider-actions">
-                            <button className="settings-toolbar__button" onClick={() => setProviderApiKeyInput("")}>
-                              清空本次输入
-                            </button>
-                            <button
-                              className="settings-toolbar__button settings-toolbar__button--primary"
-                              onClick={saveActiveProvider}
-                              disabled={providerState.savingProviderId === activeProvider.id}
-                            >
-                              {providerState.savingProviderId === activeProvider.id ? "保存中..." : `保存 ${activeProvider.label}`}
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="provider-field">
-                          <label>模型网关</label>
-                          <div className="provider-field__box">
-                            还没有从 daemon 读到可编辑的模型网关配置。
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
+              <div className={`settings-content__body${activeSettingsTab === "providers" ? " settings-content__body--providers" : ""}`}>
+              {activeSettingsTab === "providers" ? <div className="settings-providers" /> : null}
 
               {activeSettingsTab === "sandbox" ? (
                 <div className="settings-panel">
