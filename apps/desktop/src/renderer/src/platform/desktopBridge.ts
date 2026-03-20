@@ -40,6 +40,8 @@ type DesktopBridge = {
   getAppMeta(): Promise<DesktopMeta>;
   pingRuntime(): Promise<RuntimePing>;
   openFileOrFolder(): Promise<DesktopPickerResult>;
+  minimizeWindow(): Promise<void>;
+  toggleMaximizeWindow(): Promise<void>;
   mode: "electron" | "web-preview";
 };
 
@@ -79,6 +81,8 @@ function createBrowserBridge(): DesktopBridge {
         entries: [],
       };
     },
+    async minimizeWindow() {},
+    async toggleMaximizeWindow() {},
   };
 }
 

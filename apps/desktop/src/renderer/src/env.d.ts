@@ -1,5 +1,12 @@
 export {};
 
+declare module "react" {
+  interface InputHTMLAttributes<T> {
+    directory?: string;
+    webkitdirectory?: string;
+  }
+}
+
 declare global {
   interface Window {
     aliceloopDesktop?: {
@@ -35,6 +42,8 @@ declare global {
             }
         >;
       }>;
+      minimizeWindow(): Promise<void>;
+      toggleMaximizeWindow(): Promise<void>;
     };
   }
 

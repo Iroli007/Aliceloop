@@ -11,10 +11,17 @@ import {
   type StudyArtifact,
 } from "@aliceloop/runtime-core";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  buildFolderUploadPayload,
+  fileToBase64,
+  type FolderUploadPayload,
+  type PreparedAttachmentInput,
+} from "../uploads/filePayloads";
 import { getDesktopBridge } from "../../platform/desktopBridge";
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const STREAM_RETRY_MS = 2_000;
+const SNAPSHOT_LOAD_RETRY_MS = 2_000;
 const mobileDeviceStorageKey = "aliceloop-companion-device-id";
 
 interface MutationResult {
@@ -36,6 +43,9 @@ export interface CompanionState {
   error?: string;
   sendMessage(input: { content: string; attachmentIds: string[] }): Promise<MutationResult>;
   uploadAttachment(file: File): Promise<UploadResult>;
+  uploadFolder(files: File[]): Promise<UploadResult>;
+  uploadPreparedAttachment(input: PreparedAttachmentInput): Promise<UploadResult>;
+  uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult>;
 }
 
 function getStableDeviceId(storageKey: string, prefix: string) {
@@ -155,19 +165,6 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
   }
 }
 
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      const [, base64 = ""] = result.split(",", 2);
-      resolve(base64);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 export function useCompanionData(): CompanionState {
   const bridge = useMemo(() => getDesktopBridge(), []);
   const lastEventSeqRef = useRef(previewSessionSnapshot.lastEventSeq);
@@ -182,10 +179,16 @@ export function useCompanionData(): CompanionState {
 
   useEffect(() => {
     let cancelled = false;
+    let retryTimer: number | null = null;
 
     async function load() {
       try {
         const { daemonBaseUrl: baseUrl } = await bridge.getAppMeta();
+        if (cancelled) {
+          return;
+        }
+
+        setDaemonBaseUrl(baseUrl);
         const response = await fetch(`${baseUrl}/api/session/${primarySessionId}/snapshot`);
 
         if (!response.ok) {
@@ -204,6 +207,10 @@ export function useCompanionData(): CompanionState {
         if (!cancelled) {
           setStatus("error");
           setError(loadError instanceof Error ? loadError.message : "Unknown companion error");
+          retryTimer = window.setTimeout(() => {
+            retryTimer = null;
+            void load();
+          }, SNAPSHOT_LOAD_RETRY_MS);
         }
       }
     }
@@ -212,6 +219,9 @@ export function useCompanionData(): CompanionState {
 
     return () => {
       cancelled = true;
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+      }
     };
   }, [bridge]);
 
@@ -377,7 +387,7 @@ export function useCompanionData(): CompanionState {
     }
   }
 
-  async function uploadAttachment(file: File): Promise<UploadResult> {
+  async function uploadPreparedAttachment(input: PreparedAttachmentInput): Promise<UploadResult> {
     if (!daemonBaseUrl) {
       return { ok: false, error: "本地 daemon 尚未连接" };
     }
@@ -385,16 +395,15 @@ export function useCompanionData(): CompanionState {
     setPendingUpload(true);
 
     try {
-      const contentBase64 = await fileToBase64(file);
       const response = await fetch(`${daemonBaseUrl}/api/session/${primarySessionId}/attachments`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          fileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-          contentBase64,
+          fileName: input.fileName,
+          mimeType: input.mimeType,
+          contentBase64: input.contentBase64,
           deviceId: deviceIdRef.current,
           deviceType: "mobile",
         }),
@@ -450,6 +459,98 @@ export function useCompanionData(): CompanionState {
     }
   }
 
+  async function uploadAttachment(file: File): Promise<UploadResult> {
+    const contentBase64 = await fileToBase64(file);
+    return uploadPreparedAttachment({
+      fileName: file.name,
+      mimeType: file.type || "application/octet-stream",
+      contentBase64,
+    });
+  }
+
+  async function uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult> {
+    if (!daemonBaseUrl) {
+      return { ok: false, error: "本地 daemon 尚未连接" };
+    }
+
+    setPendingUpload(true);
+
+    try {
+      const response = await fetch(`${daemonBaseUrl}/api/session/${primarySessionId}/attachment-folders`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          folderName: input.folderName,
+          files: input.files,
+          deviceId: deviceIdRef.current,
+          deviceType: "mobile",
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        error?: string;
+        attachment?: Attachment;
+        jobs?: JobRunDetail[];
+        runtimePresence?: RuntimePresence;
+      };
+
+      if (!response.ok) {
+        if (payload.runtimePresence) {
+          setSnapshot((current) => ({
+            ...current,
+            runtimePresence: payload.runtimePresence ?? current.runtimePresence,
+          }));
+        }
+
+        return {
+          ok: false,
+          error: payload.error === "runtime_offline" ? "桌面 runtime 当前离线，暂时不能上传文件夹。" : payload.error ?? "文件夹上传失败",
+        };
+      }
+
+      if (payload.attachment) {
+        setSnapshot((current) => {
+          let nextJobs = current.jobs;
+          for (const job of payload.jobs ?? []) {
+            nextJobs = upsertJob(nextJobs, job);
+          }
+
+          return {
+            ...current,
+            attachments: upsertAttachment(current.attachments, payload.attachment as Attachment),
+            jobs: nextJobs,
+          };
+        });
+      }
+
+      return {
+        ok: true,
+        attachment: payload.attachment as Attachment | undefined,
+      };
+    } catch (uploadError) {
+      return {
+        ok: false,
+        error: uploadError instanceof Error ? uploadError.message : "文件夹上传失败",
+      };
+    } finally {
+      setPendingUpload(false);
+    }
+  }
+
+  async function uploadFolder(files: File[]): Promise<UploadResult> {
+    const folderPayload = await buildFolderUploadPayload(files);
+    if (!folderPayload) {
+      return {
+        ok: false,
+        error: "当前环境没有返回有效的文件夹层级，暂时无法上传文件夹。",
+      };
+    }
+
+    return uploadPreparedFolder(folderPayload);
+  }
+
   return {
     status,
     snapshot,
@@ -460,5 +561,8 @@ export function useCompanionData(): CompanionState {
     error,
     sendMessage,
     uploadAttachment,
+    uploadFolder,
+    uploadPreparedAttachment,
+    uploadPreparedFolder,
   };
 }

@@ -35,6 +35,10 @@ button {
   --shell-sidebar-motion-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --shell-sidebar-shift-distance: 8px;
   --shell-sidebar-shift-blur: 0.35px;
+  --shell-main-top-padding: 18px;
+  --window-controls-safe-width: 104px;
+  --window-controls-gap: 8px;
+  --window-control-button-size: 30px;
   --workspace-history-scale: 1;
   --workspace-left-gutter-min: 24px;
   --workspace-right-gutter-min: 24px;
@@ -75,32 +79,32 @@ button {
 
 .shell__sidebar-pin {
   position: relative;
-  width: 34px;
-  height: 34px;
+  width: var(--window-control-button-size);
+  height: var(--window-control-button-size);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
+  border-radius: 11px;
   background: #f7f7f5;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   color: var(--gray-500);
   flex-shrink: 0;
   transition:
     background 120ms ease,
     box-shadow 120ms ease,
     transform 120ms ease;
+  -webkit-app-region: no-drag;
 }
 
-.shell__sidebar-pin--floating {
-  position: fixed;
-  top: 10px;
-  left: 18px;
-  z-index: 30;
+.shell__sidebar-pin--header {
+  position: relative;
+  z-index: 4;
+  margin-top: -8px;
 }
 
 .shell__sidebar-pin svg {
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.75;
@@ -180,8 +184,9 @@ button {
 
 .sidebar__titlebar-spacer,
 .settings-sidebar__titlebar-spacer {
-  width: 34px;
-  height: 34px;
+  width: var(--window-controls-safe-width);
+  height: var(--window-control-button-size);
+  -webkit-app-region: drag;
 }
 
 .shell__sidebar--collapsed .sidebar__titlebar-spacer {
@@ -191,13 +196,15 @@ button {
 .sidebar__header {
   position: relative;
   z-index: 6;
-  min-height: 34px;
+  min-height: var(--window-control-button-size);
+  justify-content: flex-start;
+  gap: var(--window-controls-gap);
 }
 
 .sidebar__icons {
   position: relative;
   z-index: 6;
-  gap: 0;
+  gap: 6px;
   transform: none;
 }
 
@@ -208,19 +215,20 @@ button {
 
 .sidebar__icon-button {
   position: relative;
-  width: 34px;
-  height: 34px;
+  width: var(--window-control-button-size);
+  height: var(--window-control-button-size);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
+  border-radius: 11px;
   background: #f7f7f5;
   color: #1677ff;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   transition:
     background 120ms ease,
     box-shadow 120ms ease,
     transform 120ms ease;
+  -webkit-app-region: no-drag;
 }
 
 .sidebar__icon-button--neutral {
@@ -228,8 +236,8 @@ button {
 }
 
 .sidebar__icon-button svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.85;
@@ -561,6 +569,24 @@ button {
   pointer-events: auto;
 }
 
+.sidebar__settings-toast {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 112px);
+  max-width: 180px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(17, 24, 39, 0.92);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+  pointer-events: none;
+  animation: settings-toast-in 160ms ease;
+  z-index: 8;
+}
+
 .sidebar__settings-popout {
   position: absolute;
   left: 0;
@@ -596,6 +622,18 @@ button {
   background: rgba(244, 246, 248, 0.96);
 }
 
+@keyframes settings-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .shell__main {
   --composer-height: 176px;
   --composer-reserve-space: 192px;
@@ -605,16 +643,27 @@ button {
   gap: 18px;
   min-height: 100vh;
   height: 100vh;
-  padding: 18px 0 16px;
+  padding: var(--shell-main-top-padding) 0 16px;
   background: #ffffff;
   overflow: hidden;
   will-change: transform, filter;
+}
+
+.shell__main::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--shell-main-top-padding);
+  -webkit-app-region: drag;
 }
 
 .main__header {
   min-height: 34px;
   padding: 0 26px;
   transition: padding var(--shell-sidebar-motion-duration) var(--shell-sidebar-motion-ease);
+  -webkit-app-region: drag;
 }
 
 .main__header-left,
@@ -626,12 +675,12 @@ button {
 .main__header-left {
   flex: 1 1 auto;
   min-width: 0;
-  gap: 18px;
+  gap: var(--window-controls-gap);
 }
 
 .main__window-controls-space {
-  width: 72px;
-  height: 34px;
+  width: var(--window-controls-safe-width);
+  height: var(--window-control-button-size);
   flex-shrink: 0;
 }
 
@@ -643,6 +692,15 @@ button {
   margin-left: auto;
   position: relative;
   z-index: 4;
+}
+
+.main__header button,
+.main__header input,
+.main__header textarea,
+.main__header select,
+.main__header a,
+.main__header [role="button"] {
+  -webkit-app-region: no-drag;
 }
 
 .main__title {
@@ -1022,6 +1080,15 @@ button {
   font-weight: 300;
   line-height: 1;
   transform: translateY(-0.5px);
+}
+
+.composer__add-file-button svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .composer__add-file-tooltip {
@@ -1522,11 +1589,61 @@ button {
 .settings-sidebar__header {
   display: flex;
   align-items: center;
-  min-height: 34px;
+  min-height: var(--window-control-button-size);
+  -webkit-app-region: drag;
 }
 
 .settings-sidebar__list {
   overflow: auto;
+}
+
+.settings-window-controls {
+  width: var(--window-controls-safe-width);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.settings-window-controls__button {
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  box-shadow: inset 0 0 0 0.5px rgba(15, 23, 42, 0.08);
+}
+
+.settings-window-controls__button span {
+  opacity: 0;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  color: rgba(22, 28, 38, 0.7);
+  transition: opacity 120ms ease;
+}
+
+.settings-window-controls:hover .settings-window-controls__button span,
+.settings-window-controls__button:focus-visible span {
+  opacity: 1;
+}
+
+.settings-window-controls__button--close {
+  background: #ff5f57;
+  border-color: #e0443e;
+}
+
+.settings-window-controls__button--minimize {
+  background: #febc2e;
+  border-color: #dca126;
+}
+
+.settings-window-controls__button--zoom {
+  background: #28c840;
+  border-color: #1faa35;
 }
 
 .settings-nav__item--active {
@@ -1558,12 +1675,17 @@ button {
   min-height: 50px;
   padding-bottom: 18px;
   border-bottom: 1px solid rgba(108, 128, 158, 0.1);
+  -webkit-app-region: drag;
 }
 
 .settings-content__header h2,
 .provider-detail h3,
 .settings-panel__heading h3 {
   margin: 0;
+}
+
+.settings-content__header h2 {
+  -webkit-app-region: no-drag;
 }
 
 .settings-providers {
@@ -1956,7 +2078,7 @@ button {
   }
 
   .shell__main {
-    padding-top: 68px;
+    --shell-main-top-padding: 68px;
   }
 
   .main__header {
@@ -1964,11 +2086,11 @@ button {
   }
 
   .main__header-left {
-    gap: 12px;
+    gap: 6px;
   }
 
   .main__window-controls-space {
-    width: 58px;
+    width: 88px;
   }
 
   .composer {
@@ -2219,8 +2341,18 @@ button {
   color: var(--text-primary);
 }
 
+.companion__composer-upload-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.companion__file-input {
+  display: none;
+}
+
 .companion__file-button,
-.companion__composer button {
+.companion__send-button {
   min-height: 40px;
   border-radius: 12px;
   padding: 0 14px;
@@ -2232,30 +2364,17 @@ button {
 }
 
 .companion__file-button {
-  position: relative;
-  overflow: hidden;
   color: #44536a;
   background: rgba(239, 244, 249, 0.95);
 }
 
-.companion__file-button input {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.companion__file-button--disabled {
-  opacity: 0.56;
-  pointer-events: none;
-}
-
-.companion__composer button {
+.companion__send-button {
   background: linear-gradient(135deg, #395a84 0%, #26415d 100%);
   color: white;
 }
 
-.companion__composer button:disabled {
+.companion__file-button:disabled,
+.companion__send-button:disabled {
   opacity: 0.56;
 }
 

@@ -140,6 +140,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const runtimeSettings = useRuntimeSettings();
   const conversation = useShellConversation();
   const desktopBridge = getDesktopBridge();
+  const isMacDesktop = desktopBridge.mode === "electron" && navigator.platform.toLowerCase().includes("mac");
   const threadGroups = groupThreadsByDate(conversation.threads);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [sidebarMotion, setSidebarMotion] = useState<"opening" | "closing" | null>(null);
@@ -163,16 +164,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [permissionDropdownOpen, setPermissionDropdownOpen] = useState(false);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
+  const [languageToastVisible, setLanguageToastVisible] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const approvalDockRef = useRef<HTMLDivElement | null>(null);
   const [approvalAttachments, setApprovalAttachments] = useState<Attachment[]>([]);
   const motionTimerRef = useRef<number | null>(null);
+  const languageToastTimerRef = useRef<number | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
   const messagesContentRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLFormElement | null>(null);
   const composerAddFileButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerFolderInputRef = useRef<HTMLInputElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
   const previousSessionIdRef = useRef<string | null>(null);
   const previousViewportHeightRef = useRef<number | null>(null);
@@ -196,6 +200,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     return () => {
       if (motionTimerRef.current) {
         window.clearTimeout(motionTimerRef.current);
+      }
+
+      if (languageToastTimerRef.current) {
+        window.clearTimeout(languageToastTimerRef.current);
       }
 
       if (scrollSyncFrameRef.current) {
@@ -440,6 +448,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }, sidebarMotionDurationMs);
   }
 
+  function showLanguageToast() {
+    setLanguageToastVisible(true);
+
+    if (languageToastTimerRef.current) {
+      window.clearTimeout(languageToastTimerRef.current);
+    }
+
+    languageToastTimerRef.current = window.setTimeout(() => {
+      setLanguageToastVisible(false);
+      languageToastTimerRef.current = null;
+    }, 1600);
+  }
+
   async function saveActiveProvider() {
     if (!activeProvider) {
       setProviderNotice("当前还没有可编辑的模型网关配置。");
@@ -543,6 +564,14 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }
   }
 
+  async function minimizeWindow() {
+    await desktopBridge.minimizeWindow();
+  }
+
+  async function toggleMaximizeWindow() {
+    await desktopBridge.toggleMaximizeWindow();
+  }
+
   async function installMcpServer(serverId: string) {
     setMcpNotice(null);
     const result = await runtimeCatalogs.installMcpServer(serverId);
@@ -621,6 +650,29 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     input.value = "";
   }
 
+  async function handleComposerFolderChange(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
+    if (files.length === 0) {
+      return;
+    }
+
+    setComposerNotice(null);
+    const result = await conversation.uploadFolder(files);
+    if (!result.ok) {
+      setComposerNotice(result.error ?? "文件夹上传失败");
+      input.value = "";
+      return;
+    }
+
+    const attachment = result.attachment;
+    if (attachment) {
+      setQueuedAttachments((current) => mergeAttachments(current, [attachment]));
+    }
+
+    input.value = "";
+  }
+
   async function openComposerFilePicker() {
     if (conversation.pendingUpload || conversation.pending) {
       return;
@@ -681,7 +733,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       : "发送消息";
   const composerPrimaryActionDisabled = isComposerBusy
     ? conversation.stoppingResponse
-    : conversation.pending || !composerDraft.trim();
+    : conversation.pending || (!composerDraft.trim() && queuedAttachments.length === 0);
   const approvalCard = activeToolApproval ? (
     <div className="approval-card">
       <div className="approval-card__accent" />
@@ -739,44 +791,31 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           .filter(Boolean)
           .join(" ")}
       >
-        {isSidebarCollapsed ? (
+        {/* Floating toolbar icons – animate between sidebar header and traffic-light row */}
+        <div className={`shell__toolbar-icons${isSidebarCollapsed ? " shell__toolbar-icons--collapsed" : ""}`}>
           <button
-            className="shell__sidebar-pin shell__sidebar-pin--floating"
+            className="sidebar__icon-button sidebar__icon-button--neutral shell__sidebar-pin"
             type="button"
-            aria-label="展开侧边栏"
+            aria-label={isSidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
             onClick={toggleSidebar}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="3.5" y="4.5" width="17" height="15" rx="4.5" />
               <path d="M8.25 7.5V16.5" />
             </svg>
-            <span className="sidebar__icon-tooltip">展开侧边栏</span>
+            <span className="sidebar__icon-tooltip">{isSidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}</span>
           </button>
-        ) : null}
+          <button className="sidebar__icon-button" aria-label="线程搜索" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M10.2 18.2c4.42 0 8-3.13 8-6.98s-3.58-6.97-8-6.97s-8 3.12-8 6.97c0 1.92.89 3.66 2.34 4.92l-.73 3.3l3.27-1.44c.96.14 1.69.2 3.12.2Z" />
+            </svg>
+            <span className="sidebar__icon-tooltip">线程搜索</span>
+          </button>
+        </div>
 
         <aside className={`shell__sidebar${isSidebarCollapsed ? " shell__sidebar--collapsed" : ""}`}>
           <header className="sidebar__header">
             <div className="sidebar__titlebar-spacer" />
-            <div className="sidebar__icons">
-              <button
-                className="sidebar__icon-button sidebar__icon-button--neutral shell__sidebar-pin"
-                type="button"
-                aria-label="收起侧边栏"
-                onClick={toggleSidebar}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <rect x="3.5" y="4.5" width="17" height="15" rx="4.5" />
-                  <path d="M8.25 7.5V16.5" />
-                </svg>
-                <span className="sidebar__icon-tooltip">收起侧边栏</span>
-              </button>
-              <button className="sidebar__icon-button" aria-label="线程搜索" type="button">
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M10.2 18.2c4.42 0 8-3.13 8-6.98s-3.58-6.97-8-6.97s-8 3.12-8 6.97c0 1.92.89 3.66 2.34 4.92l-.73 3.3l3.27-1.44c.96.14 1.69.2 3.12.2Z" />
-                </svg>
-                <span className="sidebar__icon-tooltip">线程搜索</span>
-              </button>
-            </div>
           </header>
 
           <section className="sidebar__threads">
@@ -849,6 +888,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <span className="sidebar__settings-label">{isSidebarCollapsed ? "" : "设置"}</span>
               </button>
 
+              {languageToastVisible && !isSidebarCollapsed ? (
+                <div className="sidebar__settings-toast" role="status" aria-live="polite">
+                  工时赶还没做！！！
+                </div>
+              ) : null}
+
               {!isSidebarCollapsed ? (
                 <div className="sidebar__settings-popout">
                   <button
@@ -858,7 +903,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   >
                     设置
                   </button>
-                  <button className="sidebar__settings-popout-item" type="button">
+                  <button className="sidebar__settings-popout-item" type="button" onClick={showLanguageToast}>
                     语言
                   </button>
                 </div>
@@ -991,7 +1036,11 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   <span className="composer__add-file-button-icon" aria-hidden="true">+</span>
                 </button>
                 <span className="composer__add-file-tooltip">
-                  {conversation.pendingUpload ? "上传中..." : "打开文件或文件夹"}
+                  {conversation.pendingUpload
+                    ? "上传中..."
+                    : desktopBridge.mode === "electron"
+                      ? "打开文件或文件夹"
+                      : "打开文件"}
                 </span>
                 <input
                   ref={composerFileInputRef}
@@ -1002,6 +1051,35 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   disabled={conversation.pendingUpload || conversation.pending}
                 />
               </div>
+
+              {desktopBridge.mode !== "electron" ? (
+                <div className="composer__add-file">
+                  <button
+                    type="button"
+                    className="composer__add-file-button"
+                    aria-label={conversation.pendingUpload ? "上传中" : "添加文件夹"}
+                    onClick={() => {
+                      composerFolderInputRef.current?.click();
+                    }}
+                    disabled={conversation.pendingUpload || conversation.pending}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M3.5 7.5a2 2 0 0 1 2-2h4l1.8 2H18.5a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-8.5Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                  <span className="composer__add-file-tooltip">打开文件夹</span>
+                  <input
+                    ref={composerFolderInputRef}
+                    className="composer__file-input"
+                    type="file"
+                    multiple
+                    directory=""
+                    webkitdirectory=""
+                    onChange={handleComposerFolderChange}
+                    disabled={conversation.pendingUpload || conversation.pending}
+                  />
+                </div>
+              ) : null}
 
               <div className="composer__dropdown-wrapper">
                 <button
@@ -1107,7 +1185,36 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           <section className="settings-modal" onClick={(event) => event.stopPropagation()}>
             <aside className="settings-sidebar">
               <div className="settings-sidebar__header">
-                <div className="settings-sidebar__titlebar-spacer" />
+                {isMacDesktop ? (
+                  <div className="settings-window-controls" aria-label="窗口控制">
+                    <button
+                      type="button"
+                      className="settings-window-controls__button settings-window-controls__button--close"
+                      aria-label="关闭设置"
+                      onClick={() => setIsSettingsOpen(false)}
+                    >
+                      <span aria-hidden="true">×</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-window-controls__button settings-window-controls__button--minimize"
+                      aria-label="最小化窗口"
+                      onClick={() => { void minimizeWindow(); }}
+                    >
+                      <span aria-hidden="true">−</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-window-controls__button settings-window-controls__button--zoom"
+                      aria-label="缩放窗口"
+                      onClick={() => { void toggleMaximizeWindow(); }}
+                    >
+                      <span aria-hidden="true">+</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="settings-sidebar__titlebar-spacer" />
+                )}
               </div>
               <div className="settings-sidebar__list">
                 {settingsNav.map((item) => (

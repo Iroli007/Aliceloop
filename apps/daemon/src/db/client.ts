@@ -113,69 +113,7 @@ const seedCrossReferences: SeedCrossReference[] = [
   },
 ];
 
-const previewEvents: SessionEvent[] = [
-  {
-    id: "seed-session-event-1",
-    sessionId: previewSessionSnapshot.session.id,
-    seq: 1,
-    type: "message.created",
-    payload: {
-      message: previewSessionSnapshot.messages[0],
-    },
-    createdAt: previewSessionSnapshot.messages[0].createdAt,
-  },
-  {
-    id: "seed-session-event-2",
-    sessionId: previewSessionSnapshot.session.id,
-    seq: 2,
-    type: "message.acked",
-    payload: {
-      message: previewSessionSnapshot.messages[1],
-    },
-    createdAt: previewSessionSnapshot.messages[1].createdAt,
-  },
-  {
-    id: "seed-session-event-3",
-    sessionId: previewSessionSnapshot.session.id,
-    seq: 3,
-    type: "attachment.ready",
-    payload: {
-      attachment: previewSessionSnapshot.attachments[0],
-    },
-    createdAt: previewSessionSnapshot.attachments[0].createdAt,
-  },
-  {
-    id: "seed-session-event-4",
-    sessionId: previewSessionSnapshot.session.id,
-    seq: 4,
-    type: "message.created",
-    payload: {
-      message: previewSessionSnapshot.messages[2],
-    },
-    createdAt: previewSessionSnapshot.messages[2].createdAt,
-  },
-  {
-    id: "seed-session-event-5",
-    sessionId: previewSessionSnapshot.session.id,
-    seq: 5,
-    type: "job.updated",
-    payload: {
-      job: previewSessionSnapshot.jobs[0],
-    },
-    createdAt: previewSessionSnapshot.jobs[0].updatedAt,
-  },
-  {
-    id: "seed-session-event-6",
-    sessionId: previewSessionSnapshot.session.id,
-    seq: 6,
-    type: "presence.updated",
-    payload: {
-      devices: previewSessionSnapshot.devices,
-      runtimePresence: previewSessionSnapshot.runtimePresence,
-    },
-    createdAt: previewSessionSnapshot.runtimePresence.lastHeartbeatAt ?? previewSessionSnapshot.session.updatedAt,
-  },
-];
+const previewEvents: SessionEvent[] = [];
 
 const seedProviderConfigs: SeedProviderConfig[] = listProviderDefinitions().map((provider) => ({
   providerId: provider.id,
@@ -467,20 +405,19 @@ function seedOverviewData(db: Database.Database) {
 }
 
 function seedSessionData(db: Database.Database) {
-  const sessionCount = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
-  if (sessionCount.count > 0) {
-    return;
+  const sessionExists = db.prepare("SELECT 1 FROM sessions WHERE id = ?").get(previewSessionSnapshot.session.id);
+  if (!sessionExists) {
+    seedSession(db, previewSessionSnapshot.session);
   }
-
-  seedSession(db, previewSessionSnapshot.session);
 
   for (const attachment of previewSessionSnapshot.attachments) {
     seedAttachment(db, attachment);
   }
 
-  seedSessionMessage(db, previewSessionSnapshot.messages[0], "desktop-preview");
-  seedSessionMessage(db, previewSessionSnapshot.messages[1], "desktop-preview");
-  seedSessionMessage(db, previewSessionSnapshot.messages[2], "mobile-preview");
+  for (const message of previewSessionSnapshot.messages) {
+    const sourceDeviceId = message.attachments.length > 0 ? "mobile-preview" : "desktop-preview";
+    seedSessionMessage(db, message, sourceDeviceId);
+  }
 
   for (const device of previewSessionSnapshot.devices) {
     seedDevicePresence(db, device);
@@ -508,6 +445,55 @@ function ensureColumn(db: Database.Database, tableName: string, columnName: stri
   }
 
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+}
+
+function hasLegacyPrimarySessionResidue(db: Database.Database) {
+  const row = db.prepare(
+    `
+      SELECT EXISTS(
+        SELECT 1
+        FROM session_messages
+        WHERE session_id = ?
+          AND (
+            id IN ('message-1', 'message-2', 'message-3')
+            OR content LIKE '%今晚复习包%'
+            OR content LIKE '%预习包%'
+            OR content LIKE '%session-stream-diagram%'
+            OR content LIKE '%/Users/demo/Pictures/%'
+            OR content LIKE '%Aliceloop runtime 中的一个会话实例%'
+            OR content LIKE '%JPEG 图片%'
+            OR content LIKE '%复习建议已沉淀为记忆笔记%'
+          )
+      ) AS present
+    `,
+  ).get(previewSessionSnapshot.session.id) as { present: number };
+
+  return row.present === 1;
+}
+
+function resetPrimarySession(db: Database.Database) {
+  const now = new Date().toISOString();
+  const sessionId = previewSessionSnapshot.session.id;
+  const sessionExists = db.prepare("SELECT 1 FROM sessions WHERE id = ?").get(sessionId);
+  if (!sessionExists) {
+    return;
+  }
+
+  db.transaction(() => {
+    db.prepare("DELETE FROM session_generated_files WHERE session_id = ?").run(sessionId);
+    db.prepare("DELETE FROM session_events WHERE session_id = ?").run(sessionId);
+    db.prepare("DELETE FROM session_messages WHERE session_id = ?").run(sessionId);
+    db.prepare("DELETE FROM attachments WHERE session_id = ?").run(sessionId);
+    db.prepare("DELETE FROM job_runs WHERE session_id = ?").run(sessionId);
+    db.prepare("UPDATE task_runs SET session_id = NULL WHERE session_id = ?").run(sessionId);
+    db.prepare(
+      `
+        UPDATE sessions
+        SET title = ?, updated_at = ?
+        WHERE id = ?
+      `,
+    ).run(previewSessionSnapshot.session.title, now, sessionId);
+  })();
 }
 
 function runMigrations(db: Database.Database) {
@@ -547,23 +533,35 @@ function runMigrations(db: Database.Database) {
       SET
         title = CASE id
           WHEN 'artifact-study-bianzheng' THEN 'Runtime 结构整理页'
-          WHEN 'artifact-review-pack' THEN '今晚复习包'
+          WHEN 'artifact-review-pack' THEN 'Runtime 排障清单'
           ELSE title
         END,
         summary = CASE id
           WHEN 'artifact-study-bianzheng' THEN '聚焦 session、sandbox、artifact 和 memory 的关系，适合快速回看和后续实现前定位。'
-          WHEN 'artifact-review-pack' THEN '围绕 runtime 分层、provider 接入和 companion 同步关系做抽问。'
+          WHEN 'artifact-review-pack' THEN '汇总启动、桥接、上传和同步链路的检查项，方便联调时快速排查。'
           ELSE summary
         END,
         body = CASE id
           WHEN 'artifact-study-bianzheng' THEN '1. Session、queue 和 events 组成 runtime 的真相层，负责持续状态和多端同步。'||char(10)||'2. Sandbox 只提供 read、grep、glob、write、edit、bash 六个执行原子命令，skills 通过它做副作用操作。'||char(10)||'3. Artifact、memory 和 tasks 是提交层结果，不该和底层执行 ABI 混在一起。'
-          WHEN 'artifact-review-pack' THEN '今晚先复习三件事：'||char(10)||'1. 先说清 gateway、runtime core 和 sandbox 各自负责什么。'||char(10)||'2. 回忆为什么 policy loop 不是 workflow，而是模型面对统一状态的下一跳决策。'||char(10)||'3. 再看一次 companion 同步链路，确认 snapshot、stream 和 heartbeat 的分工。'
+          WHEN 'artifact-review-pack' THEN '联调时优先检查三件事：'||char(10)||'1. 确认 preload、IPC 和 renderer 桥已经注入成功。'||char(10)||'2. 确认 daemon 健康检查、心跳和会话快照都能正常返回。'||char(10)||'3. 确认文件上传、文件夹上传和附件索引写入走的是同一条链路。'
           ELSE body
+        END,
+        updated_at_label = CASE id
+          WHEN 'artifact-review-pack' THEN '刚刚更新'
+          ELSE updated_at_label
         END,
         related_library_title = 'Aliceloop Runtime Notes'
       WHERE id IN ('artifact-study-bianzheng', 'artifact-review-pack')
     `,
   ).run();
+  db.prepare(
+    `
+      UPDATE sessions
+      SET title = ?
+      WHERE id = ?
+        AND title = 'Runtime 设计伴随会话'
+    `,
+  ).run(previewSessionSnapshot.session.title, previewSessionSnapshot.session.id);
   db.prepare(
     `
       UPDATE memory_notes
@@ -579,6 +577,14 @@ function runMigrations(db: Database.Database) {
           ELSE content
         END
       WHERE id IN ('memory-1', 'memory-2')
+    `,
+  ).run();
+  db.prepare(
+    `
+      UPDATE memory_notes
+      SET content = replace(replace(content, '今晚复习包', 'Runtime 排障清单'), '预习包', 'Runtime 预览清单')
+      WHERE content LIKE '%今晚复习包%'
+         OR content LIKE '%预习包%'
     `,
   ).run();
   db.prepare(
@@ -688,6 +694,10 @@ function runMigrations(db: Database.Database) {
       FROM memory_notes
     `,
   ).run();
+
+  if (hasLegacyPrimarySessionResidue(db)) {
+    resetPrimarySession(db);
+  }
 }
 
 function bootstrap(db: Database.Database) {
