@@ -1,5 +1,5 @@
 import type { Attachment, SandboxPermissionProfile, ToolApproval } from "@aliceloop/runtime-core";
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
 import { useShellConversation } from "./useShellConversation";
@@ -22,6 +22,14 @@ interface ThreadGroup {
 const sidebarMotionDurationMs = 240;
 const bottomStickThresholdPx = 96;
 const composerBottomClearancePx = 18;
+const defaultSidebarWidthPx = 286;
+const minSidebarWidthPx = 220;
+const maxSidebarWidthPx = 420;
+const sidebarWidthStorageKey = "aliceloop-shell-sidebar-width";
+
+function clampSidebarWidth(width: number) {
+  return Math.max(minSidebarWidthPx, Math.min(maxSidebarWidthPx, width));
+}
 
 function formatBytes(byteSize: number) {
   if (byteSize < 1024) {
@@ -189,6 +197,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const threadGroups = groupThreadsByDate(conversation.threads);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [sidebarMotion, setSidebarMotion] = useState<"opening" | "closing" | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window === "undefined") {
+      return defaultSidebarWidthPx;
+    }
+
+    const storedWidth = Number(window.localStorage.getItem(sidebarWidthStorageKey));
+    if (!Number.isFinite(storedWidth) || storedWidth <= 0) {
+      return defaultSidebarWidthPx;
+    }
+
+    return clampSidebarWidth(storedWidth);
+  });
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [activeSettingsTab, setActiveSettingsTab] = useState("general");
   const [activeProviderId, setActiveProviderId] = useState("");
@@ -224,6 +245,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const previousViewportHeightRef = useRef<number | null>(null);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const scrollSyncTimeoutRef = useRef<number | null>(null);
+  const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const providers = providerState.providers;
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
   const enabledProvider = providers.find((item) => item.enabled) ?? null;
@@ -233,6 +255,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const visibleMcpServers = (mcpView === "installed" ? installedMcpServers : runtimeCatalogs.mcpServers)
     .slice()
     .sort((left, right) => Number(right.featured) - Number(left.featured) || left.label.localeCompare(right.label, "zh-CN"));
+  const shellStyle = {
+    "--shell-sidebar-width": `${sidebarWidth}px`,
+  } as CSSProperties;
   const shellMainStyle = {
     "--composer-height": `${composerHeight}px`,
     "--composer-reserve-space": `${composerReserveSpace}px`,
@@ -253,6 +278,51 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(sidebarWidthStorageKey, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isSidebarResizing) {
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = sidebarResizeStateRef.current;
+      if (!dragState) {
+        return;
+      }
+
+      const nextWidth = clampSidebarWidth(dragState.startWidth + event.clientX - dragState.startX);
+      setSidebarWidth(nextWidth);
+    };
+
+    const stopResize = () => {
+      sidebarResizeStateRef.current = null;
+      setIsSidebarResizing(false);
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+
+    return () => {
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+  }, [isSidebarResizing]);
 
   const syncViewportToBottom = (force = false) => {
     const viewport = messagesViewportRef.current;
@@ -484,6 +554,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     motionTimerRef.current = window.setTimeout(() => {
       setSidebarMotion(null);
     }, sidebarMotionDurationMs);
+  }
+
+  function handleSidebarResizeStart(event: ReactPointerEvent<HTMLDivElement>) {
+    if (isSidebarCollapsed) {
+      return;
+    }
+
+    event.preventDefault();
+    sidebarResizeStateRef.current = {
+      startX: event.clientX,
+      startWidth: sidebarWidth,
+    };
+    setIsSidebarResizing(true);
   }
 
   async function saveActiveProvider() {
@@ -763,9 +846,11 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   return (
     <>
       <div
+        style={shellStyle}
         className={[
           "shell",
           isSidebarCollapsed ? "shell--sidebar-collapsed" : "",
+          isSidebarResizing ? "shell--sidebar-resizing" : "",
           sidebarMotion ? `shell--sidebar-${sidebarMotion}` : "",
         ]
           .filter(Boolean)
@@ -845,6 +930,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
             </button>
           </footer>
 
+          <div
+            className="shell__sidebar-resize-handle"
+            role="presentation"
+            aria-hidden="true"
+            onPointerDown={handleSidebarResizeStart}
+          />
         </aside>
 
         <main className="shell__main" style={shellMainStyle}>
