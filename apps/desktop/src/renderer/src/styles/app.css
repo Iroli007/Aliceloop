@@ -537,25 +537,32 @@ button {
 
 .sidebar__footer {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  padding: 12px 14px;
   min-height: 48px;
   transition:
     opacity var(--shell-sidebar-motion-fade-duration) ease,
     transform var(--shell-sidebar-motion-duration) var(--shell-sidebar-motion-ease);
 }
 
-.sidebar__settings-anchor {
-  position: relative;
-  width: 100%;
+.sidebar__settings-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--text-secondary, #64748b);
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
-.sidebar__settings-anchor::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 100%;
-  height: 14px;
+.sidebar__settings-btn:hover {
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text-primary);
+}
+
+.sidebar__settings-anchor {
+  width: 100%;
 }
 
 .settings-sidebar__list,
@@ -650,47 +657,6 @@ button {
   color: var(--gray-500);
 }
 
-.sidebar__settings-anchor:hover .sidebar__settings-popout,
-.sidebar__settings-anchor:focus-within .sidebar__settings-popout {
-  opacity: 1;
-  transform: translateY(0);
-  pointer-events: auto;
-}
-
-.sidebar__settings-popout {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 10px);
-  display: grid;
-  gap: 4px;
-  padding: 10px;
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid rgba(15, 23, 42, 0.06);
-  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.08);
-  opacity: 0;
-  transform: translateY(8px);
-  pointer-events: none;
-  transition: opacity 120ms ease, transform 120ms ease;
-}
-
-.sidebar__settings-popout-item {
-  min-height: 40px;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  padding: 0 12px;
-  border-radius: var(--radius-md);
-  text-align: left;
-  color: var(--gray-500);
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.sidebar__settings-popout-item:hover {
-  background: rgba(244, 246, 248, 0.96);
-}
 
 .shell__main {
   --composer-height: 176px;
@@ -1447,23 +1413,16 @@ button {
 .approval-card {
   display: flex;
   overflow: hidden;
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(250, 252, 255, 0.97), rgba(243, 247, 253, 0.97));
-  border: 1px solid rgba(92, 112, 143, 0.12);
-  box-shadow: 0 2px 12px rgba(80, 100, 140, 0.06);
-}
-
-.approval-card__accent {
-  flex-shrink: 0;
-  width: 4px;
-  background: linear-gradient(180deg, #d4a54a 0%, #c08b30 100%);
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .approval-card__body {
   flex: 1;
   display: grid;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 8px;
+  padding: 12px 14px;
   min-width: 0;
 }
 
@@ -1471,48 +1430,14 @@ button {
 
 .approval-card__head {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.approval-card__title-row {
-  display: flex;
   align-items: center;
-  gap: 8px;
 }
 
-.approval-card__icon {
-  flex-shrink: 0;
-  color: var(--gray-500);
-}
-
-.approval-card__title-row strong {
+.approval-card__title {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.01em;
-}
-
-.approval-card__chip {
-  display: inline-flex;
-  align-items: center;
-  margin-left: auto;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: var(--radius-lg);
-  background: rgba(212, 165, 74, 0.13);
-  color: #96701e;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.approval-card__detail {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--gray-500);
-  padding-left: 24px; /* icon (16) + gap (8) */
 }
 
 /* ── command block ── */
@@ -1520,17 +1445,19 @@ button {
 .approval-card__command-wrap {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .approval-card__command {
   margin: 0;
-  padding: 12px 14px;
+  padding: 10px 12px;
   overflow-x: auto;
-  border-radius: 10px;
-  background: #0f1720;
-  color: #dde8f8;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  max-height: 120px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: #f5f5f5;
+  color: var(--text-primary);
+  border: 1px solid rgba(0, 0, 0, 0.06);
   font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
   font-size: 13px;
   line-height: 1.55;
@@ -1541,7 +1468,7 @@ button {
 }
 
 .approval-card__prompt {
-  color: #6b9fc8;
+  color: var(--gray-400);
   margin-right: 8px;
   user-select: none;
 }
@@ -1565,9 +1492,9 @@ button {
 }
 
 .approval-card__btn {
-  min-height: 34px;
-  padding: 0 16px;
-  border-radius: 9px;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -1580,20 +1507,71 @@ button {
 }
 
 .approval-card__btn--reject {
-  background: rgba(200, 210, 225, 0.35);
-  color: var(--gray-700);
+  background: #f0f0f0;
+  color: var(--gray-600);
 }
 .approval-card__btn--reject:not(:disabled):hover {
-  background: rgba(200, 210, 225, 0.55);
+  background: #e4e4e4;
 }
 
 .approval-card__btn--approve {
-  background: linear-gradient(135deg, #3a7bc8, #2e6ab8);
+  background: var(--text-primary, #1a1a1a);
   color: #fff;
-  box-shadow: 0 1px 4px rgba(46, 106, 184, 0.2);
 }
 .approval-card__btn--approve:not(:disabled):hover {
-  background: linear-gradient(135deg, #4488d4, #3572c0);
+  background: #333;
+}
+
+/* ── Resolved approval inline card ── */
+
+.approval-resolved {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #fafafa;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  font-size: 12px;
+  color: var(--gray-500);
+  max-width: var(--workspace-message-width);
+  margin: 0 auto;
+}
+
+.approval-resolved__tool {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.approval-resolved__command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 11px;
+  color: var(--gray-500);
+}
+
+.approval-resolved__status {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.approval-resolved__status--approved {
+  color: #22863a;
+}
+
+.approval-resolved__status--rejected {
+  color: #cb2431;
+}
+
+.approval-resolved__time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--gray-400);
 }
 
 .status-banner {

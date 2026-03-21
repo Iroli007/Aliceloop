@@ -6,12 +6,12 @@ status: available
 mode: instructional
 source-url: https://docs.anthropic.com/en/docs/claude-code/sub-agents
 allowed-tools:
-  - sandbox_grep
-  - sandbox_glob
-  - sandbox_read
-  - sandbox_edit
-  - sandbox_write
-  - sandbox_bash
+  - grep
+  - glob
+  - read
+  - edit
+  - write
+  - bash
   - coding_agent_run
 ---
 
@@ -46,7 +46,7 @@ Examples:
 - Prefer existing abstractions over introducing new ones.
 - Avoid destructive git commands unless the user explicitly asks.
 - If the repo is dirty, work with the existing changes instead of reverting them.
-- If the task needs lightweight automation glue, create a temporary helper script with `sandbox_write` / `sandbox_edit`, run it with `sandbox_bash`, and keep it disposable.
+- If the task needs lightweight automation glue, create a temporary helper script with `write` / `edit`, run it with `bash`, and keep it disposable.
 - Do not treat helper scripts as new tools, and do not expand the agent-loop primitive set when the six core abilities are enough.
 - When blocked by ambiguity, make the safest reasonable assumption and say what you assumed.
 - If verification fails, report the failure honestly and keep the partial fix isolated.

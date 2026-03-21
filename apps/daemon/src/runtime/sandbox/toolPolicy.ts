@@ -252,7 +252,7 @@ export function assertCommandArguments(
     for (const arg of input.args) {
       if (dangerousRmFlags.has(arg)) {
         throw new SandboxViolationError(
-          `bash denied for dangerous rm flag: ${arg}; use sandbox_bash with rm on individual files or empty directories only`,
+          `bash denied for dangerous rm flag: ${arg}; use bash with rm on individual files or empty directories only`,
         );
       }
     }

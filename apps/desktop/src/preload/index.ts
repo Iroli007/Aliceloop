@@ -7,4 +7,5 @@ contextBridge.exposeInMainWorld("aliceloopDesktop", {
   closeWindow: () => ipcRenderer.invoke("window:close"),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
   toggleFullscreenWindow: () => ipcRenderer.invoke("window:toggle-fullscreen"),
+  openSettings: () => ipcRenderer.invoke("window:open-settings"),
 });

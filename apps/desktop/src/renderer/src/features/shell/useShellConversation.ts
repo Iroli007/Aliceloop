@@ -52,6 +52,7 @@ export interface ShellConversationState {
   latestJob: JobRunDetail | null;
   latestArtifact: StudyArtifact | null;
   pendingToolApprovals: ToolApproval[];
+  resolvedToolApprovals: ToolApproval[];
   pending: boolean;
   pendingUpload: boolean;
   isResponding: boolean;
@@ -145,6 +146,19 @@ function upsertToolApproval(approvals: ToolApproval[], approval: ToolApproval) {
     next.push(approval);
   }
   next.sort((left, right) => left.requestedAt.localeCompare(right.requestedAt));
+  return next;
+}
+
+function upsertResolvedToolApproval(approvals: ToolApproval[], approval: ToolApproval) {
+  const next = approvals.filter((item) => item.id !== approval.id);
+  if (approval.status !== "pending") {
+    next.push(approval);
+  }
+  next.sort((left, right) => {
+    const leftTime = left.resolvedAt ?? left.requestedAt;
+    const rightTime = right.resolvedAt ?? right.requestedAt;
+    return leftTime.localeCompare(rightTime);
+  });
   return next;
 }
 
@@ -242,6 +256,7 @@ function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
     messages: [],
     attachments: [],
     pendingToolApprovals: [],
+    resolvedToolApprovals: [],
     jobs: [],
     artifacts: [],
     lastEventSeq: 0,
@@ -260,6 +275,7 @@ function createEmptySnapshotFromThread(thread: SessionThreadSummary, current: Se
     messages: [],
     attachments: [],
     pendingToolApprovals: [],
+    resolvedToolApprovals: [],
     jobs: [],
     artifacts: [],
     lastEventSeq: 0,
@@ -317,6 +333,10 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
       return {
         ...snapshot,
         pendingToolApprovals: upsertToolApproval(snapshot.pendingToolApprovals, approval),
+        resolvedToolApprovals:
+          event.type === "tool.approval.resolved"
+            ? upsertResolvedToolApproval(snapshot.resolvedToolApprovals, approval)
+            : snapshot.resolvedToolApprovals,
       };
     }
     case "artifact.created":
@@ -1062,6 +1082,7 @@ export function useShellConversation(): ShellConversationState {
     latestJob,
     latestArtifact,
     pendingToolApprovals: snapshot.pendingToolApprovals,
+    resolvedToolApprovals: snapshot.resolvedToolApprovals,
     pending,
     pendingUpload,
     isResponding,

@@ -2,6 +2,7 @@ import { createSandboxAuditLogger } from "../runtime/sandbox/audit";
 import { createSandboxRuntimeBroker } from "../runtime/sandbox/runtimeBroker";
 import { buildSandboxRuntimePolicy } from "../runtime/sandbox/runtimePolicy";
 import { createHostSandboxRuntime } from "../runtime/sandbox/runtimes/hostRuntime";
+import { isSeatbeltAvailable } from "../runtime/sandbox/seatbelt";
 import {
   buildSandboxToolPolicy,
   getDefaultSandboxRoots,
@@ -27,6 +28,7 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
   const toolPolicy = buildSandboxToolPolicy(options);
   const runtimePolicy = buildSandboxRuntimePolicy(toolPolicy);
   const runtime = runtimeBroker.selectRuntime(runtimePolicy);
+  const seatbeltEnabled = !toolPolicy.fullAccess && isSeatbeltAvailable();
   const context = {
     label: options.label,
     toolPolicy,
@@ -34,6 +36,7 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
     audit: createSandboxAuditLogger(options.label),
     defaultTimeoutMs: options.defaultTimeoutMs ?? 10_000,
     maxBufferBytes: options.maxBufferBytes ?? 1024 * 1024,
+    seatbeltEnabled,
     seenBashApprovalFingerprints: new Set<string>(),
     requestBashApproval: options.requestBashApproval,
     requestElevatedApproval: options.requestElevatedApproval,

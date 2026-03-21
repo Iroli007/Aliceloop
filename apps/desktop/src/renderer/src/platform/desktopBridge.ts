@@ -43,6 +43,7 @@ type DesktopBridge = {
   closeWindow(): Promise<void>;
   minimizeWindow(): Promise<void>;
   toggleFullscreenWindow(): Promise<void>;
+  openSettings(): Promise<void>;
   mode: "electron" | "web-preview";
 };
 
@@ -95,6 +96,9 @@ function createBrowserBridge(): DesktopBridge {
       }
 
       await document.documentElement.requestFullscreen?.();
+    },
+    async openSettings() {
+      return;
     },
   };
 }

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, screen } from "electron";
+import { focusOrCreateSettingsWindow } from "./settingsWindow";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? "http://127.0.0.1:3030";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const devServerUrl = process.env.MAIN_WINDOW_VITE_DEV_SERVER_URL;
+const devServerUrl = process.env.ELECTRON_RENDERER_URL;
 
 type DesktopPickedFile = {
   kind: "file";
@@ -258,6 +259,10 @@ ipcMain.handle("window:toggle-fullscreen", (event) => {
   }
 
   window.maximize();
+});
+
+ipcMain.handle("window:open-settings", () => {
+  focusOrCreateSettingsWindow();
 });
 
 app.whenReady().then(() => {

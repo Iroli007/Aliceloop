@@ -114,6 +114,7 @@ export interface SandboxRuntimeContext {
   audit: SandboxAuditLogger;
   defaultTimeoutMs: number;
   maxBufferBytes: number;
+  seatbeltEnabled: boolean;
   seenBashApprovalFingerprints: Set<string>;
   requestBashApproval?: (input: { command: string; args: string[]; cwd: string }) => Promise<void>;
   requestElevatedApproval?: (input: SandboxElevatedApprovalInput) => Promise<void>;

@@ -38,6 +38,7 @@ declare global {
       closeWindow(): Promise<void>;
       minimizeWindow(): Promise<void>;
       toggleFullscreenWindow(): Promise<void>;
+      openSettings(): Promise<void>;
     };
   }
 

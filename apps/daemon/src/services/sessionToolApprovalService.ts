@@ -91,7 +91,7 @@ export async function requestSessionBashApproval(input: {
 }) {
   return requestSessionToolApproval({
     sessionId: input.sessionId,
-    toolName: "sandbox_bash",
+    toolName: "bash",
     title: "等待确认 bash 指令",
     detail: `将要在 ${input.cwd} 中执行以下命令。确认后才会真正运行。`,
     command: input.command,

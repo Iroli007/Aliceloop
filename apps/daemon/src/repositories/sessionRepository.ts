@@ -621,6 +621,11 @@ interface PendingApprovalEventRow {
   payload: string;
 }
 
+interface ApprovalEventRow {
+  sessionId: string;
+  payload: string;
+}
+
 function listPendingApprovalEvents(): ToolApproval[] {
   const db = getDatabase();
   const rows = db
@@ -651,6 +656,43 @@ function listPendingApprovalEvents(): ToolApproval[] {
   }
 
   return [...approvals.values()].filter((approval) => approval.status === "pending");
+}
+
+function listResolvedApprovalEvents(sessionId: string): ToolApproval[] {
+  const db = getDatabase();
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          session_id AS sessionId,
+          payload
+        FROM session_events
+        WHERE session_id = ?
+          AND type = 'tool.approval.resolved'
+        ORDER BY seq ASC
+      `,
+    )
+    .all(sessionId) as ApprovalEventRow[];
+
+  const approvals = new Map<string, ToolApproval>();
+  for (const row of rows) {
+    const payload = JSON.parse(row.payload) as { approval?: ToolApproval };
+    const approval = payload.approval;
+    if (!approval || approval.status === "pending") {
+      continue;
+    }
+
+    approvals.set(approval.id, {
+      ...approval,
+      sessionId: row.sessionId,
+    });
+  }
+
+  return [...approvals.values()].sort((left, right) => {
+    const leftTime = left.resolvedAt ?? left.requestedAt;
+    const rightTime = right.resolvedAt ?? right.requestedAt;
+    return leftTime.localeCompare(rightTime);
+  });
 }
 
 export function reconcileInterruptedSessionState() {
@@ -800,6 +842,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     messages,
     attachments,
     pendingToolApprovals: listPendingToolApprovals(sessionId),
+    resolvedToolApprovals: listResolvedApprovalEvents(sessionId),
     jobs,
     devices,
     runtimePresence,

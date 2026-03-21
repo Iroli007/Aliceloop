@@ -1,4 +1,4 @@
-import type { Attachment, SandboxPermissionProfile } from "@aliceloop/runtime-core";
+import type { Attachment, SandboxPermissionProfile, ToolApproval } from "@aliceloop/runtime-core";
 import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
@@ -53,6 +53,51 @@ function formatThreadId(threadId: string) {
   }
 
   return `${threadId.slice(0, 8)}…${threadId.slice(-4)}`;
+}
+
+function formatApprovalTime(isoString: string | null) {
+  if (!isoString) {
+    return "";
+  }
+
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+type TimelineEntry =
+  | { kind: "message"; message: import("@aliceloop/runtime-core").SessionMessage }
+  | { kind: "approval"; approval: ToolApproval };
+
+function buildTimeline(
+  messages: import("@aliceloop/runtime-core").SessionMessage[],
+  resolvedApprovals: ToolApproval[],
+): TimelineEntry[] {
+  const entries: TimelineEntry[] = [];
+
+  for (const message of messages) {
+    entries.push({ kind: "message", message });
+  }
+
+  for (const approval of resolvedApprovals) {
+    entries.push({ kind: "approval", approval });
+  }
+
+  entries.sort((a, b) => {
+    const aTime = a.kind === "message" ? a.message.createdAt : (a.approval.resolvedAt ?? a.approval.requestedAt);
+    const bTime = b.kind === "message" ? b.message.createdAt : (b.approval.resolvedAt ?? b.approval.requestedAt);
+    return aTime.localeCompare(bTime);
+  });
+
+  return entries;
 }
 
 function getThreadDateParts(value: string | null) {
@@ -685,26 +730,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     : conversation.pending || !composerDraft.trim();
   const approvalCard = activeToolApproval ? (
     <div className="approval-card">
-      <div className="approval-card__accent" />
       <div className="approval-card__body">
         <div className="approval-card__head">
-          <div className="approval-card__title-row">
-            <svg className="approval-card__icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <rect x="1" y="2" width="14" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.4" />
-              <circle cx="3.8" cy="4.6" r="0.8" fill="#ef6b5e" />
-              <circle cx="5.8" cy="4.6" r="0.8" fill="#f5bf4f" />
-              <circle cx="7.8" cy="4.6" r="0.8" fill="#61c554" />
-              <path d="M4 8h3M4 10.5h5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-            </svg>
-            <strong>{activeToolApproval.title}</strong>
-            <span className="approval-card__chip">需人工确认</span>
-          </div>
-          {activeToolApproval.detail ? (
-            <p className="approval-card__detail">{activeToolApproval.detail}</p>
-          ) : null}
+          <span className="approval-card__title">{activeToolApproval.title}</span>
         </div>
         <div className="approval-card__command-wrap">
-          <pre className="approval-card__command"><code>{activeToolApproval.toolName === "sandbox_bash" ? <><span className="approval-card__prompt">$</span> {activeToolApproval.commandLine}</> : activeToolApproval.commandLine}</code></pre>
+          <pre className="approval-card__command"><code>{activeToolApproval.toolName === "bash" ? <><span className="approval-card__prompt">$</span> {activeToolApproval.commandLine}</> : activeToolApproval.commandLine}</code></pre>
           <span className="approval-card__cwd">{activeToolApproval.cwd}</span>
         </div>
         <div className="approval-card__actions">
@@ -801,42 +832,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           </section>
 
           <footer className="sidebar__footer">
-            <div className="sidebar__settings-anchor">
-              <button className="sidebar__settings-button" type="button">
-                <span className="sidebar__settings-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path
-                      d="M12 8.75a3.25 3.25 0 1 0 0 6.5a3.25 3.25 0 0 0 0-6.5Z"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                    />
-                    <path
-                      d="M19.4 13.5a7.8 7.8 0 0 0 .08-1.5a7.8 7.8 0 0 0-.08-1.5l1.66-1.3a.78.78 0 0 0 .19-.99l-1.57-2.72a.78.78 0 0 0-.94-.34l-1.96.79a7.7 7.7 0 0 0-2.58-1.5l-.3-2.08a.77.77 0 0 0-.77-.66h-3.14a.77.77 0 0 0-.77.66l-.3 2.08a7.7 7.7 0 0 0-2.58 1.5l-1.96-.79a.78.78 0 0 0-.94.34L2.75 8.21a.78.78 0 0 0 .19.99l1.66 1.3a7.8 7.8 0 0 0-.08 1.5a7.8 7.8 0 0 0 .08 1.5l-1.66 1.3a.78.78 0 0 0-.19.99l1.57 2.72c.2.35.62.49.94.34l1.96-.79c.76.62 1.63 1.13 2.58 1.5l.3 2.08c.07.38.39.66.77.66h3.14c.38 0 .7-.28.77-.66l.3-2.08a7.7 7.7 0 0 0 2.58-1.5l1.96.79c.32.15.74.01.94-.34l1.57-2.72a.78.78 0 0 0-.19-.99l-1.66-1.3Z"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </span>
-                <span className="sidebar__settings-label">{isSidebarCollapsed ? "" : "设置"}</span>
-              </button>
-
-              {!isSidebarCollapsed ? (
-                <div className="sidebar__settings-popout">
-                  <button
-                    className="sidebar__settings-popout-item"
-                    type="button"
-                    onClick={() => setIsSettingsOpen(true)}
-                  >
-                    设置
-                  </button>
-                  <button className="sidebar__settings-popout-item" type="button">
-                    语言
-                  </button>
-                </div>
-              ) : null}
-            </div>
+            <button
+              type="button"
+              className="sidebar__settings-btn"
+              onClick={() => void desktopBridge.openSettings()}
+              aria-label="设置"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
           </footer>
+
         </aside>
 
         <main className="shell__main" style={shellMainStyle}>
@@ -863,7 +871,23 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           <section ref={messagesViewportRef} className="workspace">
             <div className={`workspace__thread${activeToolApproval ? " workspace__thread--approval-active" : ""}`}>
               <div ref={messagesContentRef} className="workspace__messages">
-                {conversation.messages.map((message) => (
+                {buildTimeline(conversation.messages, conversation.resolvedToolApprovals).map((entry) => {
+                  if (entry.kind === "approval") {
+                    const approval = entry.approval;
+                    return (
+                      <div key={`approval-${approval.id}`} className="approval-resolved">
+                        <span className="approval-resolved__tool">{approval.title}</span>
+                        <span className="approval-resolved__command">{approval.commandLine}</span>
+                        <span className={`approval-resolved__status approval-resolved__status--${approval.status}`}>
+                          {approval.status === "approved" ? "已批准" : "已拒绝"}
+                        </span>
+                        <span className="approval-resolved__time">{formatApprovalTime(approval.resolvedAt)}</span>
+                      </div>
+                    );
+                  }
+
+                  const message = entry.message;
+                  return (
                   <article
                     key={message.id}
                     className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
@@ -892,7 +916,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                       )}
                     </button>
                   </article>
-                ))}
+                  );
+                })}
 
                 <div ref={messagesEndRef} className="workspace__end-anchor" aria-hidden="true" />
               </div>
@@ -1085,168 +1110,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       {isSettingsOpen ? (
         <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
           <section className="settings-modal" onClick={(event) => event.stopPropagation()}>
-            <aside className="settings-sidebar">
-              <div className="settings-sidebar__header">
-                <WindowControls onClose={() => setIsSettingsOpen(false)} />
-              </div>
-              <div className="settings-sidebar__list">
-                {settingsNav.map((item) => (
-                  <button
-                    key={item.id}
-                    className={`settings-nav__item${activeSettingsTab === item.id ? " settings-nav__item--active" : ""}`}
-                    onClick={() => setActiveSettingsTab(item.id)}
-                  >
-                    <span className="settings-nav__icon" aria-hidden="true">
-                      {item.id === "general" ? (
-                        <svg viewBox="0 0 24 24" fill="none">
-                          <path
-                            d="M12 8.9a3.1 3.1 0 1 0 0 6.2a3.1 3.1 0 0 0 0-6.2Z"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                          />
-                          <path
-                            d="M19.06 13.44a7.3 7.3 0 0 0 .08-1.44a7.3 7.3 0 0 0-.08-1.44l1.46-1.15a.69.69 0 0 0 .17-.94l-1.38-2.38a.7.7 0 0 0-.84-.31l-1.72.7a7.4 7.4 0 0 0-2.47-1.42l-.27-1.83a.7.7 0 0 0-.69-.6h-2.76a.7.7 0 0 0-.69.6l-.27 1.83a7.4 7.4 0 0 0-2.47 1.42l-1.72-.7a.7.7 0 0 0-.84.31L3.31 8.47a.69.69 0 0 0 .17.94l1.46 1.15A7.3 7.3 0 0 0 4.86 12c0 .49.03.97.08 1.44l-1.46 1.15a.69.69 0 0 0-.17.94l1.38 2.38c.18.31.55.43.84.31l1.72-.7c.73.59 1.56 1.06 2.47 1.42l.27 1.83c.06.35.35.6.69.6h2.76c.34 0 .63-.25.69-.6l.27-1.83a7.4 7.4 0 0 0 2.47-1.42l1.72.7c.29.12.66 0 .84-.31l1.38-2.38a.69.69 0 0 0-.17-.94l-1.46-1.15Z"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
-                      ) : item.id === "providers" ? (
-                        <svg viewBox="0 0 24 24" fill="none">
-                          <rect
-                            x="5.1"
-                            y="7.2"
-                            width="13.8"
-                            height="9.6"
-                            rx="2.2"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                          />
-                          <path
-                            d="M9.4 11.95h5.2"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                          />
-                          <path
-                            d="M3.8 10.4v3.2M20.2 10.4v3.2"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                          />
-                          <path
-                            d="M8.15 5.2v2M15.85 5.2v2M8.15 16.8v2M15.85 16.8v2"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      ) : item.id === "memory" ? (
-                        <svg viewBox="0 0 24 24" fill="none">
-                          <path
-                            d="M9.15 5.2c-2.31 0-4.15 1.84-4.15 4.12c0 .73.19 1.43.56 2.05a3.8 3.8 0 0 0-1.56 3.08c0 2.16 1.78 3.92 3.97 3.92c.48 0 .95-.08 1.39-.24c.74 1.19 2.07 1.97 3.58 1.97s2.84-.78 3.58-1.97c.44.16.91.24 1.39.24c2.19 0 3.97-1.76 3.97-3.92a3.8 3.8 0 0 0-1.56-3.08c.37-.62.56-1.32.56-2.05c0-2.28-1.84-4.12-4.15-4.12c-1.15 0-2.2.46-2.96 1.21A4.23 4.23 0 0 0 12 4c-1.18 0-2.26.48-3.05 1.25A4.19 4.19 0 0 0 9.15 5.2Z"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinejoin="round"
-                          />
-                          <path
-                            d="M12 7.35v9.3M9.35 9.3c.85.38 1.58 1.1 1.95 1.95M14.65 9.3c-.85.38-1.58 1.1-1.95 1.95M9.35 14.7c.85-.38 1.58-1.1 1.95-1.95M14.65 14.7c-.85-.38-1.58-1.1-1.95-1.95"
-                            stroke="currentColor"
-                            strokeWidth="1.6"
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      ) : item.id === "mcp" ? (
-                        <svg viewBox="0 0 24 24" fill="none">
-                          <path
-                            d="M9.5 4v4M14.5 4v4"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                          />
-                          <path
-                            d="M7 8h10v4a5 5 0 0 1-10 0V8Z"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinejoin="round"
-                          />
-                          <path
-                            d="M12 16v4"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      ) : item.id === "skills" ? (
-                        <svg viewBox="0 0 24 24" fill="none">
-                          <path
-                            d="M9 5V3.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1V5"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                          <rect
-                            x="3.5"
-                            y="5"
-                            width="17"
-                            height="12"
-                            rx="2"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                          />
-                          <path
-                            d="M3.5 10h17"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                          />
-                        </svg>
-                      ) : item.id === "sandbox" ? (
-                        <svg viewBox="0 0 24 24" fill="none">
-                          <path
-                            d="M5 9l1.5-4.5h11L19 9"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinejoin="round"
-                          />
-                          <path
-                            d="M5 9v10a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V9"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinejoin="round"
-                          />
-                          <path
-                            d="M5 9h14"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                          />
-                          <path
-                            d="M10 9V6.5"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                          />
-                          <circle cx="14.5" cy="14" r="2" stroke="currentColor" strokeWidth="1.8" strokeDasharray="2.5 2.5" />
-                        </svg>
-                      ) : (
-                        item.shortLabel
-                      )}
-                    </span>
-                    <span>{item.label}</span>
-                  </button>
-                ))}
-              </div>
-            </aside>
-
             <div className="settings-content">
-              <header className="settings-content__header">
-                <h2>{settingsNav.find((item) => item.id === activeSettingsTab)?.label ?? "设置"}</h2>
+              <header className="settings-content__header" style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                <WindowControls onClose={() => setIsSettingsOpen(false)} />
+                <h2 style={{ margin: 0, fontSize: "14px", fontWeight: 600 }}>全局设置</h2>
               </header>
 
-              <div className={`settings-content__body${activeSettingsTab === "providers" ? " settings-content__body--providers" : ""}`}>
-              {activeSettingsTab === "providers" ? <div className="settings-providers" /> : null}
-
-              {activeSettingsTab === "sandbox" ? (
+              <div className="settings-content__body">
+                {/* ── 沙箱设置 ── */}
+                <h3 className="settings-section-title">沙箱</h3>
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问权限" : "开发模式"}</span>
@@ -1285,9 +1157,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     </div>
                   </div>
                 </div>
-              ) : null}
 
-              {activeSettingsTab === "memory" ? (
+                {/* ── 记忆 ── */}
+                <h3 className="settings-section-title">记忆</h3>
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <span>{runtimeCatalogs.memories.length} 条</span>
@@ -1304,15 +1176,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     ))}
                   </div>
                 </div>
-              ) : null}
 
-              {activeSettingsTab === "mcp" ? (
+                {/* ── MCP ── */}
+                <h3 className="settings-section-title">MCP 服务</h3>
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <span>{runtimeCatalogs.mcpServers.length} 个条目 / 已安装 {installedMcpServers.length}</span>
                   </div>
                   <div className="provider-notice">
-                    Aliceloop 只做 MCP client。这里的“安装”是在 Aliceloop 内登记已安装状态，真正的 MCP 服务仍由用户从应用市场自行下载和配置。
+                    Aliceloop 只做 MCP client。这里的"安装"是在 Aliceloop 内登记已安装状态，真正的 MCP 服务仍由用户从应用市场自行下载和配置。
                   </div>
                   {runtimeCatalogs.error && runtimeCatalogs.status === "error" ? (
                     <div className="provider-notice provider-notice--error">{runtimeCatalogs.error}</div>
@@ -1401,9 +1273,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     )}
                   </div>
                 </div>
-              ) : null}
 
-              {activeSettingsTab === "skills" ? (
+                {/* ── Skills ── */}
+                <h3 className="settings-section-title">Skills</h3>
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
                     <span>{runtimeCatalogs.skills.length} 个条目</span>
@@ -1433,17 +1305,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     ))}
                   </div>
                 </div>
-              ) : null}
-
-              {activeSettingsTab === "general" ? (
-                <div className="settings-panel">
-                  <div className="settings-panel__list">
-                    <div className="settings-panel__item"><span>暂无可配置项</span></div>
-                  </div>
-                </div>
-              ) : null}
               </div>
-
 
               <footer className="settings-actions">
                 <button className="settings-actions__button" onClick={() => setIsSettingsOpen(false)}>
@@ -1451,22 +1313,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 </button>
                 <button
                   className="settings-actions__button settings-actions__button--primary"
-                  onClick={activeSettingsTab === "sandbox" ? saveSandboxSettings : saveActiveProvider}
-                  disabled={
-                    activeSettingsTab === "providers"
-                      ? !activeProvider || providerState.savingProviderId === activeProvider.id
-                      : activeSettingsTab === "sandbox"
-                        ? runtimeSettings.saving
-                        : true
-                  }
+                  onClick={saveSandboxSettings}
+                  disabled={runtimeSettings.saving}
                 >
-                  {activeSettingsTab === "sandbox"
-                    ? runtimeSettings.saving
-                      ? "保存中..."
-                      : "保存"
-                    : providerState.savingProviderId
-                      ? "保存中..."
-                      : "保存"}
+                  {runtimeSettings.saving ? "保存中..." : "保存"}
                 </button>
               </footer>
             </div>

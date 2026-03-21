@@ -401,6 +401,7 @@ export interface SessionSnapshot {
   messages: SessionMessage[];
   attachments: Attachment[];
   pendingToolApprovals: ToolApproval[];
+  resolvedToolApprovals: ToolApproval[];
   jobs: JobRunDetail[];
   devices: DevicePresence[];
   runtimePresence: RuntimePresence;

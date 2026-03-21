@@ -11,6 +11,7 @@ import {
   assertWritable,
   getSandboxProjectRoot,
 } from "../toolPolicy";
+import { buildSeatbeltProfile, isSeatbeltAvailable, wrapWithSeatbelt } from "../seatbelt";
 import {
   type DeletePathInput,
   SandboxViolationError,
@@ -298,8 +299,12 @@ async function executeBashResult(
   cwd: string,
   timeoutMs: number,
   maxBufferBytes: number,
+  seatbeltProfile: string | null = null,
 ) {
-  const execution = resolveExecution(command, args);
+  let execution = resolveExecution(command, args);
+  if (seatbeltProfile) {
+    execution = wrapWithSeatbelt(execution.executable, execution.args, seatbeltProfile);
+  }
   const { stdout, stderr } = await execFileAsync(execution.executable, execution.args, {
     cwd,
     timeout: timeoutMs,
@@ -315,13 +320,27 @@ async function executeBashResult(
   };
 }
 
+function buildSeatbeltProfileForContext(context: SandboxRuntimeContext): string | null {
+  if (!context.seatbeltEnabled) {
+    return null;
+  }
+  if (context.toolPolicy.fullAccess) {
+    return null;
+  }
+  return buildSeatbeltProfile({
+    allowedWriteRoots: context.toolPolicy.allowedWriteRoots ?? [],
+    allowedReadRoots: context.toolPolicy.allowedReadRoots ?? [],
+    denyNetwork: context.toolPolicy.permissionProfile === "development",
+  });
+}
+
 function createFileElevatedApproval(
   toolName: SandboxElevatedApprovalInput["toolName"],
   title: string,
   actionLabel: string,
   targetPath: string,
 ): SandboxElevatedApprovalInput {
-  const syntheticCommand = toolName.replace("sandbox_", "");
+  const syntheticCommand = toolName;
   return {
     toolName,
     title,
@@ -335,7 +354,7 @@ function createFileElevatedApproval(
 
 function createBashElevatedApproval(command: string, args: string[], cwd: string): SandboxElevatedApprovalInput {
   return {
-    toolName: "sandbox_bash",
+    toolName: "bash",
     title: "等待确认 Elevated bash",
     detail: "开发模式下，这条命令超出了默认权限范围。确认后只放行这一次执行。",
     commandLine: summarizeCommandLine(command, args),
@@ -358,7 +377,7 @@ async function readTextFile(context: SandboxRuntimeContext, input: ReadTextFileI
       assertReadable(context.toolPolicy, targetPath);
     },
     buildElevatedApproval() {
-      return createFileElevatedApproval("sandbox_read", "等待确认 Elevated 读取", "读取", targetPath);
+      return createFileElevatedApproval("read", "等待确认 Elevated 读取", "读取", targetPath);
     },
     async executeStandard() {
       assertReadable(context.toolPolicy, targetPath);
@@ -384,7 +403,7 @@ async function writeBinaryFile(context: SandboxRuntimeContext, input: WriteBinar
       assertWritable(context.toolPolicy, targetPath);
     },
     buildElevatedApproval() {
-      return createFileElevatedApproval("sandbox_write", "等待确认 Elevated 写入", "写入", targetPath);
+      return createFileElevatedApproval("write", "等待确认 Elevated 写入", "写入", targetPath);
     },
     async executeStandard() {
       assertWritable(context.toolPolicy, targetPath);
@@ -414,7 +433,7 @@ async function writeTextFile(context: SandboxRuntimeContext, input: WriteTextFil
       assertWritable(context.toolPolicy, targetPath);
     },
     buildElevatedApproval() {
-      return createFileElevatedApproval("sandbox_write", "等待确认 Elevated 写入", "写入", targetPath);
+      return createFileElevatedApproval("write", "等待确认 Elevated 写入", "写入", targetPath);
     },
     async executeStandard() {
       assertWritable(context.toolPolicy, targetPath);
@@ -444,7 +463,7 @@ async function editTextFile(context: SandboxRuntimeContext, input: EditTextFileI
       assertWritable(context.toolPolicy, targetPath);
     },
     buildElevatedApproval() {
-      return createFileElevatedApproval("sandbox_edit", "等待确认 Elevated 编辑", "编辑", targetPath);
+      return createFileElevatedApproval("edit", "等待确认 Elevated 编辑", "编辑", targetPath);
     },
     async executeStandard() {
       assertReadable(context.toolPolicy, targetPath);
@@ -470,7 +489,7 @@ async function deletePath(context: SandboxRuntimeContext, input: DeletePathInput
       await validateDeletePath(context, targetPath);
     },
     buildElevatedApproval() {
-      return createFileElevatedApproval("sandbox_delete", "等待确认 Elevated 删除", "删除", targetPath);
+      return createFileElevatedApproval("delete", "等待确认 Elevated 删除", "删除", targetPath);
     },
     async executeStandard() {
       const kind = await validateDeletePath(context, targetPath);
@@ -503,7 +522,7 @@ async function runBashAsDelete(context: SandboxRuntimeContext, command: string, 
       args,
       cwd,
       access: "standard",
-      detail: `${command} ${rawPath} (via sandbox_bash)`,
+      detail: `${command} ${rawPath} (via bash)`,
       async execute() {
         const r = await deletePathResult(context, targetPath, kind);
         results.push(r.result);
@@ -570,7 +589,8 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
           cwd,
         });
       }
-      return executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes);
+      const profile = buildSeatbeltProfileForContext(context);
+      return executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes, profile);
     },
     async executeElevated() {
       return executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes);

@@ -152,7 +152,7 @@ export function buildSkillContextBlock() {
 
   const sections = [
     "Project skills live in the local context catalog.",
-    "When a skill clearly matches the user's request, read that SKILL.md with sandbox_read before acting.",
+    "When a skill clearly matches the user's request, read that SKILL.md with read before acting.",
     "Do not pretend a planned skill is installed. Planned skills are architecture targets, not active runtime capabilities.",
     "",
     "Loaded skills:",

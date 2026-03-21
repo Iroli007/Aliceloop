@@ -16,14 +16,14 @@ export async function reflectOnTurn(input: DistillationInput): Promise<void> {
   }
 
   const fileOps = toolCalls.filter((tc) =>
-    ["sandbox_grep", "sandbox_glob", "sandbox_read", "sandbox_write", "sandbox_edit", "sandbox_bash"].includes(tc.name),
+    ["grep", "glob", "read", "write", "edit", "bash"].includes(tc.name),
   );
 
   if (fileOps.length > 0) {
     const paths = fileOps
       .flatMap((op) => {
         const args = op.args as Record<string, unknown>;
-        if (op.name === "sandbox_bash") {
+        if (op.name === "bash") {
           const command = args.command as string | undefined;
           if (command === "rm" || command === "rmdir") {
             const bashArgs = (args.args as string[] | undefined) ?? [];

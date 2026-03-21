@@ -246,7 +246,7 @@ async function main() {
     assert.equal(skillDetailPayload.id, "coding-agent", "skill detail endpoint should resolve the requested skill");
     assert.equal(skillDetailPayload.mode, "instructional", "coding-agent should be an instructional skill");
     assert(skillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/coding-agent/SKILL.md"));
-    assert(skillDetailPayload.allowedTools.includes("sandbox_bash"));
+    assert(skillDetailPayload.allowedTools.includes("bash"));
     assert.equal(skillRunPayload.error, "skill_not_runnable", "instructional skill run should reject execution");
     assert(mcpServersPayload.length > 0, "mcp server catalog should expose planned entries");
     assert.equal(mcpServerDetailPayload.id, "filesystem-bridge", "mcp server detail endpoint should resolve requested server");

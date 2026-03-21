@@ -26,8 +26,8 @@ function getErrorMessage(error: unknown) {
 async function guardReadableFilePath(filePath: string) {
   if (hasWildcard(filePath)) {
     return buildToolErrorResponse(
-      "Path contains a wildcard, but sandbox_read requires an exact file path.",
-      "You attempted to use `sandbox_read` with a wildcard path. Please use `sandbox_glob` to discover matching files first, then call `sandbox_read` again with one exact file path.",
+      "Path contains a wildcard, but read requires an exact file path.",
+      "You attempted to use `read` with a wildcard path. Please use `glob` to discover matching files first, then call `read` again with one exact file path.",
     );
   }
 
@@ -36,7 +36,7 @@ async function guardReadableFilePath(filePath: string) {
     if (stats.isDirectory()) {
       return buildToolErrorResponse(
         "Target is a directory, not a file.",
-        "You attempted to use `sandbox_read` on a directory. Please use `sandbox_glob` to view the directory structure, or provide a specific file path instead.",
+        "You attempted to use `read` on a directory. Please use `glob` to view the directory structure, or provide a specific file path instead.",
       );
     }
   } catch (error) {
@@ -44,7 +44,7 @@ async function guardReadableFilePath(filePath: string) {
     if (message.includes("ENOENT")) {
       return buildToolErrorResponse(
         "Target file does not exist.",
-        "You attempted to use `sandbox_read` on a path that does not exist. Please use `sandbox_glob` or `sandbox_grep` to locate the correct file path first.",
+        "You attempted to use `read` on a path that does not exist. Please use `glob` or `grep` to locate the correct file path first.",
       );
     }
   }
@@ -55,31 +55,31 @@ async function guardReadableFilePath(filePath: string) {
 function mapToolExecutionError(toolName: string, error: unknown) {
   const message = getErrorMessage(error);
 
-  if (toolName === "sandbox_read" && message.includes("EISDIR")) {
+  if (toolName === "read" && message.includes("EISDIR")) {
     return buildToolErrorResponse(
       "Target is a directory, not a file.",
-      "You attempted to use `sandbox_read` on a directory. Please use `sandbox_glob` to view the directory structure, or provide a specific file path instead.",
+      "You attempted to use `read` on a directory. Please use `glob` to view the directory structure, or provide a specific file path instead.",
     );
   }
 
-  if (toolName === "sandbox_read" && message.includes("read denied")) {
+  if (toolName === "read" && message.includes("read denied")) {
     return buildToolErrorResponse(
       "Read permission denied for this path.",
       "This path is outside the current readable roots. Please use a file inside the mounted workspace, upload the folder so it becomes a readable root, or request an elevated read if appropriate.",
     );
   }
 
-  if (toolName === "sandbox_write" && message.includes("write denied")) {
+  if (toolName === "write" && message.includes("write denied")) {
     return buildToolErrorResponse(
       "Write permission denied for this path.",
       "This path is outside the current writable roots. Please write inside the mounted workspace, upload or mount the target folder first, or request an elevated write if appropriate.",
     );
   }
 
-  if (toolName === "sandbox_edit" && message.includes("Could not find the specified text")) {
+  if (toolName === "edit" && message.includes("Could not find the specified text")) {
     return buildToolErrorResponse(
       "Original code block was not found.",
-      "You attempted to use `sandbox_edit` without providing an exact existing code block. Please read the file first, then pass the exact [Original Code Block] and [Replacement Code Block].",
+      "You attempted to use `edit` without providing an exact existing code block. Please read the file first, then pass the exact [Original Code Block] and [Replacement Code Block].",
     );
   }
 
@@ -127,9 +127,9 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
   }
 
   return {
-    sandbox_grep: tool({
+    grep: tool({
       description:
-        "Strictly used for global text or regular expression searches INSIDE files.\n\nUse case: Locating specific function definitions, variable names, or error logs (e.g., searching for function login). It returns the exact file path and line numbers containing the match.\n\nWARNING: If you already know the exact file path and want to view its full context, DO NOT use this tool. Use the sandbox_read tool instead.",
+        "Strictly used for global text or regular expression searches INSIDE files.\n\nUse case: Locating specific function definitions, variable names, or error logs (e.g., searching for function login). It returns the exact file path and line numbers containing the match.\n\nWARNING: If you already know the exact file path and want to view its full context, DO NOT use this tool. Use the read tool instead.",
       inputSchema: z.object({
         pattern: z
           .string()
@@ -174,9 +174,9 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
       },
     }),
 
-    sandbox_glob: tool({
+    glob: tool({
       description:
-        "Strictly used to find files and directories in the project by name or wildcard.\n\nUse case: Discovering project structure or finding specific files (e.g., **/*.test.ts).\n\nWARNING: This tool will NEVER return the internal code content of a file. If you need to search for specific code logic, you MUST use the sandbox_grep tool.",
+        "Strictly used to find files and directories in the project by name or wildcard.\n\nUse case: Discovering project structure or finding specific files (e.g., **/*.test.ts).\n\nWARNING: This tool will NEVER return the internal code content of a file. If you need to search for specific code logic, you MUST use the grep tool.",
       inputSchema: z.object({
         pattern: z
           .string()
@@ -194,15 +194,27 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
       },
     }),
 
-    sandbox_read: tool({
+    read: tool({
       description:
-        "Strictly used to read the complete content of a file at a known, specific path.\n\nUse case: You have identified the target file via glob or grep and now need to carefully read its source code.\n\nWARNING: You MUST provide an exact relative or absolute file path (e.g. src/app.ts). NEVER pass wildcards or directory names to this tool!",
+        "Read the content of a file at a known, specific path with a sliding window.\n\nUse case: You have identified the target file via glob or grep and now need to carefully read its source code.\n\nThe tool returns a window of lines starting from `offset` (default 0, 0-indexed) with up to `limit` lines (default 500). The response header always includes the total line count so you can decide whether to request the next window.\n\nWARNING: You MUST provide an exact relative or absolute file path (e.g. src/app.ts). NEVER pass wildcards or directory names to this tool!",
       inputSchema: z.object({
         filePath: z
           .string()
           .describe("Absolute path to the file to read"),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("0-indexed starting line number (default 0)"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe("Maximum number of lines to return (default 500)"),
       }),
-      execute: async ({ filePath }) => {
+      execute: async ({ filePath, offset: rawOffset, limit: rawLimit }) => {
         const resolvedPath = resolve(filePath);
         const preflightError = await guardReadableFilePath(resolvedPath);
         if (preflightError) {
@@ -211,16 +223,25 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
 
         try {
           const content = await sandbox.readTextFile({ targetPath: resolvedPath });
-          return content;
+          const allLines = content.split("\n");
+          const totalLines = allLines.length;
+          const offset = rawOffset ?? 0;
+          const limit = rawLimit ?? 500;
+          const windowLines = allLines.slice(offset, offset + limit);
+          const endLine = Math.min(offset + limit, totalLines);
+          const hasMore = endLine < totalLines;
+
+          const header = `[file: ${filePath} | lines ${offset + 1}-${endLine} of ${totalLines}${hasMore ? ` | next offset: ${endLine}` : ""}]`;
+          return `${header}\n${windowLines.join("\n")}`;
         } catch (error) {
-          return mapToolExecutionError("sandbox_read", error);
+          return mapToolExecutionError("read", error);
         }
       },
     }),
 
-    sandbox_write: tool({
+    write: tool({
       description:
-        "Strictly used to create a completely NEW file from scratch, or to 100% overwrite an extremely small file.\n\nUse case: Generating boilerplate files or creating new test cases.\n\nWARNING: It is STRICTLY FORBIDDEN to use this tool to modify existing code files that exceed 50 lines. Outputting the entire file will cause severe truncation errors. To modify existing code, you MUST use the sandbox_edit tool.",
+        "Strictly used to create a completely NEW file from scratch, or to 100% overwrite an extremely small file.\n\nUse case: Generating boilerplate files or creating new test cases.\n\nWARNING: It is STRICTLY FORBIDDEN to use this tool to modify existing code files that exceed 50 lines. Outputting the entire file will cause severe truncation errors. To modify existing code, you MUST use the edit tool.",
       inputSchema: z.object({
         targetPath: z
           .string()
@@ -234,12 +255,12 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           await sandbox.writeTextFile({ targetPath, content });
           return `File written successfully: ${targetPath}`;
         } catch (error) {
-          return mapToolExecutionError("sandbox_write", error);
+          return mapToolExecutionError("write", error);
         }
       },
     }),
 
-    sandbox_edit: tool({
+    edit: tool({
       description:
         "Used for localized, precise block replacements (Search and Replace) within existing code files.\n\nUse case: Fixing bugs, adding a few lines of logic, or modifying specific functions.\n\nRULE: You must provide the exact [Original Code Block] to be replaced and the new [Replacement Code Block]. DO NOT output the entire file content!",
       inputSchema: z.object({
@@ -295,7 +316,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
 
               if (fuzzyMatches.length === 0) {
                 throw new Error(
-                  `Could not find the specified text in ${filePath}. Please ensure indentation, spaces, and line endings match exactly. Hint: use sandbox_read to get the exact original text.`
+                  `Could not find the specified text in ${filePath}. Please ensure indentation, spaces, and line endings match exactly. Hint: use read to get the exact original text.`
                 );
               }
 
@@ -311,12 +332,12 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           });
           return `File edited successfully: ${filePath}`;
         } catch (error) {
-          return mapToolExecutionError("sandbox_edit", error);
+          return mapToolExecutionError("edit", error);
         }
       },
     }),
 
-    sandbox_bash: tool({
+    bash: tool({
       description:
         "Execute a shell command and return its output. Allowed commands include file inspection, repository inspection, local script/test commands, and safe file deletion. Allowed commands: cat, find, git, head, ls, node, npm, pwd, rg, rm, rmdir, sed, tsx, wc. Use `rm` to delete files previously generated by Aliceloop and `rmdir` for empty directories.",
       inputSchema: z.object({

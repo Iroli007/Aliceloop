@@ -185,6 +185,7 @@ export const previewSessionSnapshot: SessionSnapshot = {
     },
   ],
   pendingToolApprovals: [],
+  resolvedToolApprovals: [],
   jobs: [
     {
       id: "job-seed-1",

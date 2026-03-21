@@ -92,14 +92,14 @@ This replaced the old vendor-specific reply path.
 
 The base capability layer is the six-command sandbox ABI:
 
-- `sandbox_read`
-- `sandbox_grep`
-- `sandbox_glob`
-- `sandbox_write`
-- `sandbox_edit`
-- `sandbox_bash`
+- `read`
+- `grep`
+- `glob`
+- `write`
+- `edit`
+- `bash`
 
-`sandbox_bash` is intentionally allowlisted. It currently supports safe repository and local runtime commands such as:
+`bash` is intentionally allowlisted. It currently supports safe repository and local runtime commands such as:
 
 - `rg`
 - `ls`
@@ -109,7 +109,7 @@ The base capability layer is the six-command sandbox ABI:
 - `node`
 - `tsx`
 
-The model may also synthesize temporary helper files or scripts inside the sandbox, execute them through `sandbox_bash`, and discard them after use. That is an implementation pattern on top of the six-command ABI, not a first-class capability and not a tool-registration surface.
+The model may also synthesize temporary helper files or scripts inside the sandbox, execute them through `bash`, and discard them after use. That is an implementation pattern on top of the six-command ABI, not a first-class capability and not a tool-registration surface.
 
 No runtime path should allow the model to register new system tools dynamically. Higher-level capabilities belong in `skills`.
 
