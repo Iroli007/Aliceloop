@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen } from "electron";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -111,9 +111,24 @@ async function collectFolderFiles(folderPath: string): Promise<DesktopPickedFold
 }
 
 function createWindow(): BrowserWindow {
+  const display = screen.getPrimaryDisplay();
+  const { width: screenWidth, height: screenHeight } = display.workAreaSize;
+  const GOLDEN_RATIO = 0.618;
+
+  // 上下各留 1/10 边距，窗口高度为屏幕的 8/10
+  const height = Math.floor(screenHeight * 0.8);
+  // 黄金比例: 高度 / 宽度 = 0.618，所以宽度 = 高度 / 0.618
+  const width = Math.max(1120, Math.min(1500, Math.floor(height / GOLDEN_RATIO)));
+  // 水平居中
+  const x = Math.floor((screenWidth - width) / 2);
+  // 顶部留 1/10 边距
+  const y = Math.floor(screenHeight * 0.1);
+
   const window = new BrowserWindow({
-    width: 1500,
-    height: 920,
+    width,
+    height,
+    x,
+    y,
     minWidth: 1120,
     minHeight: 760,
     titleBarStyle: "hiddenInset",
