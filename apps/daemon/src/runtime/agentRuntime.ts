@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { stepCountIs, streamText } from "ai";
-import { loadContext } from "../context/index";
+import { type AgentContext, loadContext } from "../context/index";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { createProviderModel } from "../providers/providerModelFactory";
 import { publishSessionEvent } from "../realtime/sessionStreams";
-import { getActiveProviderConfig } from "../repositories/providerRepository";
+import {
+  type StoredProviderConfig,
+  getActiveProviderConfig,
+} from "../repositories/providerRepository";
 import {
   appendSessionEvent,
   createSessionMessage,
@@ -15,6 +18,10 @@ import {
 import { maybeCreateArtifactFromReply } from "../services/artifactWriter";
 import { enqueueSessionRun } from "../services/sessionRunQueue";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
+
+// ---------------------------------------------------------------------------
+// Helpers (unchanged)
+// ---------------------------------------------------------------------------
 
 function publishJob(input: Parameters<typeof upsertSessionJob>[0]) {
   const result = upsertSessionJob(input);
@@ -93,146 +100,73 @@ function publishRuntimeEvent(
   return event;
 }
 
-export async function runAgent(sessionId: string) {
-  return enqueueSessionRun(sessionId, async () => {
-    const activeProvider = getActiveProviderConfig();
-    const jobId = randomUUID();
+// ---------------------------------------------------------------------------
+// AgentRun — lightweight value object for a single run
+// ---------------------------------------------------------------------------
 
-    if (!activeProvider || !activeProvider.apiKey) {
-      publishAssistantReply(sessionId, buildLocalFallbackReply(getLatestUserMessage(sessionId)));
-      publishJob({
-        id: jobId,
-        sessionId,
-        kind: "provider-completion",
-        status: "done",
-        title: "Local fallback reply",
-        detail: "No enabled model gateway with an API key is configured, so Aliceloop returned a local assembled assistant reply.",
-      });
-      return;
-    }
+interface ToolCallEntry {
+  name: string;
+  args: unknown;
+  result: unknown;
+}
 
-    const abortController = new AbortController();
-    activeAgents.set(sessionId, abortController);
+interface AgentRun {
+  sessionId: string;
+  jobId: string;
+  provider: StoredProviderConfig;
+  abortController: AbortController;
+  context: AgentContext;
+  safety: ReturnType<typeof createSafetyChecker>;
 
+  reportStarted(): void;
+  reportCompleted(text: string): void;
+  reportFailed(error: unknown): void;
+  dispose(): void;
+}
+
+function createAgentRun(sessionId: string): AgentRun | null {
+  const activeProvider = getActiveProviderConfig();
+  const jobId = randomUUID();
+
+  if (!activeProvider || !activeProvider.apiKey) {
+    publishAssistantReply(sessionId, buildLocalFallbackReply(getLatestUserMessage(sessionId)));
     publishJob({
       id: jobId,
       sessionId,
       kind: "provider-completion",
-      status: "running",
-      title: `${activeProvider.label} is responding`,
-      detail: `Using ${activeProvider.model} for this response.`,
+      status: "done",
+      title: "Local fallback reply",
+      detail: "No enabled model gateway with an API key is configured, so Aliceloop returned a local assembled assistant reply.",
     });
+    return null;
+  }
 
-    try {
-      const ctx = loadContext(sessionId, abortController.signal);
-      const model = createProviderModel(activeProvider);
-      const safety = createSafetyChecker(ctx.safetyConfig);
+  const abortController = new AbortController();
+  activeAgents.set(sessionId, abortController);
 
-      const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
-      let assistantMessageId: string | null = null;
-      let assistantText = "";
+  const context = loadContext(sessionId, abortController.signal);
+  const safety = createSafetyChecker(context.safetyConfig);
 
-      const toolCallLog: Array<{
-        name: string;
-        args: unknown;
-        result: unknown;
-      }> = [];
+  return {
+    sessionId,
+    jobId,
+    provider: activeProvider,
+    abortController,
+    context,
+    safety,
 
-      const result = streamText({
-        model,
-        system: ctx.systemPrompt,
-        messages: ctx.messages,
-        tools: ctx.tools,
-        stopWhen: stepCountIs(ctx.safetyConfig.maxIterations),
-        abortSignal: abortController.signal,
-        experimental_onStepStart() {
-          safety.checkStep();
-        },
-        experimental_onToolCallStart({ toolCall }) {
-          safety.checkActive();
-          publishRuntimeEvent(sessionId, "tool.call.started", {
-            toolCallId: toolCall.toolCallId,
-            toolName: toolCall.toolName,
-            inputPreview: summarizeUnknown(toolCall.input),
-          });
-        },
-        experimental_onToolCallFinish(event) {
-          safety.checkActive();
-          const resultPreview = event.success ? summarizeUnknown(event.output) : summarizeUnknown(event.error);
-
-          publishRuntimeEvent(sessionId, "tool.call.completed", {
-            toolCallId: event.toolCall.toolCallId,
-            toolName: event.toolCall.toolName,
-            success: event.success,
-            resultPreview,
-            durationMs: event.durationMs,
-          });
-
-          toolCallLog.push({
-            name: event.toolCall.toolName,
-            args: event.toolCall.input,
-            result: event.success ? event.output : resultPreview,
-          });
-        },
+    reportStarted() {
+      publishJob({
+        id: jobId,
+        sessionId,
+        kind: "provider-completion",
+        status: "running",
+        title: `${activeProvider.label} is responding`,
+        detail: `Using ${activeProvider.model} for this response.`,
       });
+    },
 
-      for await (const delta of result.textStream) {
-        safety.checkActive();
-        if (!delta) {
-          continue;
-        }
-
-        assistantText += delta;
-
-        if (!assistantMessageId) {
-          const messageResult = createSessionMessage({
-            sessionId,
-            clientMessageId: assistantClientMessageId,
-            deviceId: "runtime-agent",
-            role: "assistant",
-            content: assistantText,
-            attachmentIds: [],
-          });
-
-          assistantMessageId = messageResult.message.id;
-          for (const event of messageResult.events) {
-            publishSessionEvent(event);
-          }
-          continue;
-        }
-
-        const updateResult = updateSessionMessage({
-          sessionId,
-          messageId: assistantMessageId,
-          content: assistantText,
-        });
-        publishSessionEvent(updateResult.event);
-      }
-
-      if (!assistantText.trim() && toolCallLog.length > 0) {
-        assistantText = `已完成 ${toolCallLog.length} 次工具调用。`;
-      }
-
-      if (!assistantMessageId && assistantText) {
-        const messageResult = createSessionMessage({
-          sessionId,
-          clientMessageId: assistantClientMessageId,
-          deviceId: "runtime-agent",
-          role: "assistant",
-          content: assistantText,
-          attachmentIds: [],
-        });
-
-        assistantMessageId = messageResult.message.id;
-        for (const event of messageResult.events) {
-          publishSessionEvent(event);
-        }
-      }
-
-      if (!assistantText.trim()) {
-        throw new Error(`${activeProvider.label} returned empty content`);
-      }
-
+    reportCompleted(text: string) {
       publishJob({
         id: jobId,
         sessionId,
@@ -241,28 +175,9 @@ export async function runAgent(sessionId: string) {
         title: `${activeProvider.label} completed`,
         detail: `Response generated with ${activeProvider.model} (${safety.iterationCount} steps, ${Math.round(safety.elapsedMs / 1000)}s).`,
       });
+    },
 
-      const userMessages = ctx.messages
-        .filter((message) => message.role === "user")
-        .map((message) => (typeof message.content === "string" ? message.content : ""));
-
-      const latestUserMessage = userMessages.at(-1) ?? null;
-      if (latestUserMessage) {
-        void maybeCreateArtifactFromReply(sessionId, latestUserMessage, assistantText).catch((artifactError) => {
-          const detail = artifactError instanceof Error ? artifactError.message : "工件写入失败";
-          publishRuntimeNotice(sessionId, `工件流式写入失败：${detail}`);
-        });
-      }
-
-      void reflectOnTurn({
-        sessionId,
-        userMessages,
-        assistantResponse: assistantText,
-        toolCalls: toolCallLog,
-      }).catch(() => {
-        // Reflection failure should not fail the user-visible turn.
-      });
-    } catch (error) {
+    reportFailed(error: unknown) {
       if (error instanceof SafetyLimitError) {
         publishJob({
           id: jobId,
@@ -296,8 +211,213 @@ export async function runAgent(sessionId: string) {
         });
         publishRuntimeNotice(sessionId, `Agent error: ${detail}`);
       }
-    } finally {
+    },
+
+    dispose() {
       activeAgents.delete(sessionId);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// executeStream — AI call + message streaming loop
+// ---------------------------------------------------------------------------
+
+interface StreamResult {
+  text: string;
+  toolCalls: ToolCallEntry[];
+}
+
+async function executeStream(run: AgentRun): Promise<StreamResult> {
+  const toolCalls: ToolCallEntry[] = [];
+
+  const stream = streamText({
+    model: createProviderModel(run.provider),
+    system: run.context.systemPrompt,
+    messages: run.context.messages,
+    tools: run.context.tools,
+    stopWhen: stepCountIs(run.context.safetyConfig.maxIterations),
+    abortSignal: run.abortController.signal,
+    experimental_onStepStart() {
+      run.safety.checkStep();
+    },
+    experimental_onToolCallStart({ toolCall }) {
+      run.safety.checkActive();
+      publishRuntimeEvent(run.sessionId, "tool.call.started", {
+        toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName,
+        inputPreview: summarizeUnknown(toolCall.input),
+      });
+    },
+    experimental_onToolCallFinish(event) {
+      run.safety.checkActive();
+      const resultPreview = event.success ? summarizeUnknown(event.output) : summarizeUnknown(event.error);
+
+      publishRuntimeEvent(run.sessionId, "tool.call.completed", {
+        toolCallId: event.toolCall.toolCallId,
+        toolName: event.toolCall.toolName,
+        success: event.success,
+        resultPreview,
+        durationMs: event.durationMs,
+      });
+
+      toolCalls.push({
+        name: event.toolCall.toolName,
+        args: event.toolCall.input,
+        result: event.success ? event.output : resultPreview,
+      });
+    },
+  });
+
+  const text = await consumeTextStream(run, stream);
+  return { text, toolCalls };
+}
+
+// ---------------------------------------------------------------------------
+// consumeTextStream — stream delta → DB with debounce
+// ---------------------------------------------------------------------------
+
+const DEBOUNCE_MS = 80;
+
+async function consumeTextStream(
+  run: AgentRun,
+  stream: Awaited<ReturnType<typeof streamText>>,
+): Promise<string> {
+  let text = "";
+  const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
+  let assistantMessageId: string | null = null;
+  let pendingFlush = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function flush() {
+    if (!assistantMessageId || !pendingFlush) return;
+    pendingFlush = false;
+    const updateResult = updateSessionMessage({
+      sessionId: run.sessionId,
+      messageId: assistantMessageId,
+      content: text,
+    });
+    publishSessionEvent(updateResult.event);
+  }
+
+  for await (const delta of stream.textStream) {
+    run.safety.checkActive();
+    if (!delta) continue;
+
+    text += delta;
+
+    if (!assistantMessageId) {
+      // First delta: create the message immediately
+      const messageResult = createSessionMessage({
+        sessionId: run.sessionId,
+        clientMessageId: assistantClientMessageId,
+        deviceId: "runtime-agent",
+        role: "assistant",
+        content: text,
+        attachmentIds: [],
+      });
+
+      assistantMessageId = messageResult.message.id;
+      for (const event of messageResult.events) {
+        publishSessionEvent(event);
+      }
+      continue;
+    }
+
+    // Subsequent deltas: debounce updates
+    pendingFlush = true;
+    if (!flushTimer) {
+      flushTimer = setTimeout(() => {
+        flush();
+        flushTimer = null;
+      }, DEBOUNCE_MS);
+    }
+  }
+
+  // Flush any remaining content after the stream ends
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (pendingFlush) flush();
+
+  // Handle tool-only replies with no text
+  if (!text.trim()) {
+    const resolvedToolCalls = await stream.toolCalls;
+    if (resolvedToolCalls.length > 0) {
+      text = `已完成 ${resolvedToolCalls.length} 次工具调用。`;
+    }
+  }
+
+  // Handle late message creation (text appeared after stream end, or tool-only fallback)
+  if (!assistantMessageId && text) {
+    const messageResult = createSessionMessage({
+      sessionId: run.sessionId,
+      clientMessageId: assistantClientMessageId,
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content: text,
+      attachmentIds: [],
+    });
+
+    assistantMessageId = messageResult.message.id;
+    for (const event of messageResult.events) {
+      publishSessionEvent(event);
+    }
+  }
+
+  if (!text.trim()) {
+    throw new Error(`${run.provider.label} returned empty content`);
+  }
+
+  return text;
+}
+
+// ---------------------------------------------------------------------------
+// schedulePostProcessing — fire-and-forget, never blocks the main turn
+// ---------------------------------------------------------------------------
+
+function schedulePostProcessing(run: AgentRun, text: string, toolCalls: ToolCallEntry[]) {
+  const userMessages = run.context.messages
+    .filter((m) => m.role === "user")
+    .map((m) => (typeof m.content === "string" ? m.content : ""));
+  const latestUserMessage = userMessages.at(-1) ?? null;
+
+  if (latestUserMessage) {
+    void maybeCreateArtifactFromReply(run.sessionId, latestUserMessage, text).catch((err) => {
+      const detail = err instanceof Error ? err.message : "工件写入失败";
+      publishRuntimeNotice(run.sessionId, `工件流式写入失败：${detail}`);
+    });
+  }
+
+  void reflectOnTurn({
+    sessionId: run.sessionId,
+    userMessages,
+    assistantResponse: text,
+    toolCalls,
+  }).catch(() => {
+    // Reflection failure should not fail the user-visible turn.
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Public API (unchanged exports)
+// ---------------------------------------------------------------------------
+
+export async function runAgent(sessionId: string) {
+  return enqueueSessionRun(sessionId, async () => {
+    const run = createAgentRun(sessionId);
+    if (!run) return;
+
+    try {
+      run.reportStarted();
+      const { text, toolCalls } = await executeStream(run);
+      run.reportCompleted(text);
+      schedulePostProcessing(run, text, toolCalls);
+    } catch (error) {
+      run.reportFailed(error);
+    } finally {
+      run.dispose();
     }
   });
 }
