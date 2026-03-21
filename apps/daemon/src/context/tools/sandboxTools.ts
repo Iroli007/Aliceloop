@@ -258,12 +258,55 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           await sandbox.editTextFile({
             targetPath: filePath,
             transform: (content) => {
-              if (!content.includes(oldText)) {
+              // 1. 抹平操作系统差异（防止 Windows \r\n 和 Linux \n 打架）
+              const normalizedContent = content.replace(/\r\n/g, '\n');
+              const normalizedOld = oldText.replace(/\r\n/g, '\n');
+
+              // 2. 统计精确匹配的次数
+              const occurrences = normalizedContent.split(normalizedOld).length - 1;
+
+              // 🟢 完美匹配 1 次：最安全的替换
+              if (occurrences === 1) {
+                return normalizedContent.replace(normalizedOld, newText);
+              }
+
+              // 🔴 匹配超过 1 次：触发"唯一性校验拦截"
+              if (occurrences > 1) {
                 throw new Error(
-                  `Could not find the specified text in ${filePath}`,
+                  `Ambiguous match! Found ${occurrences} identical occurrences of the provided oldText. Please include more surrounding context (lines above and below) in your oldText to make it strictly unique.`
                 );
               }
-              return content.replace(oldText, newText);
+
+              // 🟡 匹配 0 次：启动"弹性空白符匹配 (Fuzzy Whitespace Match)"
+              // LLM 经常漏掉前置缩进，我们把 oldText 里所有的连续空格/换行，全部转换成正则的 \s+
+              const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const fuzzyRegexString = normalizedOld
+                .trim()
+                .split(/\s+/) // 按空白符打散
+                .map(escapeRegex)
+                .join('\\s+'); // 用 \s+ 重新连接
+
+              if (!fuzzyRegexString) {
+                throw new Error("oldText cannot be empty or just whitespace.");
+              }
+
+              const fuzzyRegex = new RegExp(fuzzyRegexString, 'g');
+              const fuzzyMatches = [...normalizedContent.matchAll(fuzzyRegex)];
+
+              if (fuzzyMatches.length === 0) {
+                throw new Error(
+                  `Could not find the specified text in ${filePath}. Please ensure indentation, spaces, and line endings match exactly. Hint: use sandbox_read to get the exact original text.`
+                );
+              }
+
+              if (fuzzyMatches.length > 1) {
+                throw new Error(
+                  `Ambiguous fuzzy match! Found ${fuzzyMatches.length} similar occurrences (ignoring spacing differences). Please include more surrounding context.`
+                );
+              }
+
+              // 🟢 弹性匹配成功 1 次：用原文中实际匹配到的带真实缩进的字符串块进行替换
+              return normalizedContent.replace(fuzzyMatches[0][0], newText);
             },
           });
           return `File edited successfully: ${filePath}`;
