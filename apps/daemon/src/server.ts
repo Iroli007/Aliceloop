@@ -65,6 +65,7 @@ import {
   listSessionEventsSince,
 } from "./repositories/sessionRepository";
 import { getRuntimeSettings, updateRuntimeSettings } from "./repositories/runtimeSettingsRepository";
+import { getUserProfile, updateUserProfile } from "./repositories/userProfileRepository";
 import { backfillTaskRunsFromJobs, getTaskRun, listTaskRuns } from "./repositories/taskRunRepository";
 import { abortAgentForSession } from "./runtime/agentRuntime";
 import { runProviderReply } from "./services/providerRunner";
@@ -800,6 +801,21 @@ export async function createServer() {
       sandboxProfile: request.body?.sandboxProfile,
     });
   });
+
+  // User Profile
+  server.get("/api/user/profile", async () => getUserProfile());
+  server.put<{ Body: { displayName?: string; preferredLanguage?: string; timezone?: string; codeStyle?: string; notes?: string } }>(
+    "/api/user/profile",
+    async (request) => {
+      return updateUserProfile({
+        displayName: request.body?.displayName,
+        preferredLanguage: request.body?.preferredLanguage,
+        timezone: request.body?.timezone,
+        codeStyle: request.body?.codeStyle,
+        notes: request.body?.notes,
+      });
+    },
+  );
   server.get<{ Querystring: SandboxRunQuery }>("/api/runtime/catalog", async (request) => {
     return getRuntimeCatalogSnapshot(parseLimitValue(request.query.limit, 10));
   });

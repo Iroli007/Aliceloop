@@ -1,5 +1,5 @@
 import type { ModelMessage, ToolSet } from "ai";
-import { buildIdentityPrompt } from "./prompts/identityPrompt";
+import { buildPersonaPrompt } from "./prompts/identityPrompt";
 import { buildMemoryBlock } from "./memory/memoryContext";
 import { buildSessionMessages, getLatestUserMessage } from "./session/sessionContext";
 import { buildSkillContextBlock } from "./skills/skillLoader";
@@ -36,7 +36,7 @@ export function loadContext(
   sessionId: string,
   abortSignal: AbortSignal,
 ): AgentContext {
-  const identity = buildIdentityPrompt();
+  const persona = buildPersonaPrompt();
   const userQuery = getLatestUserMessage(sessionId);
   const memory = buildMemoryBlock(sessionId, userQuery ?? undefined);
   const skills = buildSkillContextBlock();
@@ -76,7 +76,7 @@ export function loadContext(
   });
   const tools = buildToolSet(sandbox);
 
-  const systemPrompt = [identity, memory, skills].filter(Boolean).join("\n\n");
+  const systemPrompt = [persona, memory, skills].filter(Boolean).join("\n\n");
 
   return {
     systemPrompt,

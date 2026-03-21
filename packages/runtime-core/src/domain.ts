@@ -410,5 +410,23 @@ export interface SessionSnapshot {
   lastEventSeq: number;
 }
 
+export interface UserProfile {
+  displayName: string | null;
+  preferredLanguage: string | null;
+  timezone: string | null;
+  codeStyle: string | null;
+  notes: string | null;
+  updatedAt: string;
+}
+
+export const defaultUserProfile: UserProfile = {
+  displayName: null,
+  preferredLanguage: null,
+  timezone: null,
+  codeStyle: null,
+  notes: null,
+  updatedAt: new Date().toISOString(),
+};
+
 export const shellOverviewRoute = "/api/shell/overview";
 export const primarySessionId = "session-primary";

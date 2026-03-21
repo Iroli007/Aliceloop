@@ -271,4 +271,15 @@ export const schemaStatements = [
       updated_at TEXT NOT NULL
     )
   `,
+  `
+    CREATE TABLE IF NOT EXISTS user_profile (
+      id TEXT PRIMARY KEY,
+      display_name TEXT,
+      preferred_language TEXT,
+      timezone TEXT,
+      code_style TEXT,
+      notes TEXT,
+      updated_at TEXT NOT NULL
+    )
+  `,
 ];
