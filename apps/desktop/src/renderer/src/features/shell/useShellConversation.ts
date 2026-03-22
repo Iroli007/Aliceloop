@@ -69,6 +69,7 @@ export interface ShellConversationState {
     fileName: string;
     mimeType: string;
     contentBase64: string;
+    originalPath?: string;
   }): Promise<UploadResult>;
   uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult>;
   stopResponse(): Promise<SendResult>;
@@ -769,6 +770,7 @@ export function useShellConversation(): ShellConversationState {
     fileName: string;
     mimeType: string;
     contentBase64: string;
+    originalPath?: string;
   }): Promise<UploadResult> {
     if (!daemonBaseUrl) {
       return {
@@ -797,6 +799,7 @@ export function useShellConversation(): ShellConversationState {
           fileName: input.fileName,
           mimeType: input.mimeType,
           contentBase64: input.contentBase64,
+          originalPath: input.originalPath,
           deviceId: deviceIdRef.current,
           deviceType: "desktop",
         }),
