@@ -39,6 +39,17 @@ declare global {
             }
         >;
       }>;
+      openProjectDirectories(): Promise<{
+        canceled: boolean;
+        directories: Array<{
+          name: string;
+          path: string;
+        }>;
+      }>;
+      openPath(path: string): Promise<{
+        ok: boolean;
+        error?: string;
+      }>;
       closeWindow(): Promise<void>;
       minimizeWindow(): Promise<void>;
       toggleFullscreenWindow(): Promise<void>;

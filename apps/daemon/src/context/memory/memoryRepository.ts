@@ -20,6 +20,7 @@ import {
 } from "./embeddingService";
 import { getMemoryConfig } from "./memoryConfig";
 import { rankBySimilarity } from "./vectorSearch";
+import { nowMs, roundMs } from "../../runtime/perfTrace";
 
 interface CreateMemoryNoteInput {
   id: string;
@@ -45,6 +46,22 @@ interface MemoryEmbeddingRow {
   memoryId: string;
   embedding: Buffer;
   embeddingDimension: number;
+}
+
+export type MemorySearchMode = "semantic" | "lexical";
+export const MEMORY_RETRIEVAL_TIMEOUT_REASON = "memory_retrieval_timeout";
+export type MemorySearchFallbackReason =
+  | "embedding_provider_unavailable"
+  | "embedding_generation_failed"
+  | "embedding_timeout"
+  | "embedding_index_missing"
+  | null;
+
+export interface MemorySearchResult {
+  memories: MemoryWithScore[];
+  mode: MemorySearchMode;
+  fallbackReason: MemorySearchFallbackReason;
+  timings: Record<string, number | string | null>;
 }
 
 function getMemoryNoteById(memoryId: string) {
@@ -354,6 +371,32 @@ function searchMemoriesByText(
     .slice(0, limit);
 }
 
+export function searchMemoriesLexically(
+  queryText: string,
+  limit: number,
+  threshold: number,
+  db: Database.Database = getDatabase(),
+) {
+  return searchMemoriesByText(queryText, limit, threshold, db);
+}
+
+export function countSemanticMemoryCandidates(
+  embeddingDimension: number,
+  db: Database.Database = getDatabase(),
+) {
+  const row = db
+    .prepare(
+      `
+        SELECT COUNT(*) AS count
+        FROM memory_metadata
+        WHERE embedding_dimension = ?
+      `,
+    )
+    .get(embeddingDimension) as { count: number } | undefined;
+
+  return row?.count ?? 0;
+}
+
 export function createMemoryNote(input: CreateMemoryNoteInput) {
   const db = getDatabase();
   db.prepare(
@@ -647,36 +690,77 @@ export async function createMemory(
   return memory;
 }
 
-export async function searchMemoriesBySimilarity(
+export async function searchMemories(
   queryText: string,
   limit: number,
   threshold: number,
   db: Database.Database = getDatabase(),
   abortSignal?: AbortSignal,
 ) {
+  const startedAt = nowMs();
   const trimmedQuery = queryText.trim();
   if (!trimmedQuery) {
-    return [] as MemoryWithScore[];
+    return {
+      memories: [] as MemoryWithScore[],
+      mode: "semantic" as const,
+      fallbackReason: null,
+      timings: {
+        totalMs: 0,
+      },
+    };
   }
 
   const normalizedLimit = Math.max(1, Math.min(limit, 50));
   const config = getMemoryConfig(db);
 
   if (!hasEmbeddingProvider()) {
-    return searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    const lexicalStartedAt = nowMs();
+    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    return {
+      memories,
+      mode: "lexical" as const,
+      fallbackReason: "embedding_provider_unavailable" as const,
+      timings: {
+        lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
+        totalMs: roundMs(nowMs() - startedAt),
+      },
+    };
   }
 
   let queryEmbedding: Float32Array;
+  const embeddingStartedAt = nowMs();
   try {
     queryEmbedding = await generateEmbedding(trimmedQuery, config.embeddingModel, {
       abortSignal,
       dimension: config.embeddingDimension,
     });
   } catch (error) {
-    console.warn("[memory] Falling back to lexical memory search", error);
-    return searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
-  }
+    if (abortSignal?.aborted && abortSignal.reason !== MEMORY_RETRIEVAL_TIMEOUT_REASON) {
+      throw error;
+    }
 
+    const fallbackReason: MemorySearchFallbackReason =
+      abortSignal?.reason === MEMORY_RETRIEVAL_TIMEOUT_REASON
+        ? "embedding_timeout"
+        : "embedding_generation_failed";
+
+    console.warn("[memory] Falling back to lexical memory search", error);
+    const lexicalStartedAt = nowMs();
+    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    return {
+      memories,
+      mode: "lexical" as const,
+      fallbackReason,
+      timings: {
+        embeddingMs: roundMs(nowMs() - embeddingStartedAt),
+        lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
+        totalMs: roundMs(nowMs() - startedAt),
+      },
+    };
+  }
+  const embeddingMs = roundMs(nowMs() - embeddingStartedAt);
+
+  const embeddingRowsStartedAt = nowMs();
   const rows = db
     .prepare(
       `
@@ -690,11 +774,25 @@ export async function searchMemoriesBySimilarity(
       `,
     )
     .all(config.embeddingDimension) as MemoryEmbeddingRow[];
+  const embeddingRowsMs = roundMs(nowMs() - embeddingRowsStartedAt);
 
   if (rows.length === 0) {
-    return searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    const lexicalStartedAt = nowMs();
+    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    return {
+      memories,
+      mode: "lexical" as const,
+      fallbackReason: "embedding_index_missing" as const,
+      timings: {
+        embeddingMs,
+        embeddingRowsMs,
+        lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
+        totalMs: roundMs(nowMs() - startedAt),
+      },
+    };
   }
 
+  const vectorRankStartedAt = nowMs();
   const scoredMemories = rankBySimilarity(
     queryEmbedding,
     rows.map((row) => ({
@@ -704,12 +802,27 @@ export async function searchMemoriesBySimilarity(
     normalizedLimit,
     threshold,
   );
+  const vectorRankMs = roundMs(nowMs() - vectorRankStartedAt);
 
   if (scoredMemories.length === 0) {
-    return searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    const lexicalStartedAt = nowMs();
+    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    return {
+      memories,
+      mode: "lexical" as const,
+      fallbackReason: null,
+      timings: {
+        embeddingMs,
+        embeddingRowsMs,
+        vectorRankMs,
+        lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
+        totalMs: roundMs(nowMs() - startedAt),
+      },
+    };
   }
 
-  return scoredMemories
+  const hydrateStartedAt = nowMs();
+  const memories = scoredMemories
     .map((scoredMemory) => {
       const row = getMemoryRowById(scoredMemory.memoryId, db);
       if (!row) {
@@ -722,6 +835,31 @@ export async function searchMemoriesBySimilarity(
       };
     })
     .filter((memory): memory is MemoryWithScore => memory !== null);
+  const hydrateMs = roundMs(nowMs() - hydrateStartedAt);
+
+  return {
+    memories,
+    mode: "semantic" as const,
+    fallbackReason: null,
+    timings: {
+      embeddingMs,
+      embeddingRowsMs,
+      vectorRankMs,
+      hydrateMs,
+      totalMs: roundMs(nowMs() - startedAt),
+    },
+  };
+}
+
+export async function searchMemoriesBySimilarity(
+  queryText: string,
+  limit: number,
+  threshold: number,
+  db: Database.Database = getDatabase(),
+  abortSignal?: AbortSignal,
+) {
+  const result = await searchMemories(queryText, limit, threshold, db, abortSignal);
+  return result.memories;
 }
 
 export function incrementAccessCount(memoryId: string, db: Database.Database = getDatabase()) {

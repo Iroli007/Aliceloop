@@ -40,10 +40,25 @@ export type DesktopPickerResult = {
   entries: Array<DesktopPickedFile | DesktopPickedFolder>;
 };
 
+export type DesktopDirectoryPickerResult = {
+  canceled: boolean;
+  directories: Array<{
+    name: string;
+    path: string;
+  }>;
+};
+
+export type DesktopOpenPathResult = {
+  ok: boolean;
+  error?: string;
+};
+
 type DesktopBridge = {
   getAppMeta(): Promise<DesktopMeta>;
   pingRuntime(): Promise<RuntimePing>;
   openFileOrFolder(): Promise<DesktopPickerResult>;
+  openProjectDirectories(): Promise<DesktopDirectoryPickerResult>;
+  openPath(path: string): Promise<DesktopOpenPathResult>;
   closeWindow(): Promise<void>;
   minimizeWindow(): Promise<void>;
   toggleFullscreenWindow(): Promise<void>;
@@ -85,6 +100,18 @@ function createBrowserBridge(): DesktopBridge {
       return {
         canceled: true,
         entries: [],
+      };
+    },
+    async openProjectDirectories() {
+      return {
+        canceled: true,
+        directories: [],
+      };
+    },
+    async openPath() {
+      return {
+        ok: false,
+        error: "Web Preview 不支持打开本地目录",
       };
     },
     async closeWindow() {

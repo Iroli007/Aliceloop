@@ -1,7 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, screen } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { focusOrCreateSettingsWindow } from "./settingsWindow";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? "http://127.0.0.1:3030";
@@ -231,6 +232,44 @@ ipcMain.handle("dialog:open-file-or-folder", async () => {
   return {
     canceled: false,
     entries,
+  };
+});
+
+ipcMain.handle("dialog:open-project-directories", async () => {
+  const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const result = await dialog.showOpenDialog(window, {
+    properties: ["openDirectory", "multiSelections"],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return {
+      canceled: true,
+      directories: [],
+    };
+  }
+
+  return {
+    canceled: false,
+    directories: result.filePaths.map((selectedPath) => ({
+      name: basename(selectedPath),
+      path: selectedPath,
+    })),
+  };
+});
+
+ipcMain.handle("path:open", async (_event, targetPath: string) => {
+  const normalizedPath = targetPath.startsWith("~/") ? join(homedir(), targetPath.slice(2)) : targetPath;
+  const error = await shell.openPath(normalizedPath);
+
+  if (error) {
+    return {
+      ok: false,
+      error,
+    };
+  }
+
+  return {
+    ok: true,
   };
 });
 

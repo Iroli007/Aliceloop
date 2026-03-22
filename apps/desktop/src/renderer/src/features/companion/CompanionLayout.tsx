@@ -1,6 +1,7 @@
 import type { Attachment } from "@aliceloop/runtime-core";
 import { useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
 import type { CompanionState } from "./useCompanionData";
+import { ThinkingIndicator } from "./ThinkingIndicator";
 
 interface CompanionLayoutProps {
   state: CompanionState;
@@ -163,7 +164,7 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
           {state.snapshot.messages.map((message) => (
             <article key={message.id} className={`companion__message companion__message--${message.role}`}>
               <div className="companion__message-meta">
-                <span>{message.role === "user" ? "你" : message.role === "assistant" ? "Aliceloop" : "System"}</span>
+                <span>{message.role === "user" ? "你" : message.role === "assistant" ? "Alice" : "System"}</span>
                 <span>{formatTime(message.createdAt)}</span>
               </div>
               <p>{message.content}</p>
@@ -178,6 +179,7 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
               ) : null}
             </article>
           ))}
+          {state.pendingMessage && <ThinkingIndicator />}
         </div>
       </section>
 

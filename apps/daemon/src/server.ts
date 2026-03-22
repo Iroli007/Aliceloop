@@ -86,6 +86,16 @@ import {
   listSessionThreads,
   listSessionEventsSince,
 } from "./repositories/sessionRepository";
+import {
+  createProjectDirectory,
+  deleteProjectDirectory,
+  getProjectDirectory,
+  listProjectDirectories,
+  ProjectDirectoryInUseError,
+  ProjectDirectoryNotFoundError,
+  ProjectDirectoryValidationError,
+  updateProjectDirectory,
+} from "./repositories/projectRepository";
 import { createCronJob, deleteCronJob, listCronJobs } from "./repositories/cronJobRepository";
 import { approvePlan, archivePlan, createPlan, getPlan, listPlans, type PlanStatus, updatePlan } from "./repositories/planRepository";
 import { getRuntimeSettings, updateRuntimeSettings } from "./repositories/runtimeSettingsRepository";
@@ -110,8 +120,17 @@ import {
 } from "./services/sessionToolApprovalService";
 import { runManagedTask } from "./services/taskRunner";
 import { startSchedulerService } from "./services/schedulerService";
+import {
+  assignSessionProjectAndSync,
+  resyncProjectSessionHistories,
+  syncSessionProjectHistory,
+} from "./services/sessionProjectService";
 
 interface SessionParams {
+  id: string;
+}
+
+interface ProjectParams {
   id: string;
 }
 
@@ -205,6 +224,24 @@ interface UpdateProviderBody {
 
 interface CreateSessionBody {
   title?: string;
+  projectId?: string | null;
+}
+
+interface CreateProjectBody {
+  name?: string;
+  path?: string;
+  kind?: "workspace" | "temporary";
+  isDefault?: boolean;
+}
+
+interface UpdateProjectBody {
+  name?: string;
+  path?: string;
+  isDefault?: boolean;
+}
+
+interface UpdateSessionProjectBody {
+  projectId?: string | null;
 }
 
 interface UpdateRuntimeSettingsBody {
@@ -1101,9 +1138,121 @@ export async function createServer() {
     return archived;
   });
 
+  server.get("/api/projects", async () => listProjectDirectories());
+
+  server.get<{ Params: ProjectParams }>("/api/projects/:id", async (request, reply) => {
+    try {
+      return getProjectDirectory(request.params.id);
+    } catch (error) {
+      if (error instanceof ProjectDirectoryNotFoundError) {
+        return reply.code(404).send({
+          error: "project_not_found",
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  server.post<{ Body: CreateProjectBody }>("/api/projects", async (request, reply) => {
+    if (!request.body?.path?.trim()) {
+      return reply.code(400).send({
+        error: "project_path_required",
+      });
+    }
+
+    try {
+      return createProjectDirectory({
+        name: request.body?.name,
+        path: request.body.path,
+        kind: request.body?.kind,
+        isDefault: request.body?.isDefault,
+      });
+    } catch (error) {
+      if (error instanceof ProjectDirectoryValidationError) {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  server.put<{ Params: ProjectParams; Body: UpdateProjectBody }>("/api/projects/:id", async (request, reply) => {
+    try {
+      const result = updateProjectDirectory({
+        id: request.params.id,
+        name: request.body?.name,
+        path: request.body?.path,
+        isDefault: request.body?.isDefault,
+      });
+      const syncResult = await resyncProjectSessionHistories(result.project.id, result.previousPath);
+      return {
+        project: result.project,
+        migratedSessionCount: syncResult.sessionCount,
+      };
+    } catch (error) {
+      if (error instanceof ProjectDirectoryNotFoundError) {
+        return reply.code(404).send({
+          error: "project_not_found",
+        });
+      }
+
+      if (error instanceof ProjectDirectoryValidationError) {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  server.delete<{ Params: ProjectParams }>("/api/projects/:id", async (request, reply) => {
+    try {
+      return deleteProjectDirectory(request.params.id);
+    } catch (error) {
+      if (error instanceof ProjectDirectoryNotFoundError) {
+        return reply.code(404).send({
+          error: "project_not_found",
+        });
+      }
+
+      if (error instanceof ProjectDirectoryInUseError) {
+        return reply.code(409).send({
+          error: "project_in_use",
+        });
+      }
+
+      if (error instanceof ProjectDirectoryValidationError) {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+
   server.get("/api/sessions", async () => listSessionThreads());
 
-  server.post<{ Body: CreateSessionBody }>("/api/sessions", async (request) => createSession(request.body?.title));
+  server.post<{ Body: CreateSessionBody }>("/api/sessions", async (request, reply) => {
+    try {
+      return createSession({
+        title: request.body?.title,
+        projectId: request.body?.projectId,
+      });
+    } catch (error) {
+      if (error instanceof ProjectDirectoryNotFoundError) {
+        return reply.code(404).send({
+          error: "project_not_found",
+        });
+      }
+
+      throw error;
+    }
+  });
   server.delete<{ Params: SessionParams }>("/api/sessions/:id", async (request, reply) => {
     const deleted = deleteSession(request.params.id);
     if (!deleted) {
@@ -1302,6 +1451,37 @@ export async function createServer() {
     return getSessionSnapshot(request.params.id);
   });
 
+  server.get<{ Params: SessionParams }>("/api/session/:id/project", async (request, reply) => {
+    try {
+      return getSessionSnapshot(request.params.id).project;
+    } catch {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+  });
+
+  server.put<{ Params: SessionParams; Body: UpdateSessionProjectBody }>("/api/session/:id/project", async (request, reply) => {
+    try {
+      const result = await assignSessionProjectAndSync(request.params.id, request.body?.projectId ?? null);
+      return result;
+    } catch (error) {
+      if (error instanceof ProjectDirectoryNotFoundError) {
+        return reply.code(404).send({
+          error: "project_not_found",
+        });
+      }
+
+      if (error instanceof Error && error.message.includes("was not found")) {
+        return reply.code(404).send({
+          error: "session_not_found",
+        });
+      }
+
+      throw error;
+    }
+  });
+
   server.post<{ Params: ToolApprovalParams }>("/api/session/:id/tool-approvals/:approvalId/approve", async (request, reply) => {
     try {
       return {
@@ -1431,6 +1611,8 @@ export async function createServer() {
     for (const event of result.events) {
       publishSessionEvent(event);
     }
+
+    await syncSessionProjectHistory(request.params.id);
 
     if (role === "user" && result.created) {
       abortAgentForSession(request.params.id);
@@ -1567,6 +1749,8 @@ export async function createServer() {
       publishSessionEvent(event);
     }
 
+    await syncSessionProjectHistory(request.params.id);
+
     return {
       attachment: result.attachment,
       jobs: result.jobs,
@@ -1628,6 +1812,8 @@ export async function createServer() {
     for (const event of result.events) {
       publishSessionEvent(event);
     }
+
+    await syncSessionProjectHistory(request.params.id);
 
     return {
       attachment: result.attachment,

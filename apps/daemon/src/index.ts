@@ -2,6 +2,8 @@ import { reconcileRunningSandboxRuns } from "./repositories/sandboxRunRepository
 import { reconcileInterruptedSessionState } from "./repositories/sessionRepository";
 import { listActiveSkillDefinitions } from "./context/skills/skillLoader";
 import { listRequestedSkillToolNames } from "./context/tools/toolRegistry";
+import { getDataDir, getDatabasePath } from "./db/client";
+import { getActiveProviderConfig } from "./repositories/providerRepository";
 import { createServer } from "./server";
 
 const port = Number(process.env.ALICELOOP_DAEMON_PORT ?? 3030);
@@ -29,6 +31,27 @@ async function start() {
       count: activeSkills.length,
       skills: activeSkills.map((skill) => skill.id),
       adapters: activeSkillToolNames,
+    }),
+  );
+
+  const activeProvider = getActiveProviderConfig();
+  console.info(
+    "[aliceloop-daemon] runtime configuration",
+    JSON.stringify({
+      host,
+      port,
+      dataDir: getDataDir(),
+      databasePath: getDatabasePath(),
+      dataDirOverride: process.env.ALICELOOP_DATA_DIR?.trim() || null,
+      activeProvider: activeProvider
+        ? {
+            id: activeProvider.id,
+            label: activeProvider.label,
+            transport: activeProvider.transport,
+            model: activeProvider.model,
+            hasApiKey: Boolean(activeProvider.apiKey),
+          }
+        : null,
     }),
   );
 

@@ -1,7 +1,9 @@
 import type { ModelMessage, ToolSet } from "ai";
+import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
 import { buildMemoryBlock } from "./memory/memoryContext";
 import { buildActiveTurnBlock, buildSessionMessages, getLatestUserMessage } from "./session/sessionContext";
+import { buildHistoricalContextBlock } from "./session/historyContext";
 import { buildSkillContextBlock, listActiveSkillDefinitions } from "./skills/skillLoader";
 import { buildToolSet } from "./tools/toolRegistry";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
@@ -10,7 +12,7 @@ import {
   markGeneratedFileDeleted,
   markSessionGeneratedFile,
 } from "../repositories/sessionGeneratedFileRepository";
-import { listSessionAttachmentSandboxRoots } from "../repositories/sessionRepository";
+import { getSessionProjectBinding, listSessionAttachmentSandboxRoots } from "../repositories/sessionRepository";
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
 import { requestSessionBashApproval, requestSessionToolApproval } from "../services/sessionToolApprovalService";
 
@@ -25,6 +27,8 @@ export interface AgentContext {
   messages: ModelMessage[];
   tools: ToolSet;
   safetyConfig: SafetyConfig;
+  runtimeNotices: string[];
+  timings: Record<string, number | string | null>;
 }
 
 const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
@@ -36,18 +40,62 @@ export async function loadContext(
   sessionId: string,
   abortSignal: AbortSignal,
 ): Promise<AgentContext> {
-  const persona = buildPersonaPrompt();
-  const userQuery = getLatestUserMessage(sessionId);
-  const activeTurn = buildActiveTurnBlock(sessionId);
-  const memory = await buildMemoryBlock(sessionId, userQuery ?? undefined, abortSignal);
-  const skills = buildSkillContextBlock();
-  const messages = buildSessionMessages(sessionId);
-  const runtimeSettings = getRuntimeSettings();
-  const attachmentRoots = listSessionAttachmentSandboxRoots(sessionId);
+  const timings: Record<string, number | string | null> = {};
 
+  const personaStartedAt = nowMs();
+  const persona = buildPersonaPrompt();
+  timings.personaMs = roundMs(nowMs() - personaStartedAt);
+
+  const latestUserStartedAt = nowMs();
+  const userQuery = getLatestUserMessage(sessionId);
+  timings.latestUserMs = roundMs(nowMs() - latestUserStartedAt);
+
+  const projectBindingStartedAt = nowMs();
+  const projectBinding = getSessionProjectBinding(sessionId);
+  timings.projectBindingMs = roundMs(nowMs() - projectBindingStartedAt);
+
+  const activeTurnStartedAt = nowMs();
+  const activeTurn = buildActiveTurnBlock(sessionId);
+  timings.activeTurnMs = roundMs(nowMs() - activeTurnStartedAt);
+
+  const historyStartedAt = nowMs();
+  const history = buildHistoricalContextBlock(sessionId, userQuery ?? undefined);
+  timings.historyMs = roundMs(nowMs() - historyStartedAt);
+  timings.history = JSON.stringify(history.timings);
+
+  const memoryStartedAt = nowMs();
+  const memory = await buildMemoryBlock(sessionId, userQuery ?? undefined, abortSignal);
+  timings.memoryMs = roundMs(nowMs() - memoryStartedAt);
+
+  const skillsStartedAt = nowMs();
+  const skills = buildSkillContextBlock();
+  timings.skillsMs = roundMs(nowMs() - skillsStartedAt);
+
+  const messagesStartedAt = nowMs();
+  const messages = buildSessionMessages(sessionId);
+  timings.messagesMs = roundMs(nowMs() - messagesStartedAt);
+  timings.messageCount = messages.length;
+  timings.messageChars = roundMs(messages.reduce((sum, message) => {
+    if (typeof message.content === "string") {
+      return sum + message.content.length;
+    }
+
+    return sum + JSON.stringify(message.content).length;
+  }, 0));
+
+  const runtimeSettingsStartedAt = nowMs();
+  const runtimeSettings = getRuntimeSettings();
+  timings.runtimeSettingsMs = roundMs(nowMs() - runtimeSettingsStartedAt);
+
+  const attachmentRootsStartedAt = nowMs();
+  const attachmentRoots = listSessionAttachmentSandboxRoots(sessionId);
+  timings.attachmentRootsMs = roundMs(nowMs() - attachmentRootsStartedAt);
+
+  const sandboxStartedAt = nowMs();
   const sandbox = createPermissionSandboxExecutor({
     label: `agent:${sessionId}`,
     permissionProfile: runtimeSettings.sandboxProfile,
+    defaultCwd: attachmentRoots.defaultCwd ?? undefined,
     extraReadRoots: attachmentRoots.readRoots,
     extraWriteRoots: attachmentRoots.writeRoots,
     extraCwdRoots: attachmentRoots.cwdRoots,
@@ -75,26 +123,73 @@ export async function loadContext(
       markGeneratedFileDeleted(targetPath);
     },
   });
+  timings.sandboxMs = roundMs(nowMs() - sandboxStartedAt);
+
+  const activeSkillsStartedAt = nowMs();
   const activeSkills = listActiveSkillDefinitions();
+  timings.activeSkillsMs = roundMs(nowMs() - activeSkillsStartedAt);
+
+  const toolsStartedAt = nowMs();
   const tools = buildToolSet(sandbox, activeSkills);
+  timings.toolsMs = roundMs(nowMs() - toolsStartedAt);
 
-  const dynamicBlocks = [activeTurn, memory, skills].filter(Boolean);
+  const projectContext = projectBinding?.projectPath
+    ? [
+        "Current session workspace:",
+        `- Project: ${projectBinding.projectName ?? projectBinding.projectId}`,
+        `- Path: ${projectBinding.projectPath}`,
+        "- Use this as the default working directory unless the user explicitly asks for another location.",
+      ].join("\n")
+    : "";
 
+  const dynamicBlocks = [activeTurn, projectContext, history.content, memory.content, skills].filter(Boolean);
+
+  const promptAssemblyStartedAt = nowMs();
   let systemPrompt: AgentContext["systemPrompt"];
   if (Array.isArray(persona)) {
     // persona is already system messages with cache control
     systemPrompt = [...persona];
     if (dynamicBlocks.length > 0) {
-      const lastMessage = systemPrompt[systemPrompt.length - 1];
-      systemPrompt[systemPrompt.length - 1] = {
-        ...lastMessage,
-        content: [lastMessage.content, ...dynamicBlocks].join("\n\n")
-      };
+      systemPrompt.push({
+        role: "system",
+        content: dynamicBlocks.join("\n\n"),
+      });
     }
   } else {
     // fallback: persona is a string
     systemPrompt = [persona, ...dynamicBlocks].filter(Boolean).join("\n\n");
   }
+  timings.promptAssemblyMs = roundMs(nowMs() - promptAssemblyStartedAt);
+  if (Array.isArray(systemPrompt)) {
+    timings.systemPromptParts = systemPrompt.length;
+    timings.systemPromptChars = roundMs(systemPrompt.reduce((sum, message) => sum + message.content.length, 0));
+  } else {
+    timings.systemPromptParts = 1;
+    timings.systemPromptChars = roundMs(systemPrompt.length);
+  }
+  timings.dynamicBlockCount = dynamicBlocks.length;
+  timings.dynamicPromptChars = roundMs(dynamicBlocks.reduce((sum, block) => sum + block.length, 0));
+  timings.totalMs = roundMs(Object.values({
+    personaMs: timings.personaMs,
+    latestUserMs: timings.latestUserMs,
+    activeTurnMs: timings.activeTurnMs,
+    historyMs: timings.historyMs,
+    memoryMs: timings.memoryMs,
+    skillsMs: timings.skillsMs,
+    messagesMs: timings.messagesMs,
+    runtimeSettingsMs: timings.runtimeSettingsMs,
+    attachmentRootsMs: timings.attachmentRootsMs,
+    sandboxMs: timings.sandboxMs,
+    activeSkillsMs: timings.activeSkillsMs,
+    toolsMs: timings.toolsMs,
+    promptAssemblyMs: timings.promptAssemblyMs,
+  }).reduce((sum, value) => sum + (typeof value === "number" ? value : 0), 0));
+  timings.memory = JSON.stringify(memory.timings);
+
+  logPerfTrace("load_context", {
+    sessionId,
+    ...timings,
+  });
 
   return {
     systemPrompt,
@@ -104,5 +199,7 @@ export async function loadContext(
       ...DEFAULT_SAFETY,
       abortSignal,
     },
+    runtimeNotices: memory.runtimeNotices,
+    timings,
   };
 }

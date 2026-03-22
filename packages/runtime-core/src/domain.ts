@@ -30,6 +30,7 @@ export type McpServerStatus = "available" | "planned";
 export type McpInstallStatus = "not-installed" | "installed";
 export type McpServerSource = "marketplace" | "manual";
 export type RuntimeScriptStatus = "available" | "planned";
+export type ProjectDirectoryKind = "workspace" | "temporary";
 export type SessionEventType =
   | "message.created"
   | "message.acked"
@@ -162,6 +163,10 @@ export interface Session {
   title: string;
   createdAt: string;
   updatedAt: string;
+  projectId?: string | null;
+  projectName?: string | null;
+  projectPath?: string | null;
+  projectKind?: ProjectDirectoryKind | null;
 }
 
 export interface SessionThreadSummary {
@@ -172,6 +177,31 @@ export interface SessionThreadSummary {
   messageCount: number;
   latestMessagePreview: string | null;
   latestMessageAt: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  projectPath?: string | null;
+  projectKind?: ProjectDirectoryKind | null;
+}
+
+export interface ProjectDirectory {
+  id: string;
+  name: string;
+  path: string;
+  kind: ProjectDirectoryKind;
+  isDefault: boolean;
+  sessionCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SessionProjectBinding {
+  sessionId: string;
+  projectId: string | null;
+  projectName: string | null;
+  projectPath: string | null;
+  projectKind: ProjectDirectoryKind | null;
+  transcriptMarkdownPath: string | null;
+  transcriptJsonPath: string | null;
 }
 
 export interface Attachment {
@@ -400,6 +430,7 @@ export interface ToolApproval {
 
 export interface SessionSnapshot {
   session: Session;
+  project: SessionProjectBinding | null;
   messages: SessionMessage[];
   attachments: Attachment[];
   pendingToolApprovals: ToolApproval[];

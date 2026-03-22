@@ -129,6 +129,7 @@ export const previewSessionSnapshot: SessionSnapshot = {
     createdAt: "2026-03-17T07:18:00.000Z",
     updatedAt: "2026-03-17T07:28:00.000Z",
   },
+  project: null,
   messages: [
     {
       id: "message-1",

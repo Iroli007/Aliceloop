@@ -16,7 +16,9 @@ import {
   upsertSessionJob,
 } from "../repositories/sessionRepository";
 import { maybeCreateArtifactFromReply } from "../services/artifactWriter";
+import { syncSessionProjectHistory } from "../services/sessionProjectService";
 import { enqueueSessionRun } from "../services/sessionRunQueue";
+import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +44,8 @@ function publishRuntimeNotice(sessionId: string, content: string) {
   for (const event of result.events) {
     publishSessionEvent(event);
   }
+
+  void syncSessionProjectHistory(sessionId).catch(() => {});
 }
 
 function publishAssistantReply(sessionId: string, content: string) {
@@ -57,6 +61,8 @@ function publishAssistantReply(sessionId: string, content: string) {
   for (const event of result.events) {
     publishSessionEvent(event);
   }
+
+  void syncSessionProjectHistory(sessionId).catch(() => {});
 }
 
 function buildLocalFallbackReply(userMessage: string | null) {
@@ -100,6 +106,19 @@ function publishRuntimeEvent(
   return event;
 }
 
+const publishedRuntimeNotices = new Map<string, Set<string>>();
+
+function publishRuntimeNoticeOnce(sessionId: string, content: string) {
+  const existing = publishedRuntimeNotices.get(sessionId) ?? new Set<string>();
+  if (existing.has(content)) {
+    return;
+  }
+
+  existing.add(content);
+  publishedRuntimeNotices.set(sessionId, existing);
+  publishRuntimeNotice(sessionId, content);
+}
+
 // ---------------------------------------------------------------------------
 // AgentRun — lightweight value object for a single run
 // ---------------------------------------------------------------------------
@@ -117,14 +136,17 @@ interface AgentRun {
   abortController: AbortController;
   context: AgentContext;
   safety: ReturnType<typeof createSafetyChecker>;
+  queueWaitMs: number;
+  contextLoadMs: number;
+  startedAtMs: number;
 
   reportStarted(): void;
-  reportCompleted(text: string): void;
+  reportCompleted(text: string, streamTimings: Record<string, number | null>): void;
   reportFailed(error: unknown): void;
   dispose(): void;
 }
 
-async function createAgentRun(sessionId: string): Promise<AgentRun | null> {
+async function createAgentRun(sessionId: string, queueWaitMs: number): Promise<AgentRun | null> {
   const activeProvider = getActiveProviderConfig();
   const jobId = randomUUID();
 
@@ -145,13 +167,21 @@ async function createAgentRun(sessionId: string): Promise<AgentRun | null> {
   activeAgents.set(sessionId, abortController);
 
   let context: AgentContext;
+  const contextStartedAt = nowMs();
   try {
     context = await loadContext(sessionId, abortController.signal);
   } catch (error) {
     activeAgents.delete(sessionId);
     throw error;
   }
+  const contextLoadMs = roundMs(nowMs() - contextStartedAt);
+
+  for (const notice of context.runtimeNotices) {
+    publishRuntimeNoticeOnce(sessionId, notice);
+  }
+
   const safety = createSafetyChecker(context.safetyConfig);
+  const startedAtMs = nowMs();
 
   return {
     sessionId,
@@ -160,6 +190,9 @@ async function createAgentRun(sessionId: string): Promise<AgentRun | null> {
     abortController,
     context,
     safety,
+    queueWaitMs,
+    contextLoadMs,
+    startedAtMs,
 
     reportStarted() {
       publishJob({
@@ -172,7 +205,9 @@ async function createAgentRun(sessionId: string): Promise<AgentRun | null> {
       });
     },
 
-    reportCompleted(text: string) {
+    reportCompleted(text: string, streamTimings: Record<string, number | null>) {
+      const providerRunMs = roundMs(nowMs() - startedAtMs);
+      const endToEndMs = roundMs(queueWaitMs + contextLoadMs + providerRunMs);
       publishJob({
         id: jobId,
         sessionId,
@@ -180,6 +215,20 @@ async function createAgentRun(sessionId: string): Promise<AgentRun | null> {
         status: "done",
         title: `${activeProvider.label} completed`,
         detail: `Response generated with ${activeProvider.model} (${safety.iterationCount} steps, ${Math.round(safety.elapsedMs / 1000)}s).`,
+      });
+
+      logPerfTrace("agent_run", {
+        sessionId,
+        providerId: activeProvider.id,
+        model: activeProvider.model,
+        queueWaitMs,
+        contextLoadMs,
+        context: context.timings,
+        stream: streamTimings,
+        providerRunMs,
+        endToEndMs,
+        responseChars: text.length,
+        iterations: safety.iterationCount,
       });
     },
 
@@ -232,10 +281,12 @@ async function createAgentRun(sessionId: string): Promise<AgentRun | null> {
 interface StreamResult {
   text: string;
   toolCalls: ToolCallEntry[];
+  timings: Record<string, number | null>;
 }
 
 async function executeStream(run: AgentRun): Promise<StreamResult> {
   const toolCalls: ToolCallEntry[] = [];
+  const requestStartedAt = nowMs();
 
   const stream = streamText({
     model: createProviderModel(run.provider),
@@ -274,9 +325,17 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
       });
     },
   });
+  const streamSetupMs = roundMs(nowMs() - requestStartedAt);
 
-  const text = await consumeTextStream(run, stream);
-  return { text, toolCalls };
+  const { text, timings } = await consumeTextStream(run, stream, requestStartedAt);
+  return {
+    text,
+    toolCalls,
+    timings: {
+      streamSetupMs,
+      ...timings,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -288,12 +347,14 @@ const DEBOUNCE_MS = 80;
 async function consumeTextStream(
   run: AgentRun,
   stream: Awaited<ReturnType<typeof streamText>>,
-): Promise<string> {
+  requestStartedAt: number,
+): Promise<{ text: string; timings: Record<string, number | null> }> {
   let text = "";
   const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
   let assistantMessageId: string | null = null;
   let pendingFlush = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let firstTokenMs: number | null = null;
 
   function flush() {
     if (!assistantMessageId || !pendingFlush) return;
@@ -313,6 +374,7 @@ async function consumeTextStream(
     text += delta;
 
     if (!assistantMessageId) {
+      firstTokenMs = roundMs(nowMs() - requestStartedAt);
       // First delta: create the message immediately
       const messageResult = createSessionMessage({
         sessionId: run.sessionId,
@@ -371,16 +433,33 @@ async function consumeTextStream(
     }
   }
 
+  await syncSessionProjectHistory(run.sessionId);
+
   // Log cache statistics if available
   const metadata = await stream.providerMetadata;
+  let cacheCreationInputTokens: number | null = null;
+  let cacheReadInputTokens: number | null = null;
   if (metadata?.anthropic) {
-    const { cacheCreationInputTokens, cacheReadInputTokens } = metadata.anthropic;
+    cacheCreationInputTokens = typeof metadata.anthropic.cacheCreationInputTokens === "number"
+      ? metadata.anthropic.cacheCreationInputTokens
+      : null;
+    cacheReadInputTokens = typeof metadata.anthropic.cacheReadInputTokens === "number"
+      ? metadata.anthropic.cacheReadInputTokens
+      : null;
     if (cacheCreationInputTokens || cacheReadInputTokens) {
       console.log(`[Cache] write=${cacheCreationInputTokens ?? 0} read=${cacheReadInputTokens ?? 0}`);
     }
   }
 
-  return text;
+  return {
+    text,
+    timings: {
+      firstTokenMs,
+      streamTotalMs: roundMs(nowMs() - requestStartedAt),
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -416,14 +495,16 @@ function schedulePostProcessing(run: AgentRun, text: string, toolCalls: ToolCall
 // ---------------------------------------------------------------------------
 
 export async function runAgent(sessionId: string) {
+  const enqueuedAt = nowMs();
   return enqueueSessionRun(sessionId, async () => {
-    const run = await createAgentRun(sessionId);
+    const queueWaitMs = roundMs(nowMs() - enqueuedAt);
+    const run = await createAgentRun(sessionId, queueWaitMs);
     if (!run) return;
 
     try {
       run.reportStarted();
-      const { text, toolCalls } = await executeStream(run);
-      run.reportCompleted(text);
+      const { text, toolCalls, timings } = await executeStream(run);
+      run.reportCompleted(text, timings);
       schedulePostProcessing(run, text, toolCalls);
     } catch (error) {
       run.reportFailed(error);

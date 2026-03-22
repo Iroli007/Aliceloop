@@ -33,6 +33,7 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
     label: options.label,
     toolPolicy,
     runtimePolicy,
+    defaultCwd: options.defaultCwd ?? null,
     audit: createSandboxAuditLogger(options.label),
     defaultTimeoutMs: options.defaultTimeoutMs ?? 10_000,
     maxBufferBytes: options.maxBufferBytes ?? 1024 * 1024,
@@ -100,6 +101,7 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
         allowedReadRoots: toolPolicy.allowedReadRoots ?? ["<all>"],
         allowedWriteRoots: toolPolicy.allowedWriteRoots ?? ["<all>"],
         allowedCwdRoots: toolPolicy.allowedCwdRoots ?? ["<all>"],
+        defaultCwd: options.defaultCwd ?? null,
         allowedCommands: toolPolicy.fullAccess ? ["<all>"] : toolPolicy.allowedCommands,
         warnings,
       };

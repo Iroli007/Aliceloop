@@ -11,6 +11,7 @@ import {
 } from "../repositories/sessionRepository";
 import { abortAgentForSession } from "../runtime/agentRuntime";
 import { runProviderReply } from "./providerRunner";
+import { syncSessionProjectHistory } from "./sessionProjectService";
 
 function getSchedulerPollMs() {
   const parsed = Number(process.env.ALICELOOP_SCHEDULER_POLL_MS ?? "1000");
@@ -61,7 +62,7 @@ export function startSchedulerService() {
           try {
             let sessionId = job.sessionId;
             if (!sessionId || !hasSession(sessionId)) {
-              sessionId = createSession(`定时任务 · ${job.name}`).id;
+              sessionId = createSession({ title: `定时任务 · ${job.name}` }).id;
             }
 
             const result = createSessionMessage({
@@ -81,6 +82,8 @@ export function startSchedulerService() {
             for (const event of result.events) {
               publishSessionEvent(event);
             }
+
+            await syncSessionProjectHistory(sessionId);
 
             completeCronJobRun({
               jobId: job.id,

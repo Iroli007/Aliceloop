@@ -54,3 +54,18 @@ export function markGeneratedFileDeleted(targetPath: string, deletedAt = new Dat
     `,
   ).run(deletedAt, deletedAt, normalizePath(targetPath));
 }
+
+export function listSessionGeneratedFiles(sessionId: string) {
+  const db = getDatabase();
+  const rows = db.prepare(
+    `
+      SELECT path
+      FROM session_generated_files
+      WHERE session_id = ?
+        AND deleted_at IS NULL
+      ORDER BY updated_at DESC, created_at DESC
+    `,
+  ).all(sessionId) as Array<{ path: string }>;
+
+  return rows.map((row) => row.path);
+}

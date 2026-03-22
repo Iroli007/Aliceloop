@@ -40,17 +40,7 @@ export function buildToolSet(
 ): ToolSet {
   // Layer 1: always load the 6 base sandbox tools
   const baseTools = createSandboxTools(sandbox);
-  const tools: ToolSet = {};
-
-  // Mark base tools for caching
-  for (const [name, toolDef] of Object.entries(baseTools)) {
-    tools[name] = {
-      ...toolDef,
-      providerOptions: {
-        anthropic: { cacheControl: { type: "ephemeral" } }
-      }
-    };
-  }
+  const tools: ToolSet = { ...baseTools };
 
   // Layer 2: collect extra tool names requested by active skills
   const requested = collectRequestedSkillTools(activeSkills);

@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getUserProfile } from "../../repositories/userProfileRepository";
@@ -63,41 +63,6 @@ function readHumor(): string {
   return readCached(humorCache, "HUMOR.md");
 }
 
-function readMemoryMd(): string | null {
-  const p = join(promptRootDir, "MEMORY.md");
-  if (!existsSync(p)) return null;
-  const content = readFileSync(p, "utf-8").trim();
-  if (!content || content.startsWith("<!--")) return null;
-  return content;
-}
-
-function readDailyMemoryLogs(): string | null {
-  const memoryDir = join(promptRootDir, "memory");
-  if (!existsSync(memoryDir)) return null;
-
-  const today = new Date();
-  const yesterday = new Date(today);
-  yesterday.setDate(yesterday.getDate() - 1);
-
-  const fmt = (d: Date) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-
-  const dates = [fmt(yesterday), fmt(today)];
-  const blocks: string[] = [];
-
-  for (const date of dates) {
-    const p = join(memoryDir, `${date}.md`);
-    if (existsSync(p)) {
-      const content = readFileSync(p, "utf-8").trim();
-      if (content) {
-        blocks.push(`### ${date}\n${content}`);
-      }
-    }
-  }
-
-  return blocks.length > 0 ? `## Daily Logs\n\n${blocks.join("\n\n")}` : null;
-}
-
 function buildUserBlock(): string | null {
   const profile = getUserProfile();
   const lines: string[] = [];
@@ -116,12 +81,13 @@ function buildUserBlock(): string | null {
 /**
  * Build the full persona prompt as system messages with cache control.
  * Static parts (IDENTITY, SOUL, TOOLS, HEARTBEAT) are marked for caching.
- * Dynamic parts (USER, MEMORY, Daily Logs) are not cached.
+ * Dynamic parts (USER) are not cached.
  */
 export function buildPersonaPrompt(): Array<{ role: "system"; content: string; providerOptions?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> {
   const staticContent = [
     readIdentity(),
     readSoul(),
+    readHumor(),
     readTools(),
     readHeartbeat(),
   ].filter(Boolean).join("\n\n");
@@ -139,12 +105,6 @@ export function buildPersonaPrompt(): Array<{ role: "system"; content: string; p
   const dynamicBlocks: string[] = [];
   const userBlock = buildUserBlock();
   if (userBlock) dynamicBlocks.push(userBlock);
-
-  const memoryBlock = readMemoryMd();
-  if (memoryBlock) dynamicBlocks.push(memoryBlock);
-
-  const dailyLogs = readDailyMemoryLogs();
-  if (dailyLogs) dynamicBlocks.push(dailyLogs);
 
   if (dynamicBlocks.length > 0) {
     messages.push({

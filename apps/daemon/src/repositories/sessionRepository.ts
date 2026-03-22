@@ -7,11 +7,13 @@ import {
   type DeviceStatus,
   type DeviceType,
   type JobRunDetail,
+  type ProjectDirectoryKind,
   type RuntimePresence,
   type Session,
   type SessionEvent,
   type SessionMessage,
   type SessionMessageStatus,
+  type SessionProjectBinding,
   type SessionRole,
   type SessionSnapshot,
   type SessionThreadSummary,
@@ -22,14 +24,24 @@ import { getDatabase } from "../db/client";
 import { getShellOverview } from "./overviewRepository";
 import { syncTaskRunFromJob } from "./taskRunRepository";
 import { listPendingToolApprovals } from "../services/toolApprovalBroker";
+import { getDefaultProjectDirectory, getProjectDirectory } from "./projectRepository";
 
 const runtimeHeartbeatWindowMs = 25_000;
 
 interface SessionRow {
   id: string;
   title: string;
+  projectId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+interface SessionProjectBindingRow {
+  sessionId: string;
+  projectId: string | null;
+  projectName: string | null;
+  projectPath: string | null;
+  projectKind: ProjectDirectoryKind | null;
 }
 
 interface AttachmentRow {
@@ -101,6 +113,16 @@ interface SessionThreadSummaryRow {
   messageCount: number;
   latestMessagePreview: string | null;
   latestMessageAt: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  projectPath: string | null;
+  projectKind: ProjectDirectoryKind | null;
+}
+
+interface SessionConversationMessageRow {
+  role: SessionRole;
+  content: string;
+  createdAt: string;
 }
 
 interface CreateMessageInput {
@@ -146,6 +168,12 @@ export interface SessionMessageReaction {
   createdAt: string;
 }
 
+export interface SessionConversationMessage {
+  role: SessionRole;
+  content: string;
+  createdAt: string;
+}
+
 function summarizeMessagePreview(content: string | null) {
   if (!content) {
     return null;
@@ -166,6 +194,14 @@ function summarizeSessionTitle(content: string) {
   }
 
   return normalized.length > 24 ? `${normalized.slice(0, 24).trimEnd()}…` : normalized;
+}
+
+function buildSessionTranscriptExportPaths(sessionId: string, projectPath: string) {
+  const exportRoot = resolve(projectPath, ".aliceloop", "sessions", sessionId);
+  return {
+    transcriptMarkdownPath: resolve(exportRoot, "session.md"),
+    transcriptJsonPath: resolve(exportRoot, "session.json"),
+  };
 }
 
 function toMessage(row: SessionMessageRow, attachments: Attachment[]): SessionMessage {
@@ -207,6 +243,23 @@ function toMessageReaction(row: MessageReactionRow): SessionMessageReaction {
     emoji: row.emoji,
     deviceId: row.sourceDeviceId,
     createdAt: row.createdAt,
+  };
+}
+
+function toSessionProjectBinding(row: SessionProjectBindingRow | undefined): SessionProjectBinding | null {
+  if (!row || !row.projectId || !row.projectPath) {
+    return null;
+  }
+
+  const transcriptPaths = buildSessionTranscriptExportPaths(row.sessionId, row.projectPath);
+  return {
+    sessionId: row.sessionId,
+    projectId: row.projectId,
+    projectName: row.projectName,
+    projectPath: row.projectPath,
+    projectKind: row.projectKind,
+    transcriptMarkdownPath: transcriptPaths.transcriptMarkdownPath,
+    transcriptJsonPath: transcriptPaths.transcriptJsonPath,
   };
 }
 
@@ -395,6 +448,7 @@ function getSessionRow(sessionId: string): SessionRow | undefined {
         SELECT
           id,
           title,
+          project_id AS projectId,
           created_at AS createdAt,
           updated_at AS updatedAt
         FROM sessions
@@ -406,6 +460,27 @@ function getSessionRow(sessionId: string): SessionRow | undefined {
 
 export function hasSession(sessionId: string) {
   return Boolean(getSessionRow(sessionId));
+}
+
+export function getSessionProjectBinding(sessionId: string): SessionProjectBinding | null {
+  const db = getDatabase();
+  const row = db.prepare(
+    `
+      SELECT
+        sessions.id AS sessionId,
+        projects.id AS projectId,
+        projects.name AS projectName,
+        projects.path AS projectPath,
+        projects.kind AS projectKind
+      FROM sessions
+      LEFT JOIN projects
+        ON projects.id = sessions.project_id
+      WHERE sessions.id = ?
+      LIMIT 1
+    `,
+  ).get(sessionId) as SessionProjectBindingRow | undefined;
+
+  return toSessionProjectBinding(row);
 }
 
 function countMessagesForSession(sessionId: string) {
@@ -432,10 +507,14 @@ function toSessionThreadSummary(row: SessionThreadSummaryRow): SessionThreadSumm
     messageCount: row.messageCount,
     latestMessagePreview: summarizeMessagePreview(row.latestMessagePreview),
     latestMessageAt: row.latestMessageAt,
+    projectId: row.projectId,
+    projectName: row.projectName,
+    projectPath: row.projectPath,
+    projectKind: row.projectKind,
   };
 }
 
-function findReusableDraftSession(): SessionThreadSummary | null {
+function findReusableDraftSession(projectId: string | null): SessionThreadSummary | null {
   const db = getDatabase();
   const row = db
     .prepare(
@@ -447,8 +526,14 @@ function findReusableDraftSession(): SessionThreadSummary | null {
           sessions.updated_at AS updatedAt,
           0 AS messageCount,
           NULL AS latestMessagePreview,
-          NULL AS latestMessageAt
+          NULL AS latestMessageAt,
+          projects.id AS projectId,
+          projects.name AS projectName,
+          projects.path AS projectPath,
+          projects.kind AS projectKind
         FROM sessions
+        LEFT JOIN projects
+          ON projects.id = sessions.project_id
         WHERE NOT EXISTS (
           SELECT 1
           FROM session_messages
@@ -460,15 +545,19 @@ function findReusableDraftSession(): SessionThreadSummary | null {
             WHERE attachments.session_id = sessions.id
           )
           AND NOT EXISTS (
-            SELECT 1
-            FROM job_runs
-            WHERE job_runs.session_id = sessions.id
+          SELECT 1
+          FROM job_runs
+          WHERE job_runs.session_id = sessions.id
+        )
+          AND (
+            (? IS NULL AND sessions.project_id IS NULL)
+            OR sessions.project_id = ?
           )
         ORDER BY sessions.updated_at DESC, sessions.created_at DESC
         LIMIT 1
       `,
     )
-    .get() as SessionThreadSummaryRow | undefined;
+    .get(projectId, projectId) as SessionThreadSummaryRow | undefined;
 
   return row ? toSessionThreadSummary(row) : null;
 }
@@ -485,8 +574,14 @@ export function listSessionThreads(): SessionThreadSummary[] {
           sessions.updated_at AS updatedAt,
           COALESCE(message_counts.messageCount, 0) AS messageCount,
           latest_message.content AS latestMessagePreview,
-          latest_message.created_at AS latestMessageAt
+          latest_message.created_at AS latestMessageAt,
+          projects.id AS projectId,
+          projects.name AS projectName,
+          projects.path AS projectPath,
+          projects.kind AS projectKind
         FROM sessions
+        LEFT JOIN projects
+          ON projects.id = sessions.project_id
         LEFT JOIN (
           SELECT
             session_id,
@@ -512,9 +607,114 @@ export function listSessionThreads(): SessionThreadSummary[] {
   return rows.map(toSessionThreadSummary);
 }
 
-export function createSession(title?: string): SessionThreadSummary {
-  if (!title?.trim()) {
-    const reusableDraft = findReusableDraftSession();
+export function listHistoricalSessionCandidates(
+  excludedSessionId: string,
+  options: { projectId?: string | null; limit?: number } = {},
+): SessionThreadSummary[] {
+  const db = getDatabase();
+  const normalizedLimit = Math.max(1, Math.min(options.limit ?? 40, 200));
+  const projectId = options.projectId ?? null;
+
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          sessions.id AS id,
+          sessions.title AS title,
+          sessions.created_at AS createdAt,
+          sessions.updated_at AS updatedAt,
+          COALESCE(message_counts.messageCount, 0) AS messageCount,
+          latest_message.content AS latestMessagePreview,
+          latest_message.created_at AS latestMessageAt,
+          projects.id AS projectId,
+          projects.name AS projectName,
+          projects.path AS projectPath,
+          projects.kind AS projectKind
+        FROM sessions
+        LEFT JOIN projects
+          ON projects.id = sessions.project_id
+        LEFT JOIN (
+          SELECT
+            session_id,
+            COUNT(*) AS messageCount
+          FROM session_messages
+          WHERE role IN ('user', 'assistant')
+          GROUP BY session_id
+        ) AS message_counts
+          ON message_counts.session_id = sessions.id
+        LEFT JOIN session_messages AS latest_message
+          ON latest_message.id = (
+            SELECT id
+            FROM session_messages
+            WHERE session_id = sessions.id
+              AND role IN ('user', 'assistant')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+          )
+        WHERE sessions.id <> ?
+          AND COALESCE(message_counts.messageCount, 0) > 0
+        ORDER BY
+          CASE
+            WHEN ? IS NOT NULL AND sessions.project_id = ? THEN 0
+            ELSE 1
+          END ASC,
+          sessions.updated_at DESC,
+          sessions.created_at DESC
+        LIMIT ?
+      `,
+    )
+    .all(excludedSessionId, projectId, projectId, normalizedLimit) as SessionThreadSummaryRow[];
+
+  return rows.map(toSessionThreadSummary);
+}
+
+export function listSessionConversationMessages(
+  sessionId: string,
+  limit = 24,
+): SessionConversationMessage[] {
+  const db = getDatabase();
+  const normalizedLimit = Math.max(1, Math.min(limit, 200));
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          role,
+          content,
+          createdAt
+        FROM (
+          SELECT
+            role,
+            content,
+            created_at AS createdAt
+          FROM session_messages
+          WHERE session_id = ?
+            AND role IN ('user', 'assistant')
+            AND TRIM(content) <> ''
+          ORDER BY created_at DESC, id DESC
+          LIMIT ?
+        )
+        ORDER BY createdAt ASC
+      `,
+    )
+    .all(sessionId, normalizedLimit) as SessionConversationMessageRow[];
+
+  return rows;
+}
+
+export function createSession(
+  input: string | { title?: string; projectId?: string | null } = {},
+): SessionThreadSummary {
+  const normalizedInput = typeof input === "string" ? { title: input } : input;
+  const projectId = normalizedInput.projectId === undefined
+    ? getDefaultProjectDirectory().id
+    : normalizedInput.projectId;
+
+  if (projectId) {
+    getProjectDirectory(projectId);
+  }
+
+  if (!normalizedInput.title?.trim()) {
+    const reusableDraft = findReusableDraftSession(projectId ?? null);
     if (reusableDraft) {
       return reusableDraft;
     }
@@ -524,17 +724,21 @@ export function createSession(title?: string): SessionThreadSummary {
   const now = new Date().toISOString();
   const id = randomUUID();
   const countRow = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
-  const nextTitle = title?.trim() ? title.trim() : countRow.count === 0 ? "新对话" : `新对话 ${countRow.count + 1}`;
+  const nextTitle = normalizedInput.title?.trim()
+    ? normalizedInput.title.trim()
+    : countRow.count === 0
+      ? "新对话"
+      : `新对话 ${countRow.count + 1}`;
 
   db.prepare(
     `
       INSERT INTO sessions (
-        id, title, created_at, updated_at
+        id, title, project_id, created_at, updated_at
       ) VALUES (
-        ?, ?, ?, ?
+        ?, ?, ?, ?, ?
       )
     `,
-  ).run(id, nextTitle, now, now);
+  ).run(id, nextTitle, projectId ?? null, now, now);
 
   return {
     id,
@@ -544,7 +748,34 @@ export function createSession(title?: string): SessionThreadSummary {
     messageCount: 0,
     latestMessagePreview: null,
     latestMessageAt: null,
+    projectId: projectId ?? null,
+    projectName: projectId ? getProjectDirectory(projectId).name : null,
+    projectPath: projectId ? getProjectDirectory(projectId).path : null,
+    projectKind: projectId ? getProjectDirectory(projectId).kind : null,
   };
+}
+
+export function setSessionProjectBinding(sessionId: string, projectId: string | null) {
+  const session = getSessionRow(sessionId);
+  if (!session) {
+    throw new Error(`Session ${sessionId} was not found`);
+  }
+
+  if (projectId) {
+    getProjectDirectory(projectId);
+  }
+
+  const now = new Date().toISOString();
+  const db = getDatabase();
+  db.prepare(
+    `
+      UPDATE sessions
+      SET project_id = ?, updated_at = ?
+      WHERE id = ?
+    `,
+  ).run(projectId, now, sessionId);
+
+  return getSessionProjectBinding(sessionId);
 }
 
 export function deleteSession(sessionId: string) {
@@ -1011,6 +1242,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     throw new Error(`Session ${sessionId} was not found`);
   }
 
+  const project = getSessionProjectBinding(sessionId);
   const attachments = listAttachments(sessionId);
   const messages = listMessages(sessionId, attachments);
   const jobs = listJobs(sessionId);
@@ -1028,7 +1260,12 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
       title: session.title,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
+      projectId: project?.projectId ?? null,
+      projectName: project?.projectName ?? null,
+      projectPath: project?.projectPath ?? null,
+      projectKind: project?.projectKind ?? null,
     },
+    project,
     messages,
     attachments,
     pendingToolApprovals: listPendingToolApprovals(sessionId),
@@ -1043,10 +1280,17 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
 }
 
 export function listSessionAttachmentSandboxRoots(sessionId: string) {
+  const project = getSessionProjectBinding(sessionId);
   const attachments = listAttachments(sessionId);
   const readRoots: string[] = [];
   const writeRoots: string[] = [];
   const cwdRoots: string[] = [];
+
+  if (project?.projectPath) {
+    readRoots.push(project.projectPath);
+    writeRoots.push(project.projectPath);
+    cwdRoots.push(project.projectPath);
+  }
 
   for (const attachment of attachments) {
     // Use originalPath if available, otherwise fall back to storagePath
@@ -1063,6 +1307,7 @@ export function listSessionAttachmentSandboxRoots(sessionId: string) {
     readRoots: uniqueSandboxRoots(readRoots),
     writeRoots: uniqueSandboxRoots(writeRoots),
     cwdRoots: uniqueSandboxRoots(cwdRoots),
+    defaultCwd: project?.projectPath ?? null,
   };
 }
 

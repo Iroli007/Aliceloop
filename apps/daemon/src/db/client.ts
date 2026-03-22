@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -22,9 +22,44 @@ import {
 import { schemaStatements } from "./schema";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
+const DAEMON_PACKAGE_NAME = "@aliceloop/daemon";
+
+function isDaemonPackageRoot(candidatePath: string) {
+  const packageJsonPath = join(candidatePath, "package.json");
+  if (!existsSync(packageJsonPath)) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { name?: string };
+    return parsed.name === DAEMON_PACKAGE_NAME;
+  } catch {
+    return false;
+  }
+}
+
+function resolveDaemonPackageRoot(startPath: string) {
+  let candidate = resolve(startPath);
+
+  while (true) {
+    if (isDaemonPackageRoot(candidate)) {
+      return candidate;
+    }
+
+    const parent = dirname(candidate);
+    if (parent === candidate) {
+      return resolve(startPath, "../..");
+    }
+
+    candidate = parent;
+  }
+}
+
+const daemonPackageRoot = resolveDaemonPackageRoot(currentDir);
+const appsRoot = resolve(daemonPackageRoot, "..");
 const dataDir = process.env.ALICELOOP_DATA_DIR?.trim()
   ? resolve(process.env.ALICELOOP_DATA_DIR)
-  : join(currentDir, "../../.data");
+  : join(appsRoot, ".data");
 const uploadsDir = join(dataDir, "uploads");
 const databasePath = join(dataDir, "aliceloop.db");
 
@@ -511,6 +546,7 @@ function ensureColumn(db: Database.Database, tableName: string, columnName: stri
 }
 
 function runMigrations(db: Database.Database) {
+  ensureColumn(db, "sessions", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL");
   ensureColumn(db, "attachments", "original_path", "TEXT");
   ensureColumn(db, "study_artifacts", "body", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "provider_configs", "transport", "TEXT");
@@ -692,11 +728,25 @@ function runMigrations(db: Database.Database) {
 }
 
 function bootstrap(db: Database.Database) {
+  const deferredStatements: string[] = [];
   for (const statement of schemaStatements) {
-    db.exec(statement);
+    try {
+      db.exec(statement);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (statement.includes("project_id") && message.includes("no such column: project_id")) {
+        deferredStatements.push(statement);
+        continue;
+      }
+
+      throw error;
+    }
   }
 
   runMigrations(db);
+  for (const statement of deferredStatements) {
+    db.exec(statement);
+  }
   seedProviderData(db);
   seedOverviewData(db);
   seedSessionData(db);
@@ -726,4 +776,9 @@ export function getUploadsDir() {
 export function getDataDir() {
   mkdirSync(dataDir, { recursive: true });
   return dataDir;
+}
+
+export function getDatabasePath() {
+  mkdirSync(dataDir, { recursive: true });
+  return databasePath;
 }

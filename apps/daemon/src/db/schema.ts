@@ -1,11 +1,32 @@
 export const schemaStatements = [
   `
-    CREATE TABLE IF NOT EXISTS sessions (
+    CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
+      name TEXT NOT NULL,
+      path TEXT NOT NULL UNIQUE,
+      kind TEXT NOT NULL,
+      is_default INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS projects_kind_default_idx
+    ON projects (kind, is_default, updated_at DESC)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      project_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS sessions_project_updated_idx
+    ON sessions (project_id, updated_at DESC)
   `,
   `
     CREATE TABLE IF NOT EXISTS attachments (

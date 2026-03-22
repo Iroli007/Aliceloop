@@ -1,10 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 import { createProviderModel } from "../../providers/providerModelFactory";
 import { getActiveProviderConfig } from "../../repositories/providerRepository";
 import { getMemoryConfig } from "./memoryConfig";
-import { createMemory, findMemoryByExactContent, upsertMemoryNote } from "./memoryRepository";
+import { createMemory, findMemoryByExactContent } from "./memoryRepository";
 
 interface DistillationInput {
   sessionId: string;
@@ -20,6 +19,28 @@ const extractedMemorySchema = z.object({
 });
 
 type ExtractedMemory = z.infer<typeof extractedMemorySchema>;
+
+const explicitLongTermMemoryPattern =
+  /remember|memory|preference|prefer|constraint|default|workflow|style|decision|project|repo|repository|记住|记得|偏好|习惯|约束|默认|风格|语气|少用|多用|以后|长期|项目|工程|仓库|决定|方案/iu;
+const transientReferencePattern =
+  /谁是|是什么|简介|介绍|资料|档案|最新|价格|天气|比分|播放量|粉丝|UID|space\.bilibili|新闻|新闻稿|百科|维基/iu;
+
+function shouldDistillConversationToLongTermMemory(userMessage: string) {
+  const trimmedUserMessage = userMessage.trim();
+  if (!trimmedUserMessage) {
+    return false;
+  }
+
+  if (explicitLongTermMemoryPattern.test(trimmedUserMessage)) {
+    return true;
+  }
+
+  if (transientReferencePattern.test(trimmedUserMessage)) {
+    return false;
+  }
+
+  return false;
+}
 
 export async function extractMemoriesFromConversation(
   userMessage: string,
@@ -42,6 +63,10 @@ export async function extractMemoriesFromConversation(
     return [] as ExtractedMemory[];
   }
 
+  if (!shouldDistillConversationToLongTermMemory(trimmedUserMessage)) {
+    return [] as ExtractedMemory[];
+  }
+
   try {
     const response = await generateText({
       model: createProviderModel(provider),
@@ -54,7 +79,8 @@ export async function extractMemoriesFromConversation(
       }),
       prompt: [
         "Extract up to 3 useful long-term memories from this conversation.",
-        "Keep only durable preferences, project facts, decisions, constraints, or solutions that would help future work.",
+        "Keep only durable user preferences, project constraints, stable decisions, workflow conventions, or reusable solutions that would help future work.",
+        "Do not store one-off research facts, biographies, web-search results, current events, or temporary file operations unless the user explicitly asked to remember them.",
         "Do not restate the entire conversation. Skip transient chit-chat. Return an empty array when nothing is worth storing.",
         "",
         "User message:",
@@ -73,43 +99,6 @@ export async function extractMemoriesFromConversation(
 }
 
 export async function reflectOnTurn(input: DistillationInput): Promise<void> {
-  const { sessionId, toolCalls } = input;
-
-  if (toolCalls && toolCalls.length > 0) {
-    const fileOps = toolCalls.filter((tc) =>
-      ["grep", "glob", "read", "write", "edit", "bash"].includes(tc.name),
-    );
-
-    if (fileOps.length > 0) {
-      const paths = fileOps
-        .flatMap((op) => {
-          const args = op.args as Record<string, unknown>;
-          if (op.name === "bash") {
-            const command = args.command as string | undefined;
-            if (command === "rm" || command === "rmdir") {
-              const bashArgs = (args.args as string[] | undefined) ?? [];
-              return bashArgs.filter((arg) => arg && !arg.startsWith("-"));
-            }
-            return [];
-          }
-          return [(args.targetPath as string) ?? (args.filePath as string) ?? null];
-        })
-        .filter(Boolean);
-
-      if (paths.length > 0) {
-        const now = new Date().toISOString();
-        upsertMemoryNote({
-          id: `distill-${randomUUID()}`,
-          kind: "learning-pattern",
-          title: "File operations in session",
-          content: `Worked with files: ${paths.join(", ")}`,
-          source: `session:${sessionId}`,
-          updatedAt: now,
-        });
-      }
-    }
-  }
-
   const latestUserMessage = input.userMessages.at(-1)?.trim();
   const assistantResponse = input.assistantResponse.trim();
   if (!latestUserMessage || !assistantResponse) {

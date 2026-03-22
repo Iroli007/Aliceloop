@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SkillDefinition, SkillMode, SkillStatus } from "@aliceloop/runtime-core";
 
@@ -218,32 +218,33 @@ export function getSkillDefinition(skillId: string) {
   return listSkillDefinitions().find((skill) => skill.id === skillId) ?? null;
 }
 
+let cachedSkillContextBlock: string | null = null;
+
 export function buildSkillContextBlock() {
-  const skills = listSkillDefinitions();
+  if (cachedSkillContextBlock !== null) {
+    return cachedSkillContextBlock;
+  }
+
+  const skills = listActiveSkillDefinitions();
   if (skills.length === 0) {
+    cachedSkillContextBlock = "";
     return "";
   }
 
   const sections = [
     "Project skills live in the local context catalog.",
-    "When a skill clearly matches the user's request, read that SKILL.md with read before acting.",
-    "Do not pretend a planned skill is installed. Planned skills are architecture targets, not active runtime capabilities.",
+    `Skill catalog root: ${skillsRootDir}`,
+    "When a skill clearly matches the user's request, read that SKILL.md before acting.",
+    "Only the skills below are currently available.",
     "",
-    "Loaded skills:",
+    "Available skills:",
   ];
 
   for (const skill of skills) {
-    sections.push(
-      `- ${skill.label} [${skill.status} / ${skill.mode}]`,
-      `  Description: ${skill.description}`,
-      `  File: ${skill.sourcePath}`,
-      `  Allowed tools: ${skill.allowedTools.length > 0 ? skill.allowedTools.join(", ") : "none listed"}`,
-    );
-
-    if (skill.sourceUrl) {
-      sections.push(`  Source: ${skill.sourceUrl}`);
-    }
+    const relativeSourcePath = relative(skillsRootDir, skill.sourcePath).replace(/\\/g, "/");
+    sections.push(`- ${skill.label}: ${skill.description} [${relativeSourcePath}]`);
   }
 
-  return sections.join("\n");
+  cachedSkillContextBlock = sections.join("\n");
+  return cachedSkillContextBlock;
 }

@@ -540,7 +540,7 @@ async function runBashAsDelete(context: SandboxRuntimeContext, command: string, 
 async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
   const command = input.command.trim();
   const args = input.args ?? [];
-  const cwd = resolve(input.cwd ?? projectRoot);
+  const cwd = resolve(input.cwd ?? context.defaultCwd ?? projectRoot);
   const timeoutMs = Math.max(250, Math.min(input.timeoutMs ?? context.defaultTimeoutMs, 60_000));
 
   if (command === "rm" || command === "rmdir") {

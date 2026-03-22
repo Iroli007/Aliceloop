@@ -20,6 +20,7 @@ export type SandboxRuntimeKind = "host";
 export interface SandboxExecutorOptions {
   label: string;
   permissionProfile?: SandboxPermissionProfile;
+  defaultCwd?: string;
   extraReadRoots?: string[];
   extraWriteRoots?: string[];
   extraCwdRoots?: string[];
@@ -111,6 +112,7 @@ export interface SandboxRuntimeContext {
   label: string;
   toolPolicy: SandboxToolPolicy;
   runtimePolicy: SandboxRuntimePolicy;
+  defaultCwd: string | null;
   audit: SandboxAuditLogger;
   defaultTimeoutMs: number;
   maxBufferBytes: number;
@@ -154,6 +156,7 @@ export interface PermissionSandboxExecutor {
     allowedReadRoots: string[];
     allowedWriteRoots: string[];
     allowedCwdRoots: string[];
+    defaultCwd: string | null;
     allowedCommands: string[];
     warnings: string[];
   };

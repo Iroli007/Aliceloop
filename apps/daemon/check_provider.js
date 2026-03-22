@@ -1,7 +1,9 @@
 import Database from "better-sqlite3";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
-const dbPath = join(process.cwd(), ".data", "aliceloop.db");
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const dbPath = join(currentDir, "../.data", "aliceloop.db");
 const db = new Database(dbPath);
 
 const rows = db.prepare("SELECT * FROM provider_configs WHERE enabled = 1").all();
