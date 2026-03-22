@@ -179,7 +179,7 @@ export function CompanionLayout({ state }: CompanionLayoutProps) {
               ) : null}
             </article>
           ))}
-          {state.pendingMessage && <ThinkingIndicator />}
+          {state.isResponding && <ThinkingIndicator thinkingSteps={state.thinkingSteps} />}
         </div>
       </section>
 

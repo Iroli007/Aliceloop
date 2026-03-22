@@ -16,11 +16,11 @@ import type {
   TaskType,
 } from "@aliceloop/runtime-core";
 import { getDataDir } from "../db/client";
-import { createMemoryNote, upsertMemoryNote } from "../context/memory/memoryRepository";
+import { createMemoryNote, getMemoryNote, upsertMemoryNote } from "../context/memory/memoryRepository";
 import { getPrimaryLibraryContext, getShellOverview } from "../repositories/overviewRepository";
 import { markLibraryAsFocused, persistIngestedLibrary } from "../repositories/libraryRepository";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
-import { upsertTaskRun } from "../repositories/taskRunRepository";
+import { listFailedManagedTasksForPostmortemBackfill, upsertTaskRun } from "../repositories/taskRunRepository";
 import { createPermissionSandboxExecutor } from "./sandboxExecutor";
 
 interface TaskRunnerResult {
@@ -162,22 +162,57 @@ function buildAttentionSummaryMemory(attentionState: AttentionState) {
 }
 
 function createFailureMemory(input: {
+  taskId: string;
   taskType: TaskType;
   title: string;
   detail: string;
-  source: string;
+  updatedAt?: string;
   context: string[];
 }) {
   const lines = [`任务类型：${input.taskType}`, ...input.context, `失败原因：${input.detail}`];
 
-  return createMemoryNote({
-    id: `memory-${randomUUID()}`,
+  return upsertMemoryNote({
+    id: `postmortem-task-${input.taskId}`,
     kind: "postmortem",
     title: `失败复盘 · ${input.title}`,
     content: lines.join("\n"),
-    source: input.source,
-    updatedAt: new Date().toISOString(),
+    source: `task-postmortem:${input.taskId}`,
+    updatedAt: input.updatedAt ?? new Date().toISOString(),
   });
+}
+
+export function backfillFailurePostmortems() {
+  const failedTasks = listFailedManagedTasksForPostmortemBackfill();
+  let createdCount = 0;
+
+  for (const task of failedTasks) {
+    const existingMemory = getMemoryNote(`postmortem-task-${task.id}`);
+    if (existingMemory) {
+      continue;
+    }
+
+    const memoryNote = createFailureMemory({
+      taskId: task.id,
+      taskType: task.taskType,
+      title: task.title,
+      detail: task.detail,
+      updatedAt: task.updatedAt,
+      context: [
+        `任务标题：${task.title}`,
+        task.sessionId ? `会话：${task.sessionId}` : "会话：无",
+        "来源：历史失败任务回填",
+      ],
+    });
+
+    if (memoryNote) {
+      createdCount += 1;
+    }
+  }
+
+  return {
+    scannedCount: failedTasks.length,
+    upsertedCount: createdCount,
+  };
 }
 
 function canUseTextFallback(sourcePath: string) {
@@ -269,10 +304,11 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
     const detail = error instanceof Error ? error.message : "资料解析失败";
     const task = writeTaskRun(taskId, "document-ingest", "failed", `资料解析失败 · ${title}`, detail, null);
     const memoryNote = createFailureMemory({
+      taskId,
       taskType: "document-ingest",
       title,
       detail,
-      source: "task-runner",
+      updatedAt: task.updatedAt,
       context: [`资料路径：${input.sourcePath}`],
     });
     return { task, memoryNote };
@@ -360,10 +396,11 @@ async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRu
     const detail = error instanceof Error ? error.message : "本地脚本执行失败";
     const task = writeTaskRun(taskId, "script-runner", "failed", title, detail, input.sessionId ?? null);
     const memoryNote = createFailureMemory({
+      taskId,
       taskType: "script-runner",
       title,
       detail,
-      source: "task-runner",
+      updatedAt: task.updatedAt,
       context: [
         `命令：${command}${args.length > 0 ? ` ${args.join(" ")}` : ""}`,
         `工作目录：${cwd}`,

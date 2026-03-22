@@ -8,6 +8,8 @@ import { useRuntimeSettings } from "./useRuntimeSettings";
 import { WindowControls } from "./WindowControls";
 import type { ShellState } from "./useShellData";
 import { getDesktopBridge } from "../../platform/desktopBridge";
+import { ThinkingIndicator } from "../companion/ThinkingIndicator";
+import { MessageContent } from "./MessageContent";
 
 interface ShellLayoutProps {
   state: ShellState;
@@ -988,7 +990,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                         {getAttachmentLabel(message.attachments)}
                       </div>
                     ) : null}
-                    <div className="workspace__message-body">{message.content}</div>
+                    <div className="workspace__message-body">
+                      <MessageContent
+                        content={message.content}
+                        renderMarkdown={message.role === "assistant" || message.role === "system"}
+                      />
+                    </div>
                     <button
                       type="button"
                       className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
@@ -1009,6 +1016,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   </article>
                   );
                 })}
+
+                {conversation.isResponding && <ThinkingIndicator thinkingSteps={conversation.thinkingSteps} />}
 
                 <div ref={messagesEndRef} className="workspace__end-anchor" aria-hidden="true" />
               </div>

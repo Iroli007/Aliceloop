@@ -33,9 +33,16 @@ export interface CompanionState {
   daemonBaseUrl: string | null;
   pendingMessage: boolean;
   pendingUpload: boolean;
+  thinkingSteps: string[];
+  isResponding: boolean;
   error?: string;
   sendMessage(input: { content: string; attachmentIds: string[] }): Promise<MutationResult>;
   uploadAttachment(file: File): Promise<UploadResult>;
+}
+
+interface ActiveToolCall {
+  toolCallId: string;
+  toolName: string;
 }
 
 function getStableDeviceId(storageKey: string, prefix: string) {
@@ -79,6 +86,20 @@ function upsertArtifact(artifacts: StudyArtifact[], artifact: StudyArtifact) {
   next.unshift(artifact);
   next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   return next;
+}
+
+function upsertActiveToolCall(toolCalls: ActiveToolCall[], nextCall: ActiveToolCall) {
+  const next = toolCalls.filter((item) => item.toolCallId !== nextCall.toolCallId);
+  next.push(nextCall);
+  return next;
+}
+
+function formatThinkingStep(toolName: string) {
+  return `Thinking · ${toolName}`;
+}
+
+function isProviderCompletionActive(job: JobRunDetail | null) {
+  return job?.kind === "provider-completion" && (job.status === "queued" || job.status === "running");
 }
 
 function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): SessionSnapshot {
@@ -179,6 +200,7 @@ export function useCompanionData(): CompanionState {
   const [error, setError] = useState<string>();
   const [pendingMessage, setPendingMessage] = useState(false);
   const [pendingUpload, setPendingUpload] = useState(false);
+  const [activeToolCalls, setActiveToolCalls] = useState<ActiveToolCall[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -242,6 +264,24 @@ export function useCompanionData(): CompanionState {
         const messageEvent = event as MessageEvent<string>;
         const sessionEvent = JSON.parse(messageEvent.data) as SessionEvent;
         lastEventSeqRef.current = Math.max(lastEventSeqRef.current, sessionEvent.seq);
+
+        if (sessionEvent.type === "tool.call.started" || sessionEvent.type === "tool.call.completed") {
+          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string };
+          if (payload.toolCallId && payload.toolName) {
+            const toolCallId = payload.toolCallId;
+            const toolName = payload.toolName;
+            setActiveToolCalls((current) => upsertActiveToolCall(current, {
+              toolCallId,
+              toolName,
+            }));
+          }
+        } else if (sessionEvent.type === "job.updated") {
+          const payload = sessionEvent.payload as { job?: JobRunDetail };
+          if (payload.job?.kind === "provider-completion" && payload.job.status !== "running" && payload.job.status !== "queued") {
+            setActiveToolCalls([]);
+          }
+        }
+
         setSnapshot((current) => applySessionEvent(current, sessionEvent));
       });
 
@@ -450,6 +490,16 @@ export function useCompanionData(): CompanionState {
     }
   }
 
+  const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
+  const isResponding = isProviderCompletionActive(latestJob);
+  const thinkingSteps = activeToolCalls.map((toolCall) => formatThinkingStep(toolCall.toolName));
+
+  useEffect(() => {
+    if (!isResponding) {
+      setActiveToolCalls([]);
+    }
+  }, [isResponding]);
+
   return {
     status,
     snapshot,
@@ -457,6 +507,8 @@ export function useCompanionData(): CompanionState {
     daemonBaseUrl,
     pendingMessage,
     pendingUpload,
+    thinkingSteps,
+    isResponding,
     error,
     sendMessage,
     uploadAttachment,

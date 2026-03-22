@@ -55,6 +55,8 @@ export interface ShellConversationState {
   resolvedToolApprovals: ToolApproval[];
   pending: boolean;
   pendingUpload: boolean;
+  currentToolName: string | null;
+  thinkingSteps: string[];
   isResponding: boolean;
   isAwaitingToolApproval: boolean;
   stoppingResponse: boolean;
@@ -75,6 +77,21 @@ export interface ShellConversationState {
   stopResponse(): Promise<SendResult>;
   approveToolApproval(approvalId: string): Promise<SendResult>;
   rejectToolApproval(approvalId: string): Promise<SendResult>;
+}
+
+interface ActiveToolCall {
+  toolCallId: string;
+  toolName: string;
+}
+
+function upsertActiveToolCall(toolCalls: ActiveToolCall[], nextCall: ActiveToolCall) {
+  const next = toolCalls.filter((item) => item.toolCallId !== nextCall.toolCallId);
+  next.push(nextCall);
+  return next;
+}
+
+function formatThinkingStep(toolName: string) {
+  return `Thinking · ${toolName}`;
 }
 
 function getStableDesktopSessionDeviceId() {
@@ -398,6 +415,7 @@ export function useShellConversation(): ShellConversationState {
   const [daemonBaseUrl, setDaemonBaseUrl] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [pendingUpload, setPendingUpload] = useState(false);
+  const [activeToolCalls, setActiveToolCalls] = useState<ActiveToolCall[]>([]);
   const [stoppingResponse, setStoppingResponse] = useState(false);
   const [resolvingToolApprovalId, setResolvingToolApprovalId] = useState<string | null>(null);
   const [error, setError] = useState<string>();
@@ -454,6 +472,7 @@ export function useShellConversation(): ShellConversationState {
     const currentSessionId = activeSessionId;
     let cancelled = false;
     setStatus("loading");
+    setActiveToolCalls([]);
 
     async function loadSnapshot() {
       try {
@@ -555,6 +574,33 @@ export function useShellConversation(): ShellConversationState {
         const messageEvent = event as MessageEvent<string>;
         const sessionEvent = JSON.parse(messageEvent.data) as SessionEvent;
         lastEventSeqRef.current = Math.max(lastEventSeqRef.current, sessionEvent.seq);
+
+        if (sessionEvent.type === "tool.call.started") {
+          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string };
+          if (payload.toolCallId && payload.toolName) {
+            const toolCallId = payload.toolCallId;
+            const toolName = payload.toolName;
+            setActiveToolCalls((current) => upsertActiveToolCall(current, {
+              toolCallId,
+              toolName,
+            }));
+          }
+        } else if (sessionEvent.type === "tool.call.completed") {
+          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string };
+          if (payload.toolCallId && payload.toolName) {
+            const toolCallId = payload.toolCallId;
+            const toolName = payload.toolName;
+            setActiveToolCalls((current) => upsertActiveToolCall(current, {
+              toolCallId,
+              toolName,
+            }));
+          }
+        } else if (sessionEvent.type === "job.updated") {
+          const payload = sessionEvent.payload as { job?: JobRunDetail };
+          if (payload.job?.kind === "provider-completion" && payload.job.status !== "running" && payload.job.status !== "queued") {
+            setActiveToolCalls([]);
+          }
+        }
 
         setSnapshot((current) => {
           return applySessionEvent(current, sessionEvent);
@@ -1063,6 +1109,8 @@ export function useShellConversation(): ShellConversationState {
   const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
   const latestArtifact = snapshot.artifacts[0] ?? null;
   const isAwaitingToolApproval = snapshot.pendingToolApprovals.length > 0;
+  const currentToolName = activeToolCalls.at(-1)?.toolName ?? snapshot.pendingToolApprovals[0]?.toolName ?? null;
+  const thinkingSteps = activeToolCalls.map((toolCall) => formatThinkingStep(toolCall.toolName));
   const isResponding = isProviderCompletionActive(latestJob) && !isAwaitingToolApproval;
   const sessionTitle =
     (activeSessionId === localDraftSessionId ? null : threads.find((thread) => thread.id === activeSessionId)?.title) ??
@@ -1070,6 +1118,7 @@ export function useShellConversation(): ShellConversationState {
 
   useEffect(() => {
     if (!isResponding) {
+      setActiveToolCalls([]);
       setStoppingResponse(false);
     }
   }, [isResponding]);
@@ -1088,6 +1137,8 @@ export function useShellConversation(): ShellConversationState {
     resolvedToolApprovals: snapshot.resolvedToolApprovals,
     pending,
     pendingUpload,
+    currentToolName,
+    thinkingSteps,
     isResponding,
     isAwaitingToolApproval,
     stoppingResponse,

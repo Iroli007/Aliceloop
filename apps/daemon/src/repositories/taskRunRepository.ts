@@ -69,6 +69,33 @@ function toTaskRun(row: TaskRunRow): TaskRun {
   };
 }
 
+export function listFailedManagedTasksForPostmortemBackfill(limit = 1000) {
+  const db = getDatabase();
+  const normalizedLimit = Math.max(1, Math.min(limit, 5000));
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          id,
+          session_id AS sessionId,
+          task_type AS taskType,
+          status,
+          title,
+          detail,
+          updated_at AS updatedAt,
+          updated_at_label AS updatedAtLabel
+        FROM task_runs
+        WHERE status = 'failed'
+          AND task_type IN ('script-runner', 'document-ingest')
+        ORDER BY updated_at ASC, id ASC
+        LIMIT ?
+      `,
+    )
+    .all(normalizedLimit) as TaskRunRow[];
+
+  return rows.map(toTaskRun);
+}
+
 function normalizeTrackedTaskSteps(steps: string[]) {
   return steps
     .map((step) => step.trim())
