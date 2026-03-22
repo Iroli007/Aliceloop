@@ -140,6 +140,7 @@ interface CreateAttachmentBody {
   fileName: string;
   mimeType: string;
   contentBase64: string;
+  originalPath?: string;
   deviceId: string;
   deviceType: DeviceType;
 }
@@ -1248,7 +1249,7 @@ export async function createServer() {
   );
 
   server.post<{ Params: SessionParams; Body: CreateAttachmentBody }>("/api/session/:id/attachments", async (request, reply) => {
-    const { fileName, mimeType, contentBase64, deviceType } = request.body;
+    const { fileName, mimeType, contentBase64, originalPath, deviceType } = request.body;
 
     if (!fileName || !mimeType || !contentBase64) {
       return reply.code(400).send({
@@ -1283,6 +1284,7 @@ export async function createServer() {
       mimeType,
       byteSize: binary.byteLength,
       storagePath,
+      originalPath,
     });
 
     for (const event of result.events) {

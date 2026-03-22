@@ -181,6 +181,7 @@ export interface Attachment {
   mimeType: string;
   byteSize: number;
   storagePath: string;
+  originalPath?: string;
   status: AttachmentStatus;
   createdAt: string;
 }

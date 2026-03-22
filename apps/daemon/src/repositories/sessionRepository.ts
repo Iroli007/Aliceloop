@@ -39,6 +39,7 @@ interface AttachmentRow {
   mimeType: string;
   byteSize: number;
   storagePath: string;
+  originalPath: string | null;
   status: Attachment["status"];
   createdAt: string;
 }
@@ -117,6 +118,7 @@ interface CreateAttachmentInput {
   mimeType: string;
   byteSize: number;
   storagePath: string;
+  originalPath?: string;
 }
 
 interface HeartbeatInput {
@@ -191,6 +193,7 @@ function toAttachment(row: AttachmentRow): Attachment {
     mimeType: row.mimeType,
     byteSize: row.byteSize,
     storagePath: row.storagePath,
+    originalPath: row.originalPath ?? undefined,
     status: row.status,
     createdAt: row.createdAt,
   };
@@ -219,6 +222,7 @@ function listAttachments(sessionId: string): Attachment[] {
           mime_type AS mimeType,
           byte_size AS byteSize,
           storage_path AS storagePath,
+          original_path AS originalPath,
           status,
           created_at AS createdAt
         FROM attachments
@@ -1045,7 +1049,9 @@ export function listSessionAttachmentSandboxRoots(sessionId: string) {
   const cwdRoots: string[] = [];
 
   for (const attachment of attachments) {
-    const roots = resolveAttachmentSandboxRoot(attachment.storagePath);
+    // Use originalPath if available, otherwise fall back to storagePath
+    const pathToUse = attachment.originalPath || attachment.storagePath;
+    const roots = resolveAttachmentSandboxRoot(pathToUse);
     readRoots.push(roots.readRoot);
     writeRoots.push(roots.writeRoot);
     if (roots.cwdRoot) {
@@ -1254,6 +1260,7 @@ export function createAttachment(input: CreateAttachmentInput): {
     mimeType: input.mimeType,
     byteSize: input.byteSize,
     storagePath: input.storagePath,
+    originalPath: input.originalPath,
     status: "ready",
     createdAt: now,
   };
@@ -1292,9 +1299,9 @@ export function createAttachment(input: CreateAttachmentInput): {
     db.prepare(
       `
         INSERT INTO attachments (
-          id, session_id, file_name, mime_type, byte_size, storage_path, status, created_at
+          id, session_id, file_name, mime_type, byte_size, storage_path, original_path, status, created_at
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
       `,
     ).run(
@@ -1304,6 +1311,7 @@ export function createAttachment(input: CreateAttachmentInput): {
       attachment.mimeType,
       attachment.byteSize,
       attachment.storagePath,
+      attachment.originalPath ?? null,
       attachment.status,
       attachment.createdAt,
     );

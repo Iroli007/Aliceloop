@@ -362,4 +362,8 @@ export const schemaStatements = [
       updated_at TEXT NOT NULL
     )
   `,
+  // Migration: Add originalPath to attachments table
+  `
+    ALTER TABLE attachments ADD COLUMN original_path TEXT
+  `,
 ];

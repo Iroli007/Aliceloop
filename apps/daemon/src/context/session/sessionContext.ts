@@ -32,7 +32,8 @@ function serializeMessageContent(message: SessionMessage): string {
       const binaryNote = attachment.mimeType.startsWith("image/")
         ? ", binary image attachment"
         : "";
-      return `${attachment.fileName} (${attachment.mimeType}, path: ${attachment.storagePath}${binaryNote})`;
+      const path = attachment.originalPath || attachment.storagePath;
+      return `${attachment.fileName} (${attachment.mimeType}, path: ${path}${binaryNote})`;
     })
     .join(", ");
 
