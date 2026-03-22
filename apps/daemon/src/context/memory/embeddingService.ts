@@ -4,7 +4,7 @@ import {
   DEFAULT_MEMORY_CONFIG,
   type MemoryEmbeddingModel,
 } from "@aliceloop/runtime-core";
-import { getActiveProviderConfig } from "../../repositories/providerRepository";
+import { getActiveProviderConfig, getStoredProviderConfig } from "../../repositories/providerRepository";
 
 interface EmbeddingRequestOptions {
   dimension?: number;
@@ -28,7 +28,7 @@ function normalizeGatewayBaseUrl(baseUrl: string) {
   return `${trimmed}/v1`;
 }
 
-function supportsEmbeddings() {
+function resolveOpenAICompatibleSettings() {
   const explicitApiKey = process.env.OPENAI_API_KEY?.trim();
   if (explicitApiKey) {
     return {
@@ -37,28 +37,36 @@ function supportsEmbeddings() {
     };
   }
 
-  const provider = getActiveProviderConfig();
-  if (!provider?.apiKey) {
+  const dedicatedOpenAIProvider = getStoredProviderConfig("openai");
+  if (dedicatedOpenAIProvider.apiKey) {
+    return {
+      apiKey: dedicatedOpenAIProvider.apiKey,
+      baseURL: normalizeGatewayBaseUrl(dedicatedOpenAIProvider.baseUrl) || undefined,
+    };
+  }
+
+  const activeProvider = getActiveProviderConfig();
+  if (!activeProvider?.apiKey) {
     return null;
   }
 
-  const normalizedModel = provider.model.trim().toLowerCase();
-  const effectiveTransport = provider.transport === "auto" && normalizedModel.startsWith("claude")
+  const normalizedModel = activeProvider.model.trim().toLowerCase();
+  const effectiveTransport = activeProvider.transport === "auto" && normalizedModel.startsWith("claude")
     ? "anthropic"
-    : provider.transport;
+    : activeProvider.transport;
 
   if (effectiveTransport === "anthropic") {
     return null;
   }
 
   return {
-    apiKey: provider.apiKey,
-    baseURL: normalizeGatewayBaseUrl(provider.baseUrl) || undefined,
+    apiKey: activeProvider.apiKey,
+    baseURL: normalizeGatewayBaseUrl(activeProvider.baseUrl) || undefined,
   };
 }
 
 function getEmbeddingProvider() {
-  const settings = supportsEmbeddings();
+  const settings = resolveOpenAICompatibleSettings();
   if (!settings) {
     throw new Error("No OpenAI-compatible embedding provider is configured.");
   }
@@ -83,7 +91,7 @@ function buildEmbeddingProviderOptions(options?: EmbeddingRequestOptions) {
 }
 
 export function hasEmbeddingProvider() {
-  return supportsEmbeddings() !== null;
+  return resolveOpenAICompatibleSettings() !== null;
 }
 
 export async function generateEmbedding(

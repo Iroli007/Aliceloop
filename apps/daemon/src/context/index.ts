@@ -1,7 +1,7 @@
 import type { ModelMessage, ToolSet } from "ai";
 import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
-import { buildMemoryBlock } from "./memory/memoryContext";
+import { buildFastMemoryBlock, startAsyncSemanticSearch, type AsyncSemanticSearchHandle } from "./memory/memoryContext";
 import { buildActiveTurnBlock, buildSessionMessages, getLatestUserMessage } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
 import { buildSkillContextBlock, listActiveSkillDefinitions } from "./skills/skillLoader";
@@ -29,6 +29,13 @@ export interface AgentContext {
   safetyConfig: SafetyConfig;
   runtimeNotices: string[];
   timings: Record<string, number | string | null>;
+  /**
+   * Async handle for semantic (vector) memory search.
+   * Fire-and-forget: starts immediately and resolves in the background.
+   * Caller should consume it during post-processing to enrich durable summary memory
+   * without blocking first-token delivery.
+   */
+  asyncSemanticSearch?: AsyncSemanticSearchHandle;
 }
 
 const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
@@ -63,9 +70,18 @@ export async function loadContext(
   timings.historyMs = roundMs(nowMs() - historyStartedAt);
   timings.history = JSON.stringify(history.timings);
 
+  // Fast memory block: attention + summary + notes only (no vector search)
+  // Vector search is started as fire-and-forget and injected async as runtime notice
   const memoryStartedAt = nowMs();
-  const memory = await buildMemoryBlock(sessionId, userQuery ?? undefined, abortSignal);
+  const memory = buildFastMemoryBlock(sessionId);
   timings.memoryMs = roundMs(nowMs() - memoryStartedAt);
+
+  // Start async semantic search (fire-and-forget, won't block first token)
+  const asyncSemanticSearch = userQuery
+    ? startAsyncSemanticSearch(sessionId, userQuery, abortSignal)
+    : undefined;
+  asyncSemanticSearch?.start();
+  timings.asyncSemanticStarted = asyncSemanticSearch ? 1 : 0;
 
   const skillsStartedAt = nowMs();
   const skills = buildSkillContextBlock();
@@ -201,5 +217,6 @@ export async function loadContext(
     },
     runtimeNotices: memory.runtimeNotices,
     timings,
+    asyncSemanticSearch,
   };
 }

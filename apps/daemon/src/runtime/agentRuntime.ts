@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
+import { refreshSummaryMemory } from "../context/memory/summaryMemory";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { createProviderModel } from "../providers/providerModelFactory";
 import { publishSessionEvent } from "../realtime/sessionStreams";
@@ -485,8 +486,31 @@ function schedulePostProcessing(run: AgentRun, text: string, toolCalls: ToolCall
     userMessages,
     assistantResponse: text,
     toolCalls,
-  }).catch(() => {
-    // Reflection failure should not fail the user-visible turn.
+  })
+    .catch(() => {
+      // Reflection failure should not fail the user-visible turn.
+    });
+
+  if (!latestUserMessage) {
+    return;
+  }
+
+  void (async () => {
+    const prefetchedRecallStartedAt = nowMs();
+    let prefetchedRecall = null;
+
+    try {
+      prefetchedRecall = await (run.context.asyncSemanticSearch?.result ?? Promise.resolve(null));
+    } catch {
+      prefetchedRecall = null;
+    }
+
+    await refreshSummaryMemory(run.sessionId, latestUserMessage, text, {
+      prefetchedRecall,
+      prefetchedRecallWaitMs: roundMs(nowMs() - prefetchedRecallStartedAt),
+    });
+  })().catch(() => {
+    // Summary refresh failure should not fail the user-visible turn.
   });
 }
 

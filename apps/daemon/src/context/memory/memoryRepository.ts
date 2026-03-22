@@ -487,6 +487,33 @@ export function listMemoryNotes(limit = 50, source?: string) {
     .all(normalizedLimit) as MemoryNote[];
 }
 
+export function listMemoryNotesBySourcePrefix(sourcePrefix: string, limit = 50) {
+  const db = getDatabase();
+  const normalizedPrefix = sourcePrefix.trim();
+  if (!normalizedPrefix) {
+    return [] as MemoryNote[];
+  }
+
+  const normalizedLimit = Math.max(1, Math.min(limit, 200));
+  return db
+    .prepare(
+      `
+        SELECT
+          id,
+          kind,
+          title,
+          content,
+          source,
+          updated_at AS updatedAt
+        FROM memory_notes
+        WHERE source LIKE ?
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `,
+    )
+    .all(`${normalizedPrefix}%`, normalizedLimit) as MemoryNote[];
+}
+
 export function getMemoryNote(memoryId: string) {
   return getMemoryNoteById(memoryId);
 }
