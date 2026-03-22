@@ -9,6 +9,7 @@ import {
   type DeviceType,
   type DocumentKind,
   type DocumentStructure,
+  type MemoryKind,
   type ProviderKind,
   type SandboxPermissionProfile,
   type ProviderTransportKind,
@@ -20,6 +21,7 @@ import {
 } from "@aliceloop/runtime-core";
 import { getUploadsDir } from "./db/client";
 import { publishSessionEvent, subscribeToSession } from "./realtime/sessionStreams";
+import { createMemoryNote, deleteMemoryNote, searchMemoryNotes } from "./context/memory/memoryRepository";
 import {
   getDocumentStructure,
   listContentBlocks,
@@ -46,6 +48,7 @@ import {
   listRuntimeScriptDefinitions,
   listSkillDefinitions,
 } from "./repositories/runtimeCatalogRepository";
+import { listActiveSkillDefinitions } from "./context/skills/skillLoader";
 import {
   getMcpServerDefinition,
   installMcpServer,
@@ -54,28 +57,45 @@ import {
 } from "./repositories/mcpServerRepository";
 import { getSandboxRun, listSandboxRuns } from "./repositories/sandboxRunRepository";
 import {
+  addSessionMessageReaction,
   canAcceptClientTraffic,
   createAttachment,
   createSession,
+  deleteSession,
   createSessionMessage,
+  hasSession,
+  listSessionMessageReactions,
+  removeSessionMessageReaction,
   getRuntimePresence,
   getSessionSnapshot,
   heartbeatDevice,
   listSessionThreads,
   listSessionEventsSince,
 } from "./repositories/sessionRepository";
+import { createCronJob, deleteCronJob, listCronJobs } from "./repositories/cronJobRepository";
+import { approvePlan, archivePlan, createPlan, getPlan, listPlans, type PlanStatus, updatePlan } from "./repositories/planRepository";
 import { getRuntimeSettings, updateRuntimeSettings } from "./repositories/runtimeSettingsRepository";
 import { getUserProfile, updateUserProfile } from "./repositories/userProfileRepository";
-import { backfillTaskRunsFromJobs, getTaskRun, listTaskRuns } from "./repositories/taskRunRepository";
+import {
+  backfillTaskRunsFromJobs,
+  createTrackedTask,
+  deleteTrackedTask,
+  getTaskRun,
+  listTaskRuns,
+  updateTrackedTask,
+} from "./repositories/taskRunRepository";
 import { abortAgentForSession } from "./runtime/agentRuntime";
 import { runProviderReply } from "./services/providerRunner";
 import { createPermissionSandboxExecutor } from "./services/sandboxExecutor";
+import { generateImage } from "./services/imageGenerationService";
+import { assertResolvableSkillTools, listRequestedSkillToolNames } from "./context/tools/toolRegistry";
 import {
   approveSessionToolApproval,
   rejectSessionToolApproval,
   ToolApprovalNotFoundError,
 } from "./services/sessionToolApprovalService";
 import { runManagedTask } from "./services/taskRunner";
+import { startSchedulerService } from "./services/schedulerService";
 
 interface SessionParams {
   id: string;
@@ -100,6 +120,11 @@ interface RuntimeScriptParams {
 interface ToolApprovalParams {
   id: string;
   approvalId: string;
+}
+
+interface SessionMessageParams {
+  id: string;
+  messageId: string;
 }
 
 interface CreateMessageBody {
@@ -128,6 +153,24 @@ interface CreateFolderAttachmentBody {
   }>;
   deviceId: string;
   deviceType: DeviceType;
+}
+
+interface GenerateImageBody {
+  prompt?: string;
+  providerId?: ProviderKind;
+  model?: string;
+  size?: string;
+  outputPath?: string;
+}
+
+interface CreateReactionBody {
+  emoji?: string;
+  deviceId?: string;
+}
+
+interface DeleteReactionQuery {
+  emoji?: string;
+  deviceId?: string;
 }
 
 interface HeartbeatBody {
@@ -169,12 +212,23 @@ interface CreateTaskBody {
   taskType: TaskType;
   sessionId?: string | null;
   title?: string;
+  detail?: string;
+  steps?: string[];
   sourcePath?: string;
   sourceKind?: SourceKind;
   documentKind?: DocumentKind;
   command?: string;
   args?: string[];
   cwd?: string;
+}
+
+interface UpdateTaskBody {
+  title?: string;
+  detail?: string;
+  status?: string;
+  steps?: string[];
+  step?: number;
+  stepStatus?: string;
 }
 
 interface RunSkillBody {
@@ -216,10 +270,58 @@ interface SandboxRunQuery {
 
 interface MemoryQuery {
   limit?: string;
+  source?: string;
+}
+
+interface MemorySearchQuery {
+  q?: string;
+  limit?: string;
+  source?: string;
 }
 
 interface MemoryParams {
   id: string;
+}
+
+interface CreateMemoryBody {
+  content?: string;
+  title?: string;
+  kind?: MemoryKind;
+  source?: string;
+}
+
+interface CronJobParams {
+  id: string;
+}
+
+interface CreateCronJobBody {
+  name?: string;
+  schedule?: string;
+  prompt?: string;
+  sessionId?: string | null;
+}
+
+interface PlanParams {
+  id: string;
+}
+
+interface PlanQuery {
+  status?: PlanStatus;
+  limit?: string;
+}
+
+interface CreatePlanBody {
+  sessionId?: string | null;
+  title?: string;
+  goal?: string;
+  steps?: string[];
+}
+
+interface UpdatePlanBody {
+  title?: string;
+  goal?: string;
+  steps?: string[];
+  status?: string;
 }
 
 interface SandboxRunParams {
@@ -275,6 +377,92 @@ function sanitizeRelativePath(relativePath: string) {
   return sanitizedSegments.join("/");
 }
 
+function normalizeMemoryKind(value: string | undefined): MemoryKind {
+  if (value === "attention-summary" || value === "postmortem") {
+    return value;
+  }
+
+  return "learning-pattern";
+}
+
+function summarizeMemoryTitle(content: string) {
+  const firstLine = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  if (!firstLine) {
+    return "CLI Memory";
+  }
+
+  return firstLine.length > 60 ? `${firstLine.slice(0, 60).trimEnd()}…` : firstLine;
+}
+
+function normalizeTrackedTaskStatus(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  switch (value.trim().toLowerCase()) {
+    case "queued":
+    case "todo":
+    case "pending":
+      return "queued" as const;
+    case "running":
+    case "in_progress":
+      return "running" as const;
+    case "done":
+    case "complete":
+    case "completed":
+      return "done" as const;
+    case "failed":
+      return "failed" as const;
+    default:
+      throw new Error("invalid_task_status");
+  }
+}
+
+function normalizeTrackedTaskStepDone(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  switch (value.trim().toLowerCase()) {
+    case "done":
+    case "complete":
+    case "completed":
+      return true;
+    case "pending":
+    case "todo":
+    case "open":
+    case "queued":
+    case "running":
+    case "in_progress":
+      return false;
+    default:
+      throw new Error("invalid_step_status");
+  }
+}
+
+function normalizePlanStatusValue(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+
+  switch (value.trim().toLowerCase()) {
+    case "draft":
+      return "draft" as const;
+    case "approved":
+    case "approve":
+      return "approved" as const;
+    case "archived":
+    case "archive":
+      return "archived" as const;
+    default:
+      throw new Error("invalid_plan_status");
+  }
+}
+
 function writeSseEvent(write: (chunk: string) => void, event: unknown, seq: number) {
   write(`id: ${seq}\n`);
   write("event: session\n");
@@ -282,6 +470,10 @@ function writeSseEvent(write: (chunk: string) => void, event: unknown, seq: numb
 }
 
 export async function createServer() {
+  const activeSkills = listActiveSkillDefinitions();
+  assertResolvableSkillTools(activeSkills);
+  const activeSkillToolNames = listRequestedSkillToolNames(activeSkills);
+
   const server = Fastify({
     logger: true,
     bodyLimit: 20 * 1024 * 1024,
@@ -293,16 +485,45 @@ export async function createServer() {
   });
 
   backfillTaskRunsFromJobs();
+  const stopScheduler = startSchedulerService();
+  server.addHook("onClose", async () => {
+    stopScheduler();
+  });
 
   server.get("/health", async () => ({
     ok: true,
     service: "aliceloop-daemon",
     timestamp: new Date().toISOString(),
+    activeSkills: activeSkills.map((skill) => skill.id),
+    activeSkillAdapters: activeSkillToolNames,
   }));
 
   server.get(shellOverviewRoute, async () => getShellOverview());
   server.get("/api/attention", async () => getAttentionState());
-  server.get<{ Querystring: MemoryQuery }>("/api/memories", async (request) => listMemoryNotes(parseLimitValue(request.query.limit, 50)));
+  server.get<{ Querystring: MemoryQuery }>("/api/memories", async (request) => {
+    return listMemoryNotes(parseLimitValue(request.query.limit, 50), request.query.source);
+  });
+  server.get<{ Querystring: MemorySearchQuery }>("/api/memories/search", async (request) => {
+    return searchMemoryNotes(request.query.q ?? "", parseLimitValue(request.query.limit, 10), request.query.source);
+  });
+  server.post<{ Body: CreateMemoryBody }>("/api/memories", async (request, reply) => {
+    const body = request.body ?? {};
+    const content = body.content?.trim();
+    if (!content) {
+      return reply.code(400).send({
+        error: "content_required",
+      });
+    }
+
+    return createMemoryNote({
+      id: randomUUID(),
+      kind: normalizeMemoryKind(body.kind),
+      title: body.title?.trim() || summarizeMemoryTitle(content),
+      content,
+      source: body.source?.trim() || "cli",
+      updatedAt: new Date().toISOString(),
+    });
+  });
   server.get<{ Params: MemoryParams }>("/api/memories/:id", async (request, reply) => {
     const memory = getMemoryNote(request.params.id);
     if (!memory) {
@@ -312,6 +533,18 @@ export async function createServer() {
     }
 
     return memory;
+  });
+  server.delete<{ Params: MemoryParams }>("/api/memories/:id", async (request, reply) => {
+    if (!deleteMemoryNote(request.params.id)) {
+      return reply.code(404).send({
+        error: "memory_not_found",
+      });
+    }
+
+    return {
+      ok: true,
+      id: request.params.id,
+    };
   });
   server.get("/api/skills", async () => listSkillDefinitions());
   server.get<{ Params: SkillParams }>("/api/skills/:id", async (request, reply) => {
@@ -460,9 +693,153 @@ export async function createServer() {
     });
   });
 
+  server.get("/api/cron", async () => listCronJobs());
+  server.post<{ Body: CreateCronJobBody }>("/api/cron", async (request, reply) => {
+    try {
+      return createCronJob({
+        name: request.body?.name ?? "",
+        schedule: request.body?.schedule ?? "",
+        prompt: request.body?.prompt ?? "",
+        sessionId: request.body?.sessionId ?? null,
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        switch (error.message) {
+          case "cron_name_required":
+          case "cron_prompt_required":
+          case "cron_schedule_required":
+          case "invalid_cron_schedule":
+          case "cron_schedule_in_past":
+            return reply.code(400).send({
+              error: error.message,
+            });
+          default:
+            break;
+        }
+      }
+
+      throw error;
+    }
+  });
+  server.delete<{ Params: CronJobParams }>("/api/cron/:id", async (request, reply) => {
+    const deleted = deleteCronJob(request.params.id);
+    if (!deleted) {
+      return reply.code(404).send({
+        error: "cron_not_found",
+      });
+    }
+
+    return {
+      ok: true,
+      cron: deleted,
+    };
+  });
+
+  server.get<{ Querystring: PlanQuery }>("/api/plans", async (request) => {
+    return listPlans({
+      status: request.query.status,
+      limit: parseLimitValue(request.query.limit, 50),
+    });
+  });
+  server.post<{ Body: CreatePlanBody }>("/api/plans", async (request, reply) => {
+    const sessionId = request.body?.sessionId?.trim() || null;
+    if (sessionId && !hasSession(sessionId)) {
+      return reply.code(400).send({
+        error: "session_not_found",
+      });
+    }
+
+    try {
+      return createPlan({
+        sessionId,
+        title: request.body?.title ?? "",
+        goal: request.body?.goal,
+        steps: Array.isArray(request.body?.steps) ? request.body.steps : [],
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "plan_title_required") {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+  server.get<{ Params: PlanParams }>("/api/plans/:id", async (request, reply) => {
+    const plan = getPlan(request.params.id);
+    if (!plan) {
+      return reply.code(404).send({
+        error: "plan_not_found",
+      });
+    }
+
+    return plan;
+  });
+  server.patch<{ Params: PlanParams; Body: UpdatePlanBody }>("/api/plans/:id", async (request, reply) => {
+    try {
+      const updated = updatePlan({
+        planId: request.params.id,
+        title: request.body?.title,
+        goal: request.body?.goal,
+        steps: Array.isArray(request.body?.steps) ? request.body.steps : undefined,
+        status: normalizePlanStatusValue(request.body?.status),
+      });
+
+      if (!updated) {
+        return reply.code(404).send({
+          error: "plan_not_found",
+        });
+      }
+
+      return updated;
+    } catch (error) {
+      if (error instanceof Error && (error.message === "invalid_plan_status" || error.message === "plan_title_required")) {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+  server.post<{ Params: PlanParams }>("/api/plans/:id/approve", async (request, reply) => {
+    const approved = approvePlan(request.params.id);
+    if (!approved) {
+      return reply.code(404).send({
+        error: "plan_not_found",
+      });
+    }
+
+    return approved;
+  });
+  server.post<{ Params: PlanParams }>("/api/plans/:id/archive", async (request, reply) => {
+    const archived = archivePlan(request.params.id);
+    if (!archived) {
+      return reply.code(404).send({
+        error: "plan_not_found",
+      });
+    }
+
+    return archived;
+  });
+
   server.get("/api/sessions", async () => listSessionThreads());
 
   server.post<{ Body: CreateSessionBody }>("/api/sessions", async (request) => createSession(request.body?.title));
+  server.delete<{ Params: SessionParams }>("/api/sessions/:id", async (request, reply) => {
+    const deleted = deleteSession(request.params.id);
+    if (!deleted) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    return {
+      ok: true,
+      session: deleted,
+    };
+  });
 
   server.get<{ Querystring: { sessionId?: string; taskType?: TaskType; status?: TaskStatus; limit?: string } }>(
     "/api/tasks",
@@ -520,9 +897,24 @@ export async function createServer() {
       });
     }
 
+    if (body.taskType === "tracked-task") {
+      if (!body.title?.trim()) {
+        return reply.code(400).send({
+          error: "title_required",
+        });
+      }
+
+      return createTrackedTask({
+        title: body.title,
+        sessionId: body.sessionId ?? null,
+        detail: body.detail,
+        steps: Array.isArray(body.steps) ? body.steps : [],
+      });
+    }
+
     return reply.code(400).send({
       error: "unsupported_task_type",
-      supportedTaskTypes: ["document-ingest", "review-coach", "script-runner"],
+      supportedTaskTypes: ["document-ingest", "review-coach", "script-runner", "tracked-task"],
     });
   });
 
@@ -535,6 +927,98 @@ export async function createServer() {
     }
 
     return taskRun;
+  });
+  server.patch<{ Params: TaskParams; Body: UpdateTaskBody }>("/api/tasks/:id", async (request, reply) => {
+    const existing = getTaskRun(request.params.id);
+    if (!existing) {
+      return reply.code(404).send({
+        error: "task_not_found",
+      });
+    }
+
+    if (existing.taskType !== "tracked-task") {
+      return reply.code(409).send({
+        error: "task_not_mutable",
+      });
+    }
+
+    try {
+      const updated = updateTrackedTask({
+        taskId: request.params.id,
+        title: request.body?.title,
+        detail: request.body?.detail,
+        status: normalizeTrackedTaskStatus(request.body?.status),
+        steps: Array.isArray(request.body?.steps) ? request.body.steps : undefined,
+        stepIndex:
+          typeof request.body?.step === "number" && Number.isInteger(request.body.step)
+            ? request.body.step - 1
+            : undefined,
+        stepDone: normalizeTrackedTaskStepDone(request.body?.stepStatus),
+      });
+
+      if (!updated) {
+        return reply.code(404).send({
+          error: "task_not_found",
+        });
+      }
+
+      return updated;
+    } catch (error) {
+      if (error instanceof Error && error.message === "tracked_task_step_out_of_range") {
+        return reply.code(400).send({
+          error: "tracked_task_step_out_of_range",
+        });
+      }
+
+      if (error instanceof Error && (error.message === "invalid_task_status" || error.message === "invalid_step_status")) {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+  server.post<{ Params: TaskParams }>("/api/tasks/:id/done", async (request, reply) => {
+    const existing = getTaskRun(request.params.id);
+    if (!existing) {
+      return reply.code(404).send({
+        error: "task_not_found",
+      });
+    }
+
+    if (existing.taskType !== "tracked-task") {
+      return reply.code(409).send({
+        error: "task_not_mutable",
+      });
+    }
+
+    const updated = updateTrackedTask({
+      taskId: request.params.id,
+      status: "done",
+      markAllStepsDone: true,
+    });
+
+    if (!updated) {
+      return reply.code(404).send({
+        error: "task_not_found",
+      });
+    }
+
+    return updated;
+  });
+  server.delete<{ Params: TaskParams }>("/api/tasks/:id", async (request, reply) => {
+    const deleted = deleteTrackedTask(request.params.id);
+    if (!deleted) {
+      return reply.code(404).send({
+        error: "task_not_found",
+      });
+    }
+
+    return {
+      ok: true,
+      task: deleted,
+    };
   });
 
   server.get<{ Params: SessionParams }>("/api/session/:id/snapshot", async (request) => {
@@ -683,6 +1167,86 @@ export async function createServer() {
     };
   });
 
+  server.get<{ Params: SessionMessageParams }>("/api/session/:id/messages/:messageId/reactions", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    try {
+      return listSessionMessageReactions(request.params.id, request.params.messageId);
+    } catch {
+      return reply.code(404).send({
+        error: "message_not_found",
+      });
+    }
+  });
+
+  server.post<{ Params: SessionMessageParams; Body: CreateReactionBody }>(
+    "/api/session/:id/messages/:messageId/reactions",
+    async (request, reply) => {
+      if (!hasSession(request.params.id)) {
+        return reply.code(404).send({
+          error: "session_not_found",
+        });
+      }
+
+      const emoji = request.body?.emoji?.trim();
+      const deviceId = request.body?.deviceId?.trim() || "aliceloop-cli";
+      if (!emoji) {
+        return reply.code(400).send({
+          error: "emoji_required",
+        });
+      }
+
+      try {
+        return addSessionMessageReaction({
+          sessionId: request.params.id,
+          messageId: request.params.messageId,
+          emoji,
+          deviceId,
+        });
+      } catch {
+        return reply.code(404).send({
+          error: "message_not_found",
+        });
+      }
+    },
+  );
+
+  server.delete<{ Params: SessionMessageParams; Querystring: DeleteReactionQuery }>(
+    "/api/session/:id/messages/:messageId/reactions",
+    async (request, reply) => {
+      if (!hasSession(request.params.id)) {
+        return reply.code(404).send({
+          error: "session_not_found",
+        });
+      }
+
+      const emoji = request.query?.emoji?.trim();
+      const deviceId = request.query?.deviceId?.trim() || "aliceloop-cli";
+      if (!emoji) {
+        return reply.code(400).send({
+          error: "emoji_required",
+        });
+      }
+
+      try {
+        return removeSessionMessageReaction({
+          sessionId: request.params.id,
+          messageId: request.params.messageId,
+          emoji,
+          deviceId,
+        });
+      } catch {
+        return reply.code(404).send({
+          error: "message_not_found",
+        });
+      }
+    },
+  );
+
   server.post<{ Params: SessionParams; Body: CreateAttachmentBody }>("/api/session/:id/attachments", async (request, reply) => {
     const { fileName, mimeType, contentBase64, deviceType } = request.body;
 
@@ -792,6 +1356,29 @@ export async function createServer() {
       jobs: result.jobs,
       lastEventSeq: result.events.at(-1)?.seq ?? getSessionSnapshot(request.params.id).lastEventSeq,
     };
+  });
+
+  server.post<{ Body: GenerateImageBody }>("/api/images/generate", async (request, reply) => {
+    const prompt = request.body?.prompt?.trim();
+    if (!prompt) {
+      return reply.code(400).send({
+        error: "prompt_required",
+      });
+    }
+
+    try {
+      return await generateImage({
+        prompt,
+        providerId: request.body?.providerId,
+        model: request.body?.model,
+        size: request.body?.size,
+        outputPath: request.body?.outputPath,
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   server.get("/api/runtime/presence", async () => getRuntimePresence());

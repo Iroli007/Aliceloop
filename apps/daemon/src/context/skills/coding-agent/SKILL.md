@@ -13,6 +13,8 @@ allowed-tools:
   - write
   - bash
   - coding_agent_run
+  - document_ingest
+  - review_coach
 ---
 
 # Coding Agent

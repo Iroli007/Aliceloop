@@ -10,6 +10,7 @@ let cachedIdentity: string | null = null;
 let cachedSoul: string | null = null;
 let cachedTools: string | null = null;
 let cachedHeartbeat: string | null = null;
+let cachedHumor: string | null = null;
 
 function readCached(cache: { value: string | null }, filename: string): string {
   if (cache.value) return cache.value;
@@ -21,6 +22,7 @@ const identityCache = { value: null as string | null };
 const soulCache = { value: null as string | null };
 const toolsCache = { value: null as string | null };
 const heartbeatCache = { value: null as string | null };
+const humorCache = { value: null as string | null };
 
 function readIdentity(): string {
   return readCached(identityCache, "IDENTITY.md");
@@ -36,6 +38,10 @@ function readTools(): string {
 
 function readHeartbeat(): string {
   return readCached(heartbeatCache, "HEARTBEAT.md");
+}
+
+function readHumor(): string {
+  return readCached(humorCache, "HUMOR.md");
 }
 
 function readMemoryMd(): string | null {
@@ -98,6 +104,7 @@ export function buildPersonaPrompt(): string {
     readSoul(),
     readTools(),
     readHeartbeat(),
+    // HUMOR 不默认加载，需要时通过 buildPersonaPromptWithHumor() 加载
   ];
 
   const userBlock = buildUserBlock();

@@ -65,6 +65,15 @@ interface SessionEventRow {
   createdAt: string;
 }
 
+interface MessageReactionRow {
+  id: string;
+  sessionId: string;
+  messageId: string;
+  emoji: string;
+  sourceDeviceId: string;
+  createdAt: string;
+}
+
 interface DevicePresenceRow {
   deviceId: string;
   deviceType: DeviceType;
@@ -126,6 +135,15 @@ interface UpsertJobInput {
   detail: string;
 }
 
+export interface SessionMessageReaction {
+  id: string;
+  sessionId: string;
+  messageId: string;
+  emoji: string;
+  deviceId: string;
+  createdAt: string;
+}
+
 function summarizeMessagePreview(content: string | null) {
   if (!content) {
     return null;
@@ -178,6 +196,17 @@ function toAttachment(row: AttachmentRow): Attachment {
   };
 }
 
+function toMessageReaction(row: MessageReactionRow): SessionMessageReaction {
+  return {
+    id: row.id,
+    sessionId: row.sessionId,
+    messageId: row.messageId,
+    emoji: row.emoji,
+    deviceId: row.sourceDeviceId,
+    createdAt: row.createdAt,
+  };
+}
+
 function listAttachments(sessionId: string): Attachment[] {
   const db = getDatabase();
   const rows = db
@@ -200,6 +229,29 @@ function listAttachments(sessionId: string): Attachment[] {
     .all(sessionId) as AttachmentRow[];
 
   return rows.map(toAttachment);
+}
+
+function listMessageReactions(sessionId: string, messageId: string): SessionMessageReaction[] {
+  const db = getDatabase();
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          id,
+          session_id AS sessionId,
+          message_id AS messageId,
+          emoji,
+          source_device_id AS sourceDeviceId,
+          created_at AS createdAt
+        FROM message_reactions
+        WHERE session_id = ?
+          AND message_id = ?
+        ORDER BY created_at ASC
+      `,
+    )
+    .all(sessionId, messageId) as MessageReactionRow[];
+
+  return rows.map(toMessageReaction);
 }
 
 function uniqueSandboxRoots(roots: string[]) {
@@ -348,6 +400,10 @@ function getSessionRow(sessionId: string): SessionRow | undefined {
     .get(sessionId) as SessionRow | undefined;
 }
 
+export function hasSession(sessionId: string) {
+  return Boolean(getSessionRow(sessionId));
+}
+
 function countMessagesForSession(sessionId: string) {
   const db = getDatabase();
   const row = db
@@ -487,6 +543,26 @@ export function createSession(title?: string): SessionThreadSummary {
   };
 }
 
+export function deleteSession(sessionId: string) {
+  const existing = getSessionRow(sessionId);
+  if (!existing) {
+    return null;
+  }
+
+  const db = getDatabase();
+  db.prepare(
+    `
+      DELETE FROM sessions
+      WHERE id = ?
+    `,
+  ).run(sessionId);
+
+  return {
+    id: existing.id,
+    title: existing.title,
+  };
+}
+
 function getMessageByClientMessageId(sessionId: string, clientMessageId: string): SessionMessage | null {
   const db = getDatabase();
   const attachments = listAttachments(sessionId);
@@ -547,6 +623,116 @@ function getMessageById(sessionId: string, messageId: string): SessionMessage | 
   }
 
   return toMessage(row, attachments);
+}
+
+export function listSessionMessageReactions(sessionId: string, messageId: string) {
+  if (!getMessageById(sessionId, messageId)) {
+    throw new Error(`Message ${messageId} was not found in session ${sessionId}`);
+  }
+
+  return listMessageReactions(sessionId, messageId);
+}
+
+export function addSessionMessageReaction(input: {
+  sessionId: string;
+  messageId: string;
+  emoji: string;
+  deviceId: string;
+}) {
+  if (!getMessageById(input.sessionId, input.messageId)) {
+    throw new Error(`Message ${input.messageId} was not found in session ${input.sessionId}`);
+  }
+
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const reactionId = randomUUID();
+
+  const result = db.transaction(() => {
+    const insert = db.prepare(
+      `
+        INSERT OR IGNORE INTO message_reactions (
+          id, session_id, message_id, emoji, source_device_id, created_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?
+        )
+      `,
+    ).run(
+      reactionId,
+      input.sessionId,
+      input.messageId,
+      input.emoji,
+      input.deviceId,
+      now,
+    );
+
+    const reaction = db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id AS sessionId,
+            message_id AS messageId,
+            emoji,
+            source_device_id AS sourceDeviceId,
+            created_at AS createdAt
+          FROM message_reactions
+          WHERE session_id = ?
+            AND message_id = ?
+            AND emoji = ?
+            AND source_device_id = ?
+        `,
+      )
+      .get(input.sessionId, input.messageId, input.emoji, input.deviceId) as MessageReactionRow | undefined;
+
+    if (insert.changes > 0) {
+      touchSession(input.sessionId, now);
+    }
+
+    return {
+      created: insert.changes > 0,
+      reaction: reaction ? toMessageReaction(reaction) : null,
+      reactions: listMessageReactions(input.sessionId, input.messageId),
+    };
+  })();
+
+  return result;
+}
+
+export function removeSessionMessageReaction(input: {
+  sessionId: string;
+  messageId: string;
+  emoji: string;
+  deviceId: string;
+}) {
+  if (!getMessageById(input.sessionId, input.messageId)) {
+    throw new Error(`Message ${input.messageId} was not found in session ${input.sessionId}`);
+  }
+
+  const db = getDatabase();
+  const now = new Date().toISOString();
+
+  const result = db.transaction(() => {
+    const removal = db.prepare(
+      `
+        DELETE FROM message_reactions
+        WHERE session_id = ?
+          AND message_id = ?
+          AND emoji = ?
+          AND source_device_id = ?
+      `,
+    ).run(input.sessionId, input.messageId, input.emoji, input.deviceId);
+
+    if (removal.changes > 0) {
+      touchSession(input.sessionId, now);
+    }
+
+    return {
+      removed: removal.changes > 0,
+      reactions: listMessageReactions(input.sessionId, input.messageId),
+    };
+  })();
+
+  return result;
 }
 
 function recordEvent(

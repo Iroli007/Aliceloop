@@ -40,6 +40,26 @@ export const schemaStatements = [
     ON session_messages (session_id, client_message_id)
   `,
   `
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      source_device_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (message_id) REFERENCES session_messages(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE UNIQUE INDEX IF NOT EXISTS message_reactions_message_emoji_device_idx
+    ON message_reactions (message_id, emoji, source_device_id)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS message_reactions_message_created_idx
+    ON message_reactions (message_id, created_at)
+  `,
+  `
     CREATE TABLE IF NOT EXISTS session_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
       id TEXT NOT NULL UNIQUE,
@@ -151,6 +171,66 @@ export const schemaStatements = [
       updated_at_label TEXT NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
     )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS cron_jobs (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      schedule_type TEXT NOT NULL,
+      schedule_config TEXT NOT NULL,
+      schedule_label TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      session_id TEXT,
+      status TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_run_at TEXT,
+      next_run_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS cron_jobs_status_next_run_idx
+    ON cron_jobs (status, next_run_at)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS plan_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      title TEXT NOT NULL,
+      goal TEXT NOT NULL,
+      steps_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      approved_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS plan_runs_status_updated_idx
+    ON plan_runs (status, updated_at)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS mission_runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      title TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      roles_json TEXT NOT NULL,
+      plan_id TEXT,
+      task_ids_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS mission_runs_status_updated_idx
+    ON mission_runs (status, updated_at)
   `,
   `
     CREATE TABLE IF NOT EXISTS content_blocks (

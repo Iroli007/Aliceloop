@@ -1,8 +1,8 @@
 import type { ModelMessage, ToolSet } from "ai";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
 import { buildMemoryBlock } from "./memory/memoryContext";
-import { buildSessionMessages, getLatestUserMessage } from "./session/sessionContext";
-import { buildSkillContextBlock } from "./skills/skillLoader";
+import { buildActiveTurnBlock, buildSessionMessages, getLatestUserMessage } from "./session/sessionContext";
+import { buildSkillContextBlock, listActiveSkillDefinitions } from "./skills/skillLoader";
 import { buildToolSet } from "./tools/toolRegistry";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import {
@@ -38,6 +38,7 @@ export function loadContext(
 ): AgentContext {
   const persona = buildPersonaPrompt();
   const userQuery = getLatestUserMessage(sessionId);
+  const activeTurn = buildActiveTurnBlock(sessionId);
   const memory = buildMemoryBlock(sessionId, userQuery ?? undefined);
   const skills = buildSkillContextBlock();
   const messages = buildSessionMessages(sessionId);
@@ -74,9 +75,10 @@ export function loadContext(
       markGeneratedFileDeleted(targetPath);
     },
   });
-  const tools = buildToolSet(sandbox);
+  const activeSkills = listActiveSkillDefinitions();
+  const tools = buildToolSet(sandbox, activeSkills);
 
-  const systemPrompt = [persona, memory, skills].filter(Boolean).join("\n\n");
+  const systemPrompt = [persona, activeTurn, memory, skills].filter(Boolean).join("\n\n");
 
   return {
     systemPrompt,

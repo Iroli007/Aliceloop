@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { JobRunDetail, TaskRun, TaskStatus, TaskType } from "@aliceloop/runtime-core";
 import { getDatabase } from "../db/client";
 
@@ -22,6 +23,11 @@ interface JobRunRow {
   updatedAt: string;
 }
 
+interface TrackedTaskStep {
+  title: string;
+  done: boolean;
+}
+
 function toTaskType(jobKind: string): TaskType | null {
   switch (jobKind) {
     case "document-ingest":
@@ -29,6 +35,7 @@ function toTaskType(jobKind: string): TaskType | null {
     case "study-artifact":
     case "review-coach":
     case "script-runner":
+    case "tracked-task":
       return jobKind;
     default:
       return null;
@@ -62,6 +69,67 @@ function toTaskRun(row: TaskRunRow): TaskRun {
   };
 }
 
+function normalizeTrackedTaskSteps(steps: string[]) {
+  return steps
+    .map((step) => step.trim())
+    .filter(Boolean)
+    .map((title) => ({ title, done: false } satisfies TrackedTaskStep));
+}
+
+function parseTrackedTaskDetail(detail: string) {
+  const normalized = detail.trim();
+  if (!normalized) {
+    return {
+      summary: "",
+      steps: [] as TrackedTaskStep[],
+    };
+  }
+
+  const lines = normalized.split(/\r?\n/);
+  const stepsHeaderIndex = lines.findIndex((line) => line.trim() === "Steps:");
+  if (stepsHeaderIndex < 0) {
+    return {
+      summary: normalized,
+      steps: [] as TrackedTaskStep[],
+    };
+  }
+
+  const summary = lines.slice(0, stepsHeaderIndex).join("\n").trim();
+  const steps = lines
+    .slice(stepsHeaderIndex + 1)
+    .map((line) => line.match(/^- \[( |x)\] (.+)$/))
+    .filter((match): match is RegExpMatchArray => Boolean(match))
+    .map((match) => ({
+      done: match[1] === "x",
+      title: match[2].trim(),
+    }));
+
+  return {
+    summary,
+    steps,
+  };
+}
+
+function renderTrackedTaskDetail(summary: string, steps: TrackedTaskStep[]) {
+  const parts: string[] = [];
+  if (summary.trim()) {
+    parts.push(summary.trim());
+  }
+
+  if (steps.length > 0) {
+    if (parts.length > 0) {
+      parts.push("");
+    }
+
+    parts.push("Steps:");
+    for (const step of steps) {
+      parts.push(`- [${step.done ? "x" : " "}] ${step.title}`);
+    }
+  }
+
+  return parts.join("\n");
+}
+
 export function upsertTaskRun(taskRun: TaskRun) {
   const db = getDatabase();
   db.prepare(
@@ -83,6 +151,98 @@ export function upsertTaskRun(taskRun: TaskRun) {
   ).run(taskRun);
 
   return taskRun;
+}
+
+export function createTrackedTask(input: {
+  title: string;
+  sessionId?: string | null;
+  detail?: string;
+  steps?: string[];
+}) {
+  const now = new Date().toISOString();
+  return upsertTaskRun({
+    id: randomUUID(),
+    sessionId: input.sessionId ?? null,
+    taskType: "tracked-task",
+    status: "queued",
+    title: input.title.trim(),
+    detail: renderTrackedTaskDetail(input.detail ?? "", normalizeTrackedTaskSteps(input.steps ?? [])),
+    updatedAt: now,
+    updatedAtLabel: formatUpdatedAtLabel("queued"),
+  });
+}
+
+export function updateTrackedTask(input: {
+  taskId: string;
+  title?: string;
+  detail?: string;
+  status?: TaskStatus;
+  steps?: string[];
+  stepIndex?: number;
+  stepDone?: boolean;
+  markAllStepsDone?: boolean;
+}) {
+  const existing = getTaskRun(input.taskId);
+  if (!existing || existing.taskType !== "tracked-task") {
+    return null;
+  }
+
+  const parsed = parseTrackedTaskDetail(existing.detail);
+  const nextSteps =
+    input.steps !== undefined
+      ? normalizeTrackedTaskSteps(input.steps)
+      : parsed.steps.map((step) => ({ ...step }));
+
+  if (input.stepIndex !== undefined) {
+    if (input.stepIndex < 0 || input.stepIndex >= nextSteps.length) {
+      throw new Error("tracked_task_step_out_of_range");
+    }
+
+    nextSteps[input.stepIndex] = {
+      ...nextSteps[input.stepIndex],
+      done: input.stepDone ?? !nextSteps[input.stepIndex].done,
+    };
+  }
+
+  if (input.markAllStepsDone) {
+    for (let index = 0; index < nextSteps.length; index += 1) {
+      nextSteps[index] = {
+        ...nextSteps[index],
+        done: true,
+      };
+    }
+  }
+
+  const nextStatus = input.status ?? existing.status;
+  const now = new Date().toISOString();
+  return upsertTaskRun({
+    ...existing,
+    title: input.title?.trim() || existing.title,
+    status: nextStatus,
+    detail: renderTrackedTaskDetail(
+      input.detail !== undefined ? input.detail : parsed.summary,
+      nextSteps,
+    ),
+    updatedAt: now,
+    updatedAtLabel: formatUpdatedAtLabel(nextStatus),
+  });
+}
+
+export function deleteTrackedTask(taskId: string) {
+  const existing = getTaskRun(taskId);
+  if (!existing || existing.taskType !== "tracked-task") {
+    return null;
+  }
+
+  const db = getDatabase();
+  db.prepare(
+    `
+      DELETE FROM task_runs
+      WHERE id = ?
+    `,
+  ).run(taskId);
+
+  return existing;
 }
 
 export function syncTaskRunFromJob(job: JobRunDetail) {

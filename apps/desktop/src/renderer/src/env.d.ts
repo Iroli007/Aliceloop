@@ -11,6 +11,10 @@ declare global {
       pingRuntime(): Promise<{
         ok: boolean;
         message?: string;
+        service?: string;
+        timestamp?: string;
+        activeSkills?: string[];
+        activeSkillAdapters?: string[];
       }>;
       openFileOrFolder(): Promise<{
         canceled: boolean;

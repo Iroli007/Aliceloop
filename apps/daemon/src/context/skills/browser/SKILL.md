@@ -2,15 +2,15 @@
 name: browser
 label: browser
 description: Browser automation for AI agents. Use when the user needs navigation, clicking, form filling, extraction, screenshots, or other real browser interaction.
-status: planned
+status: available
 mode: instructional
 source-url: https://github.com/lackeyjb/playwright-skill
 allowed-tools:
-  - browser.navigate
-  - browser.snapshot
-  - browser.click
-  - browser.type
-  - browser.screenshot
+  - browser_navigate
+  - browser_snapshot
+  - browser_click
+  - browser_type
+  - browser_screenshot
 ---
 
 # Browser
@@ -43,10 +43,18 @@ Examples:
 
 ## Aliceloop status
 
-This skill is planned for the future browser / ACP adapter layer.
+This skill is active through the local Playwright adapter.
 
-If the runtime does not expose browser tools yet:
+Available tools:
 
-- say the browser bridge is not wired in yet
-- do not pretend the action was performed
-- offer a fallback only if the task can be handled with non-browser tools
+- `browser_navigate`
+- `browser_snapshot`
+- `browser_click`
+- `browser_type`
+- `browser_screenshot`
+
+Current limitations:
+
+- runs a single shared headless Chromium page per live agent context
+- element refs come from `browser_snapshot`, so refresh the snapshot after page-changing actions
+- the local machine still needs Playwright browsers installed; if Chromium is missing, run `npx playwright install chromium`

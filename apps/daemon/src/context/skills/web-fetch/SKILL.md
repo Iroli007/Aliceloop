@@ -2,13 +2,11 @@
 name: web-fetch
 label: web-fetch
 description: Fetch and read web pages, APIs, and online documents when a task requires inspecting a known URL.
-status: planned
+status: available
 mode: instructional
 source-url: https://docs.anthropic.com/en/docs/claude-code/settings
 allowed-tools:
   - web_fetch
-  - browser.navigate
-  - browser.read
 ---
 
 # Web Fetch
@@ -37,10 +35,10 @@ Examples:
 
 ## Aliceloop status
 
-This skill is planned for a future web tool / ACP adapter.
+The `web_fetch` tool is active. HTML pages are automatically converted to Markdown with boilerplate removed.
 
-If `web_fetch` is not available yet:
+Limitations:
 
-- state that direct web fetching is not installed in the current runtime
-- do not fabricate fetched content
-- ask the user for the page contents only when there is no safe local fallback
+- Login-protected or heavily JS-rendered pages may return incomplete content
+- Response is capped at 50K characters to protect context budget
+- 15-second timeout per request

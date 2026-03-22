@@ -13,7 +13,6 @@ export interface SettingsNavItem {
 export const primaryNav: ShellNavItem[] = [
   { id: "prompt-apps", label: "管理提示词应用", shortLabel: "≡" },
   { id: "gallery", label: "图库", shortLabel: "▣" },
-  { id: "mission-control", label: "Mission Control", shortLabel: "◌" },
   { id: "coding", label: "现场编程", shortLabel: "⌘" },
   { id: "settings", label: "设置", shortLabel: "⚙" },
 ];

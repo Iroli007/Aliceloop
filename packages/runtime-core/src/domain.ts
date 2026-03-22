@@ -7,7 +7,8 @@ export type TaskType =
   | "attachment-ingest"
   | "study-artifact"
   | "review-coach"
-  | "script-runner";
+  | "script-runner"
+  | "tracked-task";
 export type MemoryKind = "attention-summary" | "learning-pattern" | "postmortem";
 export type BlockKind = "outline" | "paragraph" | "figure-caption" | "table";
 export type DeviceType = "desktop" | "mobile";

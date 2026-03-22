@@ -19,8 +19,19 @@ These files are loaded into:
 - the desktop runtime catalog (`/api/skills`)
 - the daemon system prompt as a discoverable skill index
 
+Several available skills use the local `aliceloop` CLI as their execution guide.
+
 They are not executable endpoints by themselves. Runnable capabilities live in:
 
 - `/api/tasks`
 - `/api/runtime/scripts`
 - `apps/daemon/src/context/tools/`
+
+Current runtime assembly rules:
+
+- `status: available` skills may contribute additional tool adapters through `allowed-tools`
+- those adapters are assembled by `apps/daemon/src/context/tools/toolRegistry.ts`
+- adapter factories live in `apps/daemon/src/context/tools/skillToolFactories.ts`
+- daemon startup validates that all active-skill adapters are resolvable before serving requests
+- unresolved non-base tool names in an `available` skill now fail fast during live tool assembly
+- `status: planned` skills remain catalog / prompt entries only until a real adapter exists

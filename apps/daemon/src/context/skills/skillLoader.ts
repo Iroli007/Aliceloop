@@ -140,6 +140,10 @@ export function listSkillDefinitions() {
     .sort((left, right) => left.id.localeCompare(right.id));
 }
 
+export function listActiveSkillDefinitions() {
+  return listSkillDefinitions().filter((skill) => skill.status === "available");
+}
+
 export function getSkillDefinition(skillId: string) {
   return listSkillDefinitions().find((skill) => skill.id === skillId) ?? null;
 }

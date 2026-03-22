@@ -131,8 +131,30 @@ export function upsertMemoryNote(input: CreateMemoryNoteInput) {
   return updated;
 }
 
-export function listMemoryNotes(limit = 50) {
+export function listMemoryNotes(limit = 50, source?: string) {
   const db = getDatabase();
+  const normalizedLimit = Math.max(1, Math.min(limit, 200));
+
+  if (source?.trim()) {
+    return db
+      .prepare(
+        `
+          SELECT
+            id,
+            kind,
+            title,
+            content,
+            source,
+            updated_at AS updatedAt
+          FROM memory_notes
+          WHERE source = ?
+          ORDER BY updated_at DESC
+          LIMIT ?
+        `,
+      )
+      .all(source.trim(), normalizedLimit) as MemoryNote[];
+  }
+
   return db
     .prepare(
       `
@@ -148,15 +170,51 @@ export function listMemoryNotes(limit = 50) {
         LIMIT ?
       `,
     )
-    .all(Math.max(1, Math.min(limit, 200))) as MemoryNote[];
+    .all(normalizedLimit) as MemoryNote[];
 }
 
 export function getMemoryNote(memoryId: string) {
   return getMemoryNoteById(memoryId);
 }
 
-export function searchMemoryNotes(query: string, limit = 10): MemoryNote[] {
+export function deleteMemoryNote(memoryId: string) {
   const db = getDatabase();
+  const row = db
+    .prepare(
+      `
+        SELECT rowid
+        FROM memory_notes
+        WHERE id = ?
+      `,
+    )
+    .get(memoryId) as { rowid: number } | undefined;
+
+  if (!row) {
+    return false;
+  }
+
+  db.prepare(
+    `
+      DELETE FROM memory_notes_fts
+      WHERE rowid = ?
+    `,
+  ).run(row.rowid);
+
+  const result = db
+    .prepare(
+      `
+        DELETE FROM memory_notes
+        WHERE id = ?
+      `,
+    )
+    .run(memoryId);
+
+  return result.changes > 0;
+}
+
+export function searchMemoryNotes(query: string, limit = 10, source?: string): MemoryNote[] {
+  const db = getDatabase();
+  const normalizedSource = source?.trim();
 
   const hasFts = db
     .prepare(
@@ -168,24 +226,46 @@ export function searchMemoryNotes(query: string, limit = 10): MemoryNote[] {
     const normalizedQuery = normalizeFtsQuery(query);
     if (normalizedQuery) {
       try {
-        const ftsResults = db
-          .prepare(
-            `
-              SELECT
-                m.id,
-                m.kind,
-                m.title,
-                m.content,
-                m.source,
-                m.updated_at AS updatedAt
-              FROM memory_notes_fts fts
-              JOIN memory_notes m ON m.id = fts.memory_id
-              WHERE memory_notes_fts MATCH ?
-              ORDER BY rank
-              LIMIT ?
-            `,
-          )
-          .all(normalizedQuery, limit) as MemoryNote[];
+        const ftsQuery = normalizedSource
+          ? db
+            .prepare(
+              `
+                SELECT
+                  m.id,
+                  m.kind,
+                  m.title,
+                  m.content,
+                  m.source,
+                  m.updated_at AS updatedAt
+                FROM memory_notes_fts fts
+                JOIN memory_notes m ON m.id = fts.memory_id
+                WHERE memory_notes_fts MATCH ?
+                  AND m.source = ?
+                ORDER BY rank
+                LIMIT ?
+              `,
+            )
+            .all(normalizedQuery, normalizedSource, limit)
+          : db
+            .prepare(
+              `
+                SELECT
+                  m.id,
+                  m.kind,
+                  m.title,
+                  m.content,
+                  m.source,
+                  m.updated_at AS updatedAt
+                FROM memory_notes_fts fts
+                JOIN memory_notes m ON m.id = fts.memory_id
+                WHERE memory_notes_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+              `,
+            )
+            .all(normalizedQuery, limit);
+
+        const ftsResults = ftsQuery as MemoryNote[];
 
         if (ftsResults.length > 0) {
           return ftsResults;
@@ -197,7 +277,28 @@ export function searchMemoryNotes(query: string, limit = 10): MemoryNote[] {
   }
 
   if (!query.trim()) {
-    return listMemoryNotes(limit);
+    return listMemoryNotes(limit, normalizedSource);
+  }
+
+  if (normalizedSource) {
+    return db
+      .prepare(
+        `
+          SELECT
+            id,
+            kind,
+            title,
+            content,
+            source,
+            updated_at AS updatedAt
+          FROM memory_notes
+          WHERE source = ?
+            AND (content LIKE ? OR title LIKE ?)
+          ORDER BY updated_at DESC
+          LIMIT ?
+        `,
+      )
+      .all(normalizedSource, `%${query}%`, `%${query}%`, limit) as MemoryNote[];
   }
 
   return db

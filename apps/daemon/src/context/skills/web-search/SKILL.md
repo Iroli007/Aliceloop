@@ -2,7 +2,7 @@
 name: web-search
 label: web-search
 description: Search the web for up-to-date information, research, fact-checking, and source discovery before fetching specific pages.
-status: planned
+status: available
 mode: instructional
 source-url: https://docs.anthropic.com/en/docs/claude-code/settings
 allowed-tools:
@@ -38,10 +38,10 @@ Examples:
 
 ## Aliceloop status
 
-This skill is planned for a future web-search adapter.
+`web_search` is active and returns compact result lists that can be followed up with `web_fetch`.
 
-If `web_search` is not available yet:
+Current limitations:
 
-- say that live search is not wired into the current runtime
-- avoid claiming anything is current unless you can verify it another way
-- recommend a later ACP / external engine integration when the task truly needs live web access
+- search quality depends on the configured endpoint and may be lighter than a full search API
+- results are intended for source discovery, not as a final answer by themselves
+- always fetch the strongest result before claiming specifics

@@ -7,6 +7,10 @@ type DesktopMeta = {
 type RuntimePing = {
   ok: boolean;
   message?: string;
+  service?: string;
+  timestamp?: string;
+  activeSkills?: string[];
+  activeSkillAdapters?: string[];
 };
 
 export type DesktopPickedFile = {
@@ -69,7 +73,7 @@ function createBrowserBridge(): DesktopBridge {
           };
         }
 
-        return { ok: true };
+        return await response.json();
       } catch (error) {
         return {
           ok: false,

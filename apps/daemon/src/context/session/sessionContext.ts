@@ -4,6 +4,10 @@ import { getSessionSnapshot } from "../../repositories/sessionRepository";
 
 const MAX_HISTORY_MESSAGES = 20;
 
+function getLatestUserSessionMessage(messages: SessionMessage[]): SessionMessage | null {
+  return [...messages].reverse().find((message) => message.role === "user") ?? null;
+}
+
 function sessionMessageToCore(message: SessionMessage): ModelMessage {
   const content = serializeMessageContent(message);
 
@@ -48,11 +52,35 @@ export function buildSessionMessages(sessionId: string): ModelMessage[] {
   return messages.map(sessionMessageToCore);
 }
 
+export function buildActiveTurnBlock(sessionId: string): string {
+  const snapshot = getSessionSnapshot(sessionId);
+  const latestUserMessage = getLatestUserSessionMessage(snapshot.messages);
+
+  if (!latestUserMessage) {
+    return "";
+  }
+
+  const latestContent = serializeMessageContent(latestUserMessage).trim();
+  if (!latestContent) {
+    return "";
+  }
+
+  return [
+    "## Active Turn",
+    "- The final user message in the conversation history is the only current request for this turn.",
+    "- Treat older conversation as background context. Do not claim the user just said, repeated, or confirmed something unless it appears in the latest user message below.",
+    "- If a nickname, preference, or instruction appears only in older history, treat it as past context rather than a fresh instruction in this reply.",
+    "- When the latest user message conflicts with, narrows, or replaces an older framing, follow the latest user message.",
+    "",
+    "<latest_user_message>",
+    latestContent,
+    "</latest_user_message>",
+  ].join("\n");
+}
+
 export function getLatestUserMessage(sessionId: string): string | null {
   const snapshot = getSessionSnapshot(sessionId);
-  const userMessage = [...snapshot.messages]
-    .reverse()
-    .find((m) => m.role === "user");
+  const userMessage = getLatestUserSessionMessage(snapshot.messages);
 
   return userMessage?.content ?? null;
 }
