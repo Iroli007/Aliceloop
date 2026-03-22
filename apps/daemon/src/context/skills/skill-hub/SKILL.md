@@ -12,7 +12,7 @@ allowed-tools:
 
 # Skill Hub
 
-Use this skill when the user wants to browse or install additional packaged skills.
+Use this skill when the user wants to browse the local skill catalog, inspect skill details, or find the best installed skill for a task.
 
 ## Commands
 
@@ -26,4 +26,4 @@ aliceloop skills search browser
 
 - Use `skills search` first when you only know the capability, not the exact skill id.
 - `skills show` is the fastest way to inspect allowed tools and the skill's source file.
-- This hub currently covers the local daemon catalog only; there is still no remote marketplace or third-party install flow.
+- This hub currently covers the local daemon catalog only; there is no remote marketplace or third-party install flow.

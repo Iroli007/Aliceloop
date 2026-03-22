@@ -511,6 +511,7 @@ function ensureColumn(db: Database.Database, tableName: string, columnName: stri
 }
 
 function runMigrations(db: Database.Database) {
+  ensureColumn(db, "attachments", "original_path", "TEXT");
   ensureColumn(db, "study_artifacts", "body", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "provider_configs", "transport", "TEXT");
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();

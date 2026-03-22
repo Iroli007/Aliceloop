@@ -15,7 +15,12 @@ function hasSkillMarkdown(candidate: string) {
   });
 }
 
-const skillsRootDir = [currentDir, resolve(currentDir, "../../src/context/skills")].find(hasSkillMarkdown) ?? currentDir;
+const skillsRootDir = [
+  currentDir,
+  resolve(currentDir, "../src/context/skills"),
+  resolve(process.cwd(), "src/context/skills"),
+  resolve(process.cwd(), "apps/daemon/src/context/skills"),
+].find(hasSkillMarkdown) ?? currentDir;
 
 type FrontmatterValue = string | string[];
 
@@ -27,6 +32,13 @@ interface ParsedFrontmatter {
   mode?: string;
   sourceUrl?: string;
   allowedTools?: string[];
+}
+
+class SkillFrontmatterError extends Error {
+  constructor(sourcePath: string, message: string) {
+    super(`Invalid skill frontmatter in ${sourcePath}: ${message}`);
+    this.name = "SkillFrontmatterError";
+  }
 }
 
 function normalizeKey(rawKey: string) {
@@ -45,19 +57,28 @@ function normalizeScalar(rawValue: string) {
   return value;
 }
 
-function parseSkillFrontmatter(source: string): ParsedFrontmatter {
+function parseSkillFrontmatter(source: string, sourcePath: string): ParsedFrontmatter {
   const lines = source.split(/\r?\n/);
   if (lines[0]?.trim() !== "---") {
-    return {};
+    throw new SkillFrontmatterError(sourcePath, "missing opening YAML frontmatter delimiter");
   }
 
   const result: Record<string, FrontmatterValue> = {};
+  const keyLines = new Map<string, number>();
   let activeListKey: string | null = null;
 
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index];
     if (line.trim() === "---") {
-      break;
+      return {
+        name: typeof result.name === "string" ? result.name : undefined,
+        label: typeof result.label === "string" ? result.label : undefined,
+        description: typeof result.description === "string" ? result.description : undefined,
+        status: typeof result.status === "string" ? result.status : undefined,
+        mode: typeof result.mode === "string" ? result.mode : undefined,
+        sourceUrl: typeof result.sourceUrl === "string" ? result.sourceUrl : undefined,
+        allowedTools: Array.isArray(result.allowedTools) ? result.allowedTools : [],
+      };
     }
 
     const listItemMatch = line.match(/^\s*-\s*(.+)$/);
@@ -78,6 +99,22 @@ function parseSkillFrontmatter(source: string): ParsedFrontmatter {
     const [, rawKey, rawValue] = keyValueMatch;
     const key = normalizeKey(rawKey);
     const value = rawValue.trim();
+    const lineNumber = index + 1;
+
+    if (key === "tools") {
+      throw new SkillFrontmatterError(
+        sourcePath,
+        `line ${lineNumber} uses deprecated frontmatter key "${rawKey}". Use "allowed-tools" instead.`,
+      );
+    }
+
+    if (keyLines.has(key)) {
+      throw new SkillFrontmatterError(
+        sourcePath,
+        `frontmatter key "${rawKey}" is repeated on lines ${keyLines.get(key)} and ${lineNumber}`,
+      );
+    }
+    keyLines.set(key, lineNumber);
 
     if (!value) {
       result[key] = [];
@@ -89,23 +126,33 @@ function parseSkillFrontmatter(source: string): ParsedFrontmatter {
     activeListKey = null;
   }
 
-  return {
-    name: typeof result.name === "string" ? result.name : undefined,
-    label: typeof result.label === "string" ? result.label : undefined,
-    description: typeof result.description === "string" ? result.description : undefined,
-    status: typeof result.status === "string" ? result.status : undefined,
-    mode: typeof result.mode === "string" ? result.mode : undefined,
-    sourceUrl: typeof result.sourceUrl === "string" ? result.sourceUrl : undefined,
-    allowedTools: Array.isArray(result.allowedTools) ? result.allowedTools : [],
-  };
+  throw new SkillFrontmatterError(sourcePath, "missing closing YAML frontmatter delimiter");
 }
 
-function normalizeStatus(value: string | undefined): SkillStatus {
-  return value?.trim().toLowerCase() === "planned" ? "planned" : "available";
+function normalizeStatus(value: string | undefined, sourcePath: string): SkillStatus {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "available") {
+    return "available";
+  }
+
+  if (normalized === "planned") {
+    return "planned";
+  }
+
+  throw new SkillFrontmatterError(sourcePath, `unsupported status "${value}"`);
 }
 
-function normalizeMode(value: string | undefined): SkillMode {
-  return value?.trim().toLowerCase() === "task" ? "task" : "instructional";
+function normalizeMode(value: string | undefined, sourcePath: string): SkillMode {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "instructional") {
+    return "instructional";
+  }
+
+  if (normalized === "task") {
+    return "task";
+  }
+
+  throw new SkillFrontmatterError(sourcePath, `unsupported mode "${value}"`);
 }
 
 function readSkillDefinition(directoryName: string) {
@@ -115,17 +162,40 @@ function readSkillDefinition(directoryName: string) {
   }
 
   const source = readFileSync(sourcePath, "utf8");
-  const frontmatter = parseSkillFrontmatter(source);
-  if (!frontmatter.name || !frontmatter.description) {
-    return null;
+  const frontmatter = parseSkillFrontmatter(source, sourcePath);
+
+  const missingFields = ["name", "description"].filter((field) => {
+    return typeof frontmatter[field as keyof ParsedFrontmatter] !== "string";
+  });
+  if (missingFields.length > 0) {
+    throw new SkillFrontmatterError(
+      sourcePath,
+      `missing required frontmatter key${missingFields.length > 1 ? "s" : ""}: ${missingFields.join(", ")}`,
+    );
   }
 
+  for (const toolName of frontmatter.allowedTools ?? []) {
+    const trimmedToolName = toolName.trim();
+    if (!trimmedToolName) {
+      throw new SkillFrontmatterError(sourcePath, "allowed-tools entries must not be empty");
+    }
+    if (trimmedToolName !== toolName) {
+      throw new SkillFrontmatterError(
+        sourcePath,
+        `allowed-tools entry "${toolName}" must not contain surrounding whitespace`,
+      );
+    }
+  }
+
+  const name = frontmatter.name as string;
+  const description = frontmatter.description as string;
+
   return {
-    id: frontmatter.name,
-    label: frontmatter.label?.trim() || frontmatter.name,
-    description: frontmatter.description,
-    status: normalizeStatus(frontmatter.status),
-    mode: normalizeMode(frontmatter.mode),
+    id: name,
+    label: frontmatter.label?.trim() || name,
+    description,
+    status: normalizeStatus(frontmatter.status, sourcePath),
+    mode: normalizeMode(frontmatter.mode, sourcePath),
     sourcePath,
     sourceUrl: frontmatter.sourceUrl?.trim() || null,
     allowedTools: frontmatter.allowedTools ?? [],

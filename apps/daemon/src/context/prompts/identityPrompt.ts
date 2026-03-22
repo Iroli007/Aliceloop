@@ -1,9 +1,28 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getUserProfile } from "../../repositories/userProfileRepository";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function resolvePromptRoot() {
+  const candidates = [
+    __dirname,
+    resolve(__dirname, "../src/context/prompts"),
+    resolve(process.cwd(), "src/context/prompts"),
+    resolve(process.cwd(), "apps/daemon/src/context/prompts"),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, "IDENTITY.md"))) {
+      return candidate;
+    }
+  }
+
+  return __dirname;
+}
+
+const promptRootDir = resolvePromptRoot();
 
 // --- Process-level caches for static .md files ---
 let cachedIdentity: string | null = null;
@@ -14,7 +33,7 @@ let cachedHumor: string | null = null;
 
 function readCached(cache: { value: string | null }, filename: string): string {
   if (cache.value) return cache.value;
-  cache.value = readFileSync(join(__dirname, filename), "utf-8");
+  cache.value = readFileSync(join(promptRootDir, filename), "utf-8");
   return cache.value;
 }
 
@@ -45,7 +64,7 @@ function readHumor(): string {
 }
 
 function readMemoryMd(): string | null {
-  const p = join(__dirname, "MEMORY.md");
+  const p = join(promptRootDir, "MEMORY.md");
   if (!existsSync(p)) return null;
   const content = readFileSync(p, "utf-8").trim();
   if (!content || content.startsWith("<!--")) return null;
@@ -53,7 +72,7 @@ function readMemoryMd(): string | null {
 }
 
 function readDailyMemoryLogs(): string | null {
-  const memoryDir = join(__dirname, "memory");
+  const memoryDir = join(promptRootDir, "memory");
   if (!existsSync(memoryDir)) return null;
 
   const today = new Date();
@@ -99,7 +118,7 @@ function buildUserBlock(): string | null {
  * Static parts (IDENTITY, SOUL, TOOLS, HEARTBEAT) are marked for caching.
  * Dynamic parts (USER, MEMORY, Daily Logs) are not cached.
  */
-export function buildPersonaPrompt(): Array<{ role: "system"; content: string; experimental_providerMetadata?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> {
+export function buildPersonaPrompt(): Array<{ role: "system"; content: string; providerOptions?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> {
   const staticContent = [
     readIdentity(),
     readSoul(),
@@ -107,11 +126,11 @@ export function buildPersonaPrompt(): Array<{ role: "system"; content: string; e
     readHeartbeat(),
   ].filter(Boolean).join("\n\n");
 
-  const messages: Array<{ role: "system"; content: string; experimental_providerMetadata?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> = [
+  const messages: Array<{ role: "system"; content: string; providerOptions?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> = [
     {
       role: "system",
       content: staticContent,
-      experimental_providerMetadata: {
+      providerOptions: {
         anthropic: { cacheControl: { type: "ephemeral" } }
       }
     }

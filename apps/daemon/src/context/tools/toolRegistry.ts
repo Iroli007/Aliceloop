@@ -46,7 +46,7 @@ export function buildToolSet(
   for (const [name, toolDef] of Object.entries(baseTools)) {
     tools[name] = {
       ...toolDef,
-      experimental_providerMetadata: {
+      providerOptions: {
         anthropic: { cacheControl: { type: "ephemeral" } }
       }
     };

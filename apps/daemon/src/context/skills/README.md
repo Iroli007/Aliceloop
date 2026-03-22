@@ -13,6 +13,8 @@ Current conventions:
 - `mode`: currently `instructional`
 - `allowed-tools`: canonical tool ids such as `bash`, `read`, `web_fetch`, or adapter ids like `browser_navigate`
 - `source-url`: optional provenance link
+- frontmatter keys must be unique; duplicate keys are rejected at load time
+- use `allowed-tools`, not legacy `tools`
 
 These files are loaded into:
 

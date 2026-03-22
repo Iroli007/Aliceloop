@@ -304,6 +304,60 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS memories (
+      id TEXT PRIMARY KEY,
+      content TEXT NOT NULL,
+      source TEXT NOT NULL CHECK(source IN ('auto', 'manual')),
+      durability TEXT NOT NULL CHECK(durability IN ('permanent', 'temporary')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      access_count INTEGER NOT NULL DEFAULT 0,
+      related_topics TEXT NOT NULL DEFAULT '[]'
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS memory_metadata (
+      memory_id TEXT PRIMARY KEY,
+      embedding_model TEXT NOT NULL,
+      embedding_dimension INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS memory_embeddings (
+      memory_id TEXT PRIMARY KEY,
+      embedding BLOB NOT NULL,
+      FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS memory_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_source_idx
+    ON memories (source)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_durability_idx
+    ON memories (durability)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_created_idx
+    ON memories (created_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_updated_idx
+    ON memories (updated_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_access_idx
+    ON memories (access_count DESC)
+  `,
+  `
     CREATE TABLE IF NOT EXISTS sandbox_runs (
       id TEXT PRIMARY KEY,
       primitive TEXT NOT NULL,
@@ -361,9 +415,5 @@ export const schemaStatements = [
       notes TEXT,
       updated_at TEXT NOT NULL
     )
-  `,
-  // Migration: Add originalPath to attachments table
-  `
-    ALTER TABLE attachments ADD COLUMN original_path TEXT
   `,
 ];

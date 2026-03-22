@@ -1,7 +1,6 @@
 ---
 name: discord
 label: discord
-description: Interact with Discord channels, messages, and attachments through a future Discord bridge.
 description: Send Discord webhook messages and attachments from the Aliceloop CLI.
 status: available
 mode: instructional

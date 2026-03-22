@@ -430,5 +430,78 @@ export const defaultUserProfile: UserProfile = {
   updatedAt: new Date().toISOString(),
 };
 
+export type MemorySource = "auto" | "manual";
+export type MemoryDurability = "permanent" | "temporary";
+export type MemoryEmbeddingModel = "text-embedding-3-small" | "text-embedding-3-large";
+
+export interface Memory {
+  id: string;
+  content: string;
+  source: MemorySource;
+  durability: MemoryDurability;
+  createdAt: string;
+  updatedAt: string;
+  accessCount: number;
+  relatedTopics: string[];
+}
+
+export interface MemoryWithScore extends Memory {
+  similarityScore: number;
+}
+
+export interface MemoryMetadata {
+  memoryId: string;
+  embeddingModel: MemoryEmbeddingModel;
+  embeddingDimension: number;
+  createdAt: string;
+}
+
+export interface MemoryConfig {
+  enabled: boolean;
+  autoRetrieval: boolean;
+  queryRewrite: boolean;
+  maxRetrievalCount: number;
+  similarityThreshold: number;
+  autoSummarize: boolean;
+  embeddingModel: MemoryEmbeddingModel;
+  embeddingDimension: number;
+}
+
+export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
+  enabled: true,
+  autoRetrieval: true,
+  queryRewrite: false,
+  maxRetrievalCount: 8,
+  similarityThreshold: 0.7,
+  autoSummarize: true,
+  embeddingModel: "text-embedding-3-small",
+  embeddingDimension: 1536,
+};
+
+export interface MemoryStats {
+  totalCount: number;
+  autoCount: number;
+  manualCount: number;
+  permanentCount: number;
+  temporaryCount: number;
+  totalAccessCount: number;
+  avgAccessCount: number;
+  oldestMemory: string | null;
+  newestMemory: string | null;
+}
+
+export interface CreateMemoryInput {
+  content: string;
+  source: MemorySource;
+  durability: MemoryDurability;
+  relatedTopics?: string[];
+}
+
+export interface UpdateMemoryInput {
+  content?: string;
+  durability?: MemoryDurability;
+  relatedTopics?: string[];
+}
+
 export const shellOverviewRoute = "/api/shell/overview";
 export const primarySessionId = "session-primary";

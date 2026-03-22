@@ -10,8 +10,9 @@
   "scripts": {
     "build": "tsup src/index.ts src/cli/index.ts --dts --format esm --out-dir dist",
     "dev": "tsx watch src/index.ts",
-    "smoke:all": "npm run smoke:queue && npm run smoke:sandbox && npm run smoke:skills && npm run smoke:cli && npm run smoke:tasks && npm run smoke:tasks:api",
+    "smoke:all": "npm run smoke:queue && npm run smoke:sandbox && npm run smoke:skills && npm run smoke:cli && npm run smoke:tasks && npm run smoke:tasks:api && npm run smoke:memory",
     "smoke:cli": "tsx scripts/cliSmoke.ts",
+    "smoke:memory": "tsx scripts/memorySystemSmoke.ts",
     "smoke:queue": "tsx scripts/sessionRunQueueSmoke.ts",
     "smoke:sandbox": "tsx scripts/sandboxSmoke.ts",
     "smoke:skills": "tsx scripts/skillToolsSmoke.ts",

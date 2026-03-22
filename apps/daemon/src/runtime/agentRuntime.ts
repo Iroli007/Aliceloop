@@ -124,7 +124,7 @@ interface AgentRun {
   dispose(): void;
 }
 
-function createAgentRun(sessionId: string): AgentRun | null {
+async function createAgentRun(sessionId: string): Promise<AgentRun | null> {
   const activeProvider = getActiveProviderConfig();
   const jobId = randomUUID();
 
@@ -144,7 +144,13 @@ function createAgentRun(sessionId: string): AgentRun | null {
   const abortController = new AbortController();
   activeAgents.set(sessionId, abortController);
 
-  const context = loadContext(sessionId, abortController.signal);
+  let context: AgentContext;
+  try {
+    context = await loadContext(sessionId, abortController.signal);
+  } catch (error) {
+    activeAgents.delete(sessionId);
+    throw error;
+  }
   const safety = createSafetyChecker(context.safetyConfig);
 
   return {
@@ -366,7 +372,7 @@ async function consumeTextStream(
   }
 
   // Log cache statistics if available
-  const metadata = await stream.experimental_providerMetadata;
+  const metadata = await stream.providerMetadata;
   if (metadata?.anthropic) {
     const { cacheCreationInputTokens, cacheReadInputTokens } = metadata.anthropic;
     if (cacheCreationInputTokens || cacheReadInputTokens) {
@@ -411,7 +417,7 @@ function schedulePostProcessing(run: AgentRun, text: string, toolCalls: ToolCall
 
 export async function runAgent(sessionId: string) {
   return enqueueSessionRun(sessionId, async () => {
-    const run = createAgentRun(sessionId);
+    const run = await createAgentRun(sessionId);
     if (!run) return;
 
     try {

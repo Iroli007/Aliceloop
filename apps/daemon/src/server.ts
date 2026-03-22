@@ -21,7 +21,21 @@ import {
 } from "@aliceloop/runtime-core";
 import { getUploadsDir } from "./db/client";
 import { publishSessionEvent, subscribeToSession } from "./realtime/sessionStreams";
-import { createMemoryNote, deleteMemoryNote, searchMemoryNotes } from "./context/memory/memoryRepository";
+import { getMemoryConfig, parseMemoryConfigPatch, updateMemoryConfig } from "./context/memory/memoryConfig";
+import {
+  clearAllMemories,
+  createMemory,
+  createMemoryNote,
+  deleteMemory,
+  deleteMemoryNote,
+  getMemoryById,
+  getMemoryStats,
+  listMemories,
+  rebuildAllEmbeddings,
+  searchMemoriesBySimilarity,
+  searchMemoryNotes,
+  updateMemory,
+} from "./context/memory/memoryRepository";
 import {
   getDocumentStructure,
   listContentBlocks,
@@ -291,6 +305,45 @@ interface CreateMemoryBody {
   source?: string;
 }
 
+interface SemanticMemoryEntriesQuery {
+  limit?: string;
+  offset?: string;
+  source?: string;
+  durability?: string;
+  orderBy?: string;
+  order?: string;
+}
+
+interface SemanticMemorySearchQuery {
+  q?: string;
+  limit?: string;
+  threshold?: string;
+}
+
+interface SemanticMemoryConfigBody {
+  enabled?: boolean;
+  autoRetrieval?: boolean;
+  queryRewrite?: boolean;
+  maxRetrievalCount?: number;
+  similarityThreshold?: number;
+  autoSummarize?: boolean;
+  embeddingModel?: "text-embedding-3-small" | "text-embedding-3-large";
+  embeddingDimension?: number;
+}
+
+interface CreateSemanticMemoryBody {
+  content?: string;
+  source?: string;
+  durability?: string;
+  relatedTopics?: string[];
+}
+
+interface UpdateSemanticMemoryBody {
+  content?: string;
+  durability?: string;
+  relatedTopics?: string[];
+}
+
 interface CronJobParams {
   id: string;
 }
@@ -384,6 +437,82 @@ function normalizeMemoryKind(value: string | undefined): MemoryKind {
   }
 
   return "learning-pattern";
+}
+
+function normalizeSemanticMemorySource(value: string | undefined, fallback: "auto" | "manual" = "manual") {
+  if (!value) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "auto" || normalized === "manual") {
+    return normalized;
+  }
+
+  throw new Error("invalid_memory_source");
+}
+
+function normalizeSemanticMemoryDurability(
+  value: string | undefined,
+  fallback?: "permanent" | "temporary",
+) {
+  if (!value) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "permanent" || normalized === "temporary") {
+    return normalized;
+  }
+
+  throw new Error("invalid_memory_durability");
+}
+
+function normalizeSemanticMemoryOrderBy(value: string | undefined) {
+  switch (value?.trim().toLowerCase()) {
+    case "updated_at":
+    case "updatedat":
+    case "updated":
+      return "updatedAt" as const;
+    case "access_count":
+    case "accesscount":
+    case "access":
+      return "accessCount" as const;
+    case "created_at":
+    case "createdat":
+    case "created":
+    case undefined:
+      return "createdAt" as const;
+    default:
+      throw new Error("invalid_memory_order_by");
+  }
+}
+
+function normalizeSortOrder(value: string | undefined) {
+  if (!value) {
+    return "DESC" as const;
+  }
+
+  const normalized = value.trim().toUpperCase();
+  if (normalized === "ASC" || normalized === "DESC") {
+    return normalized;
+  }
+
+  throw new Error("invalid_sort_order");
+}
+
+function parseThresholdValue(value: string | string[] | undefined, fallback = 0.7) {
+  if (!value) {
+    return fallback;
+  }
+
+  const raw = Array.isArray(value) ? value[0] : value;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(-1, Math.min(parsed, 1));
 }
 
 function summarizeMemoryTitle(content: string) {
@@ -545,6 +674,153 @@ export async function createServer() {
     return {
       ok: true,
       id: request.params.id,
+    };
+  });
+  server.get("/api/memory/config", async () => getMemoryConfig());
+  server.put<{ Body: SemanticMemoryConfigBody }>("/api/memory/config", async (request, reply) => {
+    try {
+      const updates = parseMemoryConfigPatch(request.body ?? {});
+      return updateMemoryConfig(updates);
+    } catch (error) {
+      if (error instanceof Error) {
+        return reply.code(400).send({
+          error: "invalid_memory_config",
+          detail: error.message,
+        });
+      }
+      throw error;
+    }
+  });
+  server.get("/api/memory/stats", async () => getMemoryStats());
+  server.post("/api/memory/rebuild", async (_request, reply) => {
+    try {
+      return await rebuildAllEmbeddings();
+    } catch (error) {
+      if (error instanceof Error && error.message === "embedding_provider_not_configured") {
+        return reply.code(409).send({
+          error: "embedding_provider_not_configured",
+        });
+      }
+
+      throw error;
+    }
+  });
+  server.get<{ Querystring: SemanticMemoryEntriesQuery }>("/api/memory/entries", async (request, reply) => {
+    try {
+      return listMemories({
+        limit: parseLimitValue(request.query.limit, 50),
+        offset: request.query.offset ? Math.max(0, Number.parseInt(request.query.offset, 10) || 0) : 0,
+        source: request.query.source
+          ? normalizeSemanticMemorySource(request.query.source, "manual")
+          : undefined,
+        durability: request.query.durability
+          ? normalizeSemanticMemoryDurability(request.query.durability)
+          : undefined,
+        orderBy: normalizeSemanticMemoryOrderBy(request.query.orderBy),
+        order: normalizeSortOrder(request.query.order),
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        return reply.code(400).send({
+          error: "invalid_memory_query",
+          detail: error.message,
+        });
+      }
+      throw error;
+    }
+  });
+  server.post<{ Body: CreateSemanticMemoryBody }>("/api/memory/entries", async (request, reply) => {
+    const body = request.body ?? {};
+    const content = body.content?.trim();
+    if (!content) {
+      return reply.code(400).send({
+        error: "content_required",
+      });
+    }
+
+    try {
+      const memory = await createMemory({
+        content,
+        source: normalizeSemanticMemorySource(body.source, "manual"),
+        durability: normalizeSemanticMemoryDurability(body.durability, "permanent") ?? "permanent",
+        relatedTopics: Array.isArray(body.relatedTopics) ? body.relatedTopics : undefined,
+      });
+      return reply.code(201).send(memory);
+    } catch (error) {
+      if (error instanceof Error) {
+        return reply.code(400).send({
+          error: "invalid_memory",
+          detail: error.message,
+        });
+      }
+      throw error;
+    }
+  });
+  server.get<{ Querystring: SemanticMemorySearchQuery }>("/api/memory/search", async (request, reply) => {
+    const query = request.query.q?.trim();
+    if (!query) {
+      return reply.code(400).send({
+        error: "query_required",
+      });
+    }
+
+    return searchMemoriesBySimilarity(
+      query,
+      parseLimitValue(request.query.limit, 10),
+      parseThresholdValue(request.query.threshold, getMemoryConfig().similarityThreshold),
+    );
+  });
+  server.get<{ Params: MemoryParams }>("/api/memory/entries/:id", async (request, reply) => {
+    const memory = getMemoryById(request.params.id);
+    if (!memory) {
+      return reply.code(404).send({
+        error: "memory_not_found",
+      });
+    }
+
+    return memory;
+  });
+  server.put<{ Params: MemoryParams; Body: UpdateSemanticMemoryBody }>("/api/memory/entries/:id", async (request, reply) => {
+    try {
+      const memory = await updateMemory(request.params.id, {
+        content: request.body?.content,
+        durability: normalizeSemanticMemoryDurability(request.body?.durability),
+        relatedTopics: Array.isArray(request.body?.relatedTopics) ? request.body.relatedTopics : undefined,
+      });
+
+      if (!memory) {
+        return reply.code(404).send({
+          error: "memory_not_found",
+        });
+      }
+
+      return memory;
+    } catch (error) {
+      if (error instanceof Error) {
+        return reply.code(400).send({
+          error: "invalid_memory_update",
+          detail: error.message,
+        });
+      }
+      throw error;
+    }
+  });
+  server.delete<{ Params: MemoryParams }>("/api/memory/entries/:id", async (request, reply) => {
+    if (!deleteMemory(request.params.id)) {
+      return reply.code(404).send({
+        error: "memory_not_found",
+      });
+    }
+
+    return {
+      ok: true,
+      id: request.params.id,
+    };
+  });
+  server.delete("/api/memory/entries", async () => {
+    clearAllMemories();
+    return {
+      ok: true,
     };
   });
   server.get("/api/skills", async () => listSkillDefinitions());

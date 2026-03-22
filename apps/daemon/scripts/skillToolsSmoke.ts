@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SkillDefinition } from "@aliceloop/runtime-core";
@@ -59,7 +59,45 @@ async function main() {
   const availableCatalogSkills = listActiveSkillDefinitions();
   const plannedCatalogSkills = skillCatalog.filter((skill) => skill.status === "planned");
 
+  for (const skill of skillCatalog) {
+    const source = readFileSync(skill.sourcePath, "utf8");
+    const lines = source.split(/\r?\n/);
+    assert.equal(lines[0]?.trim(), "---", `${skill.id} should start with YAML frontmatter`);
+
+    const seenKeys = new Set<string>();
+    for (let index = 1; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line.trim() === "---") {
+        break;
+      }
+
+      const keyValueMatch = line.match(/^([A-Za-z0-9_-]+):(.*)$/);
+      if (!keyValueMatch) {
+        continue;
+      }
+
+      const key = keyValueMatch[1];
+      assert.equal(
+        seenKeys.has(key),
+        false,
+        `${skill.id} should not repeat frontmatter key ${key}`,
+      );
+      seenKeys.add(key);
+    }
+  }
+
   assert(availableCatalogSkills.length > 0, "skill catalog should expose at least one available skill");
+  assert(skillCatalog.some((skill) => skill.id === "skill-discovery"), "skill-discovery should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "audio-analysis"), "audio-analysis should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "video-analysis"), "video-analysis should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "twitter-media"), "twitter-media should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "selfie"), "selfie should be present in the catalog");
+  assert(skillCatalog.every((skill) => skill.id !== "travel"), "travel should no longer be present in the catalog");
+  assert(availableCatalogSkills.every((skill) => skill.id !== "skill-search"), "legacy skill-search should no longer be active");
+  assert(availableCatalogSkills.every((skill) => skill.id !== "music-listener"), "legacy music-listener should no longer be active");
+  assert(availableCatalogSkills.every((skill) => skill.id !== "video-reader"), "legacy video-reader should no longer be active");
+  assert(plannedCatalogSkills.some((skill) => skill.id === "selfie"), "selfie should remain planned until image references are supported");
   assert(availableCatalogSkills.some((skill) => skill.id === "browser"), "browser should now be available");
   assert(availableCatalogSkills.some((skill) => skill.id === "coding-agent"), "coding-agent should remain available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-fetch"), "web-fetch should remain available");
@@ -170,7 +208,7 @@ async function main() {
   });
 
   const controller = new AbortController();
-  const context = loadContext(session.id, controller.signal);
+  const context = await loadContext(session.id, controller.signal);
   assert.equal(typeof context.tools.read, "object", "loadContext should keep base tools");
   assert.equal(typeof context.tools.browser_navigate, "object", "available browser skill should attach browser_navigate to the live context");
   assert.equal(typeof context.tools.browser_snapshot, "object", "available browser skill should attach browser_snapshot to the live context");

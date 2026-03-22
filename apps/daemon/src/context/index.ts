@@ -21,7 +21,7 @@ export interface SafetyConfig {
 }
 
 export interface AgentContext {
-  systemPrompt: string | Array<{ role: "system"; content: string; experimental_providerMetadata?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }>;
+  systemPrompt: string | Array<{ role: "system"; content: string; providerOptions?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }>;
   messages: ModelMessage[];
   tools: ToolSet;
   safetyConfig: SafetyConfig;
@@ -32,14 +32,14 @@ const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
   maxDurationMs: 15 * 60 * 1000, // 15 minutes
 };
 
-export function loadContext(
+export async function loadContext(
   sessionId: string,
   abortSignal: AbortSignal,
-): AgentContext {
+): Promise<AgentContext> {
   const persona = buildPersonaPrompt();
   const userQuery = getLatestUserMessage(sessionId);
   const activeTurn = buildActiveTurnBlock(sessionId);
-  const memory = buildMemoryBlock(sessionId, userQuery ?? undefined);
+  const memory = await buildMemoryBlock(sessionId, userQuery ?? undefined, abortSignal);
   const skills = buildSkillContextBlock();
   const messages = buildSessionMessages(sessionId);
   const runtimeSettings = getRuntimeSettings();
