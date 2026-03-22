@@ -11,7 +11,7 @@ Current conventions:
 - `description`: short routing hint for the model and desktop catalog
 - `status`: `available` or `planned`
 - `mode`: currently `instructional`
-- `allowed-tools`: native Aliceloop tools or planned adapter tools
+- `allowed-tools`: canonical tool ids such as `bash`, `read`, `web_fetch`, or adapter ids like `browser_navigate`
 - `source-url`: optional provenance link
 
 These files are loaded into:

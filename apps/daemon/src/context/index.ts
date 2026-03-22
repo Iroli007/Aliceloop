@@ -21,7 +21,7 @@ export interface SafetyConfig {
 }
 
 export interface AgentContext {
-  systemPrompt: string;
+  systemPrompt: string | Array<{ role: "system"; content: string; experimental_providerMetadata?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }>;
   messages: ModelMessage[];
   tools: ToolSet;
   safetyConfig: SafetyConfig;
@@ -78,7 +78,23 @@ export function loadContext(
   const activeSkills = listActiveSkillDefinitions();
   const tools = buildToolSet(sandbox, activeSkills);
 
-  const systemPrompt = [persona, activeTurn, memory, skills].filter(Boolean).join("\n\n");
+  const dynamicBlocks = [activeTurn, memory, skills].filter(Boolean);
+
+  let systemPrompt: AgentContext["systemPrompt"];
+  if (Array.isArray(persona)) {
+    // persona is already system messages with cache control
+    systemPrompt = [...persona];
+    if (dynamicBlocks.length > 0) {
+      const lastMessage = systemPrompt[systemPrompt.length - 1];
+      systemPrompt[systemPrompt.length - 1] = {
+        ...lastMessage,
+        content: [lastMessage.content, ...dynamicBlocks].join("\n\n")
+      };
+    }
+  } else {
+    // fallback: persona is a string
+    systemPrompt = [persona, ...dynamicBlocks].filter(Boolean).join("\n\n");
+  }
 
   return {
     systemPrompt,

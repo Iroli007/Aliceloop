@@ -95,31 +95,50 @@ function buildUserBlock(): string | null {
 }
 
 /**
- * Build the full persona prompt by concatenating all layers:
- * IDENTITY → SOUL → TOOLS → HEARTBEAT → USER → MEMORY → Daily Logs
+ * Build the full persona prompt as system messages with cache control.
+ * Static parts (IDENTITY, SOUL, TOOLS, HEARTBEAT) are marked for caching.
+ * Dynamic parts (USER, MEMORY, Daily Logs) are not cached.
  */
-export function buildPersonaPrompt(): string {
-  const blocks: string[] = [
+export function buildPersonaPrompt(): Array<{ role: "system"; content: string; experimental_providerMetadata?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> {
+  const staticContent = [
     readIdentity(),
     readSoul(),
     readTools(),
     readHeartbeat(),
-    // HUMOR 不默认加载，需要时通过 buildPersonaPromptWithHumor() 加载
+  ].filter(Boolean).join("\n\n");
+
+  const messages: Array<{ role: "system"; content: string; experimental_providerMetadata?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> = [
+    {
+      role: "system",
+      content: staticContent,
+      experimental_providerMetadata: {
+        anthropic: { cacheControl: { type: "ephemeral" } }
+      }
+    }
   ];
 
+  const dynamicBlocks: string[] = [];
   const userBlock = buildUserBlock();
-  if (userBlock) blocks.push(userBlock);
+  if (userBlock) dynamicBlocks.push(userBlock);
 
   const memoryBlock = readMemoryMd();
-  if (memoryBlock) blocks.push(memoryBlock);
+  if (memoryBlock) dynamicBlocks.push(memoryBlock);
 
   const dailyLogs = readDailyMemoryLogs();
-  if (dailyLogs) blocks.push(dailyLogs);
+  if (dailyLogs) dynamicBlocks.push(dailyLogs);
 
-  return blocks.filter(Boolean).join("\n\n");
+  if (dynamicBlocks.length > 0) {
+    messages.push({
+      role: "system",
+      content: dynamicBlocks.join("\n\n")
+    });
+  }
+
+  return messages;
 }
 
 /** @deprecated Use buildPersonaPrompt() instead */
 export function buildIdentityPrompt(): string {
-  return buildPersonaPrompt();
+  const messages = buildPersonaPrompt();
+  return messages.map(m => m.content).join("\n\n");
 }

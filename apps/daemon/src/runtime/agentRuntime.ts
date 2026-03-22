@@ -359,20 +359,25 @@ async function consumeTextStream(
       content: text,
       attachmentIds: [],
     });
-
     assistantMessageId = messageResult.message.id;
     for (const event of messageResult.events) {
       publishSessionEvent(event);
     }
   }
 
-  if (!text.trim()) {
-    throw new Error(`${run.provider.label} returned empty content`);
+  // Log cache statistics if available
+  const metadata = await stream.experimental_providerMetadata;
+  if (metadata?.anthropic) {
+    const { cacheCreationInputTokens, cacheReadInputTokens } = metadata.anthropic;
+    if (cacheCreationInputTokens || cacheReadInputTokens) {
+      console.log(`[Cache] write=${cacheCreationInputTokens ?? 0} read=${cacheReadInputTokens ?? 0}`);
+    }
   }
 
   return text;
 }
 
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // schedulePostProcessing — fire-and-forget, never blocks the main turn
 // ---------------------------------------------------------------------------

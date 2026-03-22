@@ -39,7 +39,18 @@ export function buildToolSet(
   activeSkills: SkillDefinition[],
 ): ToolSet {
   // Layer 1: always load the 6 base sandbox tools
-  const tools: ToolSet = { ...createSandboxTools(sandbox) };
+  const baseTools = createSandboxTools(sandbox);
+  const tools: ToolSet = {};
+
+  // Mark base tools for caching
+  for (const [name, toolDef] of Object.entries(baseTools)) {
+    tools[name] = {
+      ...toolDef,
+      experimental_providerMetadata: {
+        anthropic: { cacheControl: { type: "ephemeral" } }
+      }
+    };
+  }
 
   // Layer 2: collect extra tool names requested by active skills
   const requested = collectRequestedSkillTools(activeSkills);
@@ -47,7 +58,7 @@ export function buildToolSet(
   // Fail fast before attaching runtime adapters to a live agent context.
   assertResolvableSkillTools(activeSkills);
 
-  // Layer 3: resolve and attach on-demand tools
+  // Layer 3: resolve and attach on-demand tools (not cached)
   Object.assign(tools, resolveSkillTools(requested));
 
   return tools;
