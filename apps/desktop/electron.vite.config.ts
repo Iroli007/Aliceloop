@@ -6,6 +6,9 @@ export default defineConfig({
   main: {
     build: {
       outDir: "dist/main",
+      rollupOptions: {
+        external: ["playwright-core"],
+      },
     },
   },
   preload: {

@@ -40,6 +40,11 @@ Examples:
 
 `web_search` is active and returns compact result lists that can be followed up with `web_fetch`.
 
+Runtime behavior:
+
+- Desktop relay available: open a temporary visible Chrome tab, load the search results page, extract ranked results, then close the tab
+- No relay available: use the configured HTTP search endpoint directly
+
 Current limitations:
 
 - search quality depends on the configured endpoint and may be lighter than a full search API

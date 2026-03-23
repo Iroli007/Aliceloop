@@ -4,7 +4,6 @@ import type {
   CreateMemoryInput,
   Memory,
   MemoryConfig,
-  MemoryMetadata,
   MemoryNote,
   MemoryStats,
   MemoryWithScore,
@@ -18,6 +17,13 @@ import {
   hasEmbeddingProvider,
   serializeEmbedding,
 } from "./embeddingService";
+import {
+  cacheQueryEmbedding,
+  getCachedQueryEmbedding,
+  getEmbeddingCircuitState,
+  recordEmbeddingFailure,
+  recordEmbeddingSuccess,
+} from "./embeddingRuntime";
 import { getMemoryConfig } from "./memoryConfig";
 import { rankBySimilarity } from "./vectorSearch";
 import { nowMs, roundMs } from "../../runtime/perfTrace";
@@ -52,6 +58,7 @@ export type MemorySearchMode = "semantic" | "lexical";
 export const MEMORY_RETRIEVAL_TIMEOUT_REASON = "memory_retrieval_timeout";
 export type MemorySearchFallbackReason =
   | "embedding_provider_unavailable"
+  | "embedding_circuit_open"
   | "embedding_generation_failed"
   | "embedding_timeout"
   | "embedding_index_missing"
@@ -723,7 +730,7 @@ export async function searchMemories(
   threshold: number,
   db: Database.Database = getDatabase(),
   abortSignal?: AbortSignal,
-) {
+): Promise<MemorySearchResult> {
   const startedAt = nowMs();
   const trimmedQuery = queryText.trim();
   if (!trimmedQuery) {
@@ -754,38 +761,69 @@ export async function searchMemories(
     };
   }
 
+  const cachedEmbedding = getCachedQueryEmbedding(trimmedQuery, config.embeddingModel, config.embeddingDimension);
+  const circuitState = getEmbeddingCircuitState();
+
   let queryEmbedding: Float32Array;
-  const embeddingStartedAt = nowMs();
-  try {
-    queryEmbedding = await generateEmbedding(trimmedQuery, config.embeddingModel, {
-      abortSignal,
-      dimension: config.embeddingDimension,
-    });
-  } catch (error) {
-    if (abortSignal?.aborted && abortSignal.reason !== MEMORY_RETRIEVAL_TIMEOUT_REASON) {
-      throw error;
-    }
-
-    const fallbackReason: MemorySearchFallbackReason =
-      abortSignal?.reason === MEMORY_RETRIEVAL_TIMEOUT_REASON
-        ? "embedding_timeout"
-        : "embedding_generation_failed";
-
-    console.warn("[memory] Falling back to lexical memory search", error);
+  let embeddingMs = 0;
+  let embeddingCacheHit = 0;
+  if (cachedEmbedding) {
+    queryEmbedding = cachedEmbedding;
+    embeddingCacheHit = 1;
+  } else if (circuitState.open) {
     const lexicalStartedAt = nowMs();
     const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
     return {
       memories,
       mode: "lexical" as const,
-      fallbackReason,
+      fallbackReason: "embedding_circuit_open" as const,
       timings: {
-        embeddingMs: roundMs(nowMs() - embeddingStartedAt),
+        embeddingCacheHit,
+        circuitOpen: 1,
+        circuitCooldownRemainingMs: roundMs(circuitState.cooldownRemainingMs),
+        consecutiveTimeouts: circuitState.consecutiveTimeouts,
+        consecutiveFailures: circuitState.consecutiveFailures,
         lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
         totalMs: roundMs(nowMs() - startedAt),
       },
     };
+  } else {
+    const embeddingStartedAt = nowMs();
+    try {
+      queryEmbedding = await generateEmbedding(trimmedQuery, config.embeddingModel, {
+        abortSignal,
+        dimension: config.embeddingDimension,
+      });
+      embeddingMs = roundMs(nowMs() - embeddingStartedAt);
+      cacheQueryEmbedding(trimmedQuery, config.embeddingModel, config.embeddingDimension, queryEmbedding);
+      recordEmbeddingSuccess();
+    } catch (error) {
+      if (abortSignal?.aborted && abortSignal.reason !== MEMORY_RETRIEVAL_TIMEOUT_REASON) {
+        throw error;
+      }
+
+      const fallbackReason: MemorySearchFallbackReason =
+        abortSignal?.reason === MEMORY_RETRIEVAL_TIMEOUT_REASON
+          ? "embedding_timeout"
+          : "embedding_generation_failed";
+
+      recordEmbeddingFailure(fallbackReason === "embedding_timeout" ? "timeout" : "error");
+      console.warn("[memory] Falling back to lexical memory search", error);
+      const lexicalStartedAt = nowMs();
+      const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+      return {
+        memories,
+        mode: "lexical" as const,
+        fallbackReason,
+        timings: {
+          embeddingCacheHit,
+          embeddingMs: roundMs(nowMs() - embeddingStartedAt),
+          lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
+          totalMs: roundMs(nowMs() - startedAt),
+        },
+      };
+    }
   }
-  const embeddingMs = roundMs(nowMs() - embeddingStartedAt);
 
   const embeddingRowsStartedAt = nowMs();
   const rows = db
@@ -811,6 +849,7 @@ export async function searchMemories(
       mode: "lexical" as const,
       fallbackReason: "embedding_index_missing" as const,
       timings: {
+        embeddingCacheHit,
         embeddingMs,
         embeddingRowsMs,
         lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
@@ -839,6 +878,7 @@ export async function searchMemories(
       mode: "lexical" as const,
       fallbackReason: null,
       timings: {
+        embeddingCacheHit,
         embeddingMs,
         embeddingRowsMs,
         vectorRankMs,
@@ -869,6 +909,7 @@ export async function searchMemories(
     mode: "semantic" as const,
     fallbackReason: null,
     timings: {
+      embeddingCacheHit,
       embeddingMs,
       embeddingRowsMs,
       vectorRankMs,
@@ -938,24 +979,6 @@ export function getMemoryStats(db: Database.Database = getDatabase()): MemorySta
 export function getMemoryById(memoryId: string, db: Database.Database = getDatabase()) {
   const row = getMemoryRowById(memoryId, db);
   return row ? mapMemoryRow(row) : null;
-}
-
-export function getMemoryMetadata(memoryId: string, db: Database.Database = getDatabase()) {
-  const row = db
-    .prepare(
-      `
-        SELECT
-          memory_id AS memoryId,
-          embedding_model AS embeddingModel,
-          embedding_dimension AS embeddingDimension,
-          created_at AS createdAt
-        FROM memory_metadata
-        WHERE memory_id = ?
-      `,
-    )
-    .get(memoryId) as MemoryMetadata | undefined;
-
-  return row ?? null;
 }
 
 export function findMemoryByExactContent(content: string, db: Database.Database = getDatabase()) {

@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   type Attachment,
+  type DeviceCapabilities,
   type DevicePresence,
   type DeviceStatus,
   type DeviceType,
@@ -93,6 +94,7 @@ interface DevicePresenceRow {
   label: string;
   status: DeviceStatus;
   lastSeenAt: string;
+  capabilitiesJson: string;
 }
 
 interface JobRunRow {
@@ -148,6 +150,7 @@ interface HeartbeatInput {
   deviceType: DeviceType;
   label: string;
   sessionId: string;
+  capabilities?: DeviceCapabilities;
 }
 
 interface UpsertJobInput {
@@ -288,6 +291,10 @@ function listAttachments(sessionId: string): Attachment[] {
   return rows.map(toAttachment);
 }
 
+export function getSessionAttachment(sessionId: string, attachmentId: string): Attachment | null {
+  return listAttachments(sessionId).find((attachment) => attachment.id === attachmentId) ?? null;
+}
+
 function listMessageReactions(sessionId: string, messageId: string): SessionMessageReaction[] {
   const db = getDatabase();
   const rows = db
@@ -405,7 +412,8 @@ function listDevicesRaw(): DevicePresenceRow[] {
           device_type AS deviceType,
           label,
           status,
-          last_seen_at AS lastSeenAt
+          last_seen_at AS lastSeenAt,
+          capabilities_json AS capabilitiesJson
         FROM device_presence
         ORDER BY last_seen_at DESC
       `,
@@ -413,16 +421,50 @@ function listDevicesRaw(): DevicePresenceRow[] {
     .all() as DevicePresenceRow[];
 }
 
+function parseDeviceCapabilities(raw: string | null | undefined): DeviceCapabilities | undefined {
+  if (!raw?.trim()) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as DeviceCapabilities;
+    if (!parsed || typeof parsed !== "object") {
+      return undefined;
+    }
+
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeDeviceStatus(row: DevicePresenceRow, now = Date.now()): DevicePresence {
   const isFresh = now - new Date(row.lastSeenAt).getTime() <= runtimeHeartbeatWindowMs;
   return {
-    ...row,
+    deviceId: row.deviceId,
+    deviceType: row.deviceType,
+    label: row.label,
+    lastSeenAt: row.lastSeenAt,
+    capabilities: parseDeviceCapabilities(row.capabilitiesJson),
     status: isFresh ? "online" : "offline",
   };
 }
 
 function listDevices(now = Date.now()): DevicePresence[] {
   return listDevicesRaw().map((row) => normalizeDeviceStatus(row, now));
+}
+
+export function getHealthyBrowserRelayDevice() {
+  return listDevices().find((device) => {
+    const relay = device.capabilities?.browserRelay;
+    return (
+      device.deviceType === "desktop" &&
+      device.status === "online" &&
+      relay?.enabled === true &&
+      relay.backend === "desktop_chrome" &&
+      relay.healthy === true
+    );
+  }) ?? null;
 }
 
 function buildRuntimePresence(devices: DevicePresence[]): RuntimePresence {
@@ -1593,17 +1635,24 @@ export function heartbeatDevice(input: HeartbeatInput): {
     db.prepare(
       `
         INSERT INTO device_presence (
-          device_id, device_type, label, status, last_seen_at
+          device_id, device_type, label, status, last_seen_at, capabilities_json
         ) VALUES (
-          ?, ?, ?, 'online', ?
+          ?, ?, ?, 'online', ?, ?
         )
         ON CONFLICT(device_id) DO UPDATE SET
           device_type = excluded.device_type,
           label = excluded.label,
           status = 'online',
-          last_seen_at = excluded.last_seen_at
+          last_seen_at = excluded.last_seen_at,
+          capabilities_json = excluded.capabilities_json
       `,
-    ).run(input.deviceId, input.deviceType, input.label, now);
+    ).run(
+      input.deviceId,
+      input.deviceType,
+      input.label,
+      now,
+      JSON.stringify(input.capabilities ?? {}),
+    );
 
     const devices = listDevices(new Date(now).getTime());
     const runtimePresence = buildRuntimePresence(devices);

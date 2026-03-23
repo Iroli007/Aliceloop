@@ -236,12 +236,26 @@ export interface SessionEvent<TPayload = Record<string, unknown>> {
   createdAt: string;
 }
 
+export interface BrowserRelayCapability {
+  enabled: boolean;
+  backend: "desktop_chrome";
+  baseUrl: string;
+  token: string;
+  visible: true;
+  healthy: boolean;
+}
+
+export interface DeviceCapabilities {
+  browserRelay?: BrowserRelayCapability;
+}
+
 export interface DevicePresence {
   deviceId: string;
   deviceType: DeviceType;
   label: string;
   status: DeviceStatus;
   lastSeenAt: string;
+  capabilities?: DeviceCapabilities;
 }
 
 export interface RuntimePresence {

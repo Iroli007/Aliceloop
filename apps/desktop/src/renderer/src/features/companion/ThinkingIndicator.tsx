@@ -16,8 +16,11 @@ const toolActivityLabelMap: Record<string, string> = {
 };
 
 function toThinkingActivity(step: string) {
-  const toolName = step.split("·").pop()?.trim() ?? step.trim();
-  return toolActivityLabelMap[toolName] ?? `${toolName.replace(/[\s-]+/g, "_")}ing`;
+  const parts = step.split("·").map((part) => part.trim()).filter(Boolean);
+  const toolName = parts.length >= 2 ? parts[1] : parts[0] ?? step.trim();
+  const backend = parts.length >= 3 ? parts[2] : null;
+  const activity = toolActivityLabelMap[toolName] ?? `${toolName.replace(/[\s-]+/g, "_")}ing`;
+  return backend ? `${activity} · ${backend}` : activity;
 }
 
 export function ThinkingIndicator({ thinkingSteps = [] }: ThinkingIndicatorProps) {

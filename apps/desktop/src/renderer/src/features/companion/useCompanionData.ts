@@ -43,6 +43,7 @@ export interface CompanionState {
 interface ActiveToolCall {
   toolCallId: string;
   toolName: string;
+  backend?: string | null;
 }
 
 function getStableDeviceId(storageKey: string, prefix: string) {
@@ -94,8 +95,8 @@ function upsertActiveToolCall(toolCalls: ActiveToolCall[], nextCall: ActiveToolC
   return next;
 }
 
-function formatThinkingStep(toolName: string) {
-  return `Thinking · ${toolName}`;
+function formatThinkingStep(toolName: string, backend?: string | null) {
+  return backend ? `Thinking · ${toolName} · ${backend}` : `Thinking · ${toolName}`;
 }
 
 function isProviderCompletionActive(job: JobRunDetail | null) {
@@ -266,13 +267,14 @@ export function useCompanionData(): CompanionState {
         lastEventSeqRef.current = Math.max(lastEventSeqRef.current, sessionEvent.seq);
 
         if (sessionEvent.type === "tool.call.started" || sessionEvent.type === "tool.call.completed") {
-          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string };
+          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string; backend?: string };
           if (payload.toolCallId && payload.toolName) {
             const toolCallId = payload.toolCallId;
             const toolName = payload.toolName;
             setActiveToolCalls((current) => upsertActiveToolCall(current, {
               toolCallId,
               toolName,
+              backend: payload.backend ?? null,
             }));
           }
         } else if (sessionEvent.type === "job.updated") {
@@ -314,6 +316,7 @@ export function useCompanionData(): CompanionState {
 
     const heartbeat = async () => {
       try {
+        const meta = await bridge.getAppMeta();
         const response = await fetch(`${daemonBaseUrl}/api/runtime/presence/heartbeat`, {
           method: "POST",
           headers: {
@@ -324,6 +327,7 @@ export function useCompanionData(): CompanionState {
             deviceType: "mobile",
             label: "Aliceloop Companion",
             sessionId: primarySessionId,
+            capabilities: meta.desktopCapabilities,
           }),
         });
 
@@ -354,7 +358,7 @@ export function useCompanionData(): CompanionState {
     return () => {
       window.clearInterval(timer);
     };
-  }, [daemonBaseUrl]);
+  }, [bridge, daemonBaseUrl]);
 
   async function sendMessage(input: { content: string; attachmentIds: string[] }): Promise<MutationResult> {
     if (!daemonBaseUrl) {
@@ -492,7 +496,7 @@ export function useCompanionData(): CompanionState {
 
   const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
   const isResponding = isProviderCompletionActive(latestJob);
-  const thinkingSteps = activeToolCalls.map((toolCall) => formatThinkingStep(toolCall.toolName));
+  const thinkingSteps = activeToolCalls.map((toolCall) => formatThinkingStep(toolCall.toolName, toolCall.backend));
 
   useEffect(() => {
     if (!isResponding) {

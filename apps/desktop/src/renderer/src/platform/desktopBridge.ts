@@ -1,7 +1,12 @@
+import type { BrowserRelayCapability } from "@aliceloop/runtime-core";
+
 type DesktopMeta = {
   daemonBaseUrl: string;
   name: string;
   version: string;
+  desktopCapabilities?: {
+    browserRelay?: BrowserRelayCapability;
+  };
 };
 
 type RuntimePing = {

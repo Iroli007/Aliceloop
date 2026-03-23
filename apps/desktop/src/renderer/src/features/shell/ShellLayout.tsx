@@ -1,5 +1,5 @@
 import type { Attachment, SandboxPermissionProfile, ToolApproval } from "@aliceloop/runtime-core";
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
 import { useShellConversation } from "./useShellConversation";
@@ -163,6 +163,14 @@ function getAttachmentLabel(attachments: Attachment[]): string | null {
   return parts.join(" · ");
 }
 
+function getAttachmentContentUrl(baseUrl: string | null, sessionId: string, attachment: Attachment): string | null {
+  if (!baseUrl) {
+    return null;
+  }
+
+  return `${baseUrl}/api/session/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachment.id)}/content`;
+}
+
 function groupThreadsByDate(threads: ReturnType<typeof useShellConversation>["threads"]): ThreadGroup[] {
   const groups: ThreadGroup[] = [];
 
@@ -233,6 +241,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [permissionDropdownOpen, setPermissionDropdownOpen] = useState(false);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const approvalDockRef = useRef<HTMLDivElement | null>(null);
   const [approvalAttachments, setApprovalAttachments] = useState<Attachment[]>([]);
   const motionTimerRef = useRef<number | null>(null);
@@ -280,6 +289,21 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!previewImage) {
+      return;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setPreviewImage(null);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewImage]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -726,6 +750,11 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   async function handleComposerFileChange(event: ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     const files = Array.from(input.files ?? []);
+    await uploadComposerFiles(files);
+    input.value = "";
+  }
+
+  async function uploadComposerFiles(files: File[]) {
     if (files.length === 0) {
       return;
     }
@@ -747,9 +776,26 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
     if (uploaded.length > 0) {
       setQueuedAttachments((current) => mergeAttachments(current, uploaded));
+      const imageCount = uploaded.filter((attachment) => isImageMimeType(attachment.mimeType)).length;
+      if (imageCount > 0) {
+        setComposerNotice(`已添加 ${imageCount} 张图片，可以直接发送给 AI。`);
+      }
+    }
+  }
+
+  async function handleComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const items = Array.from(event.clipboardData?.items ?? []);
+    const imageFiles = items
+      .filter((item) => item.kind === "file" && isImageMimeType(item.type))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+
+    if (imageFiles.length === 0) {
+      return;
     }
 
-    input.value = "";
+    event.preventDefault();
+    await uploadComposerFiles(imageFiles);
   }
 
   async function openComposerFilePicker() {
@@ -985,17 +1031,56 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     key={message.id}
                     className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
                   >
-                    {message.attachments.length > 0 ? (
-                      <div className="workspace__message-label">
-                        {getAttachmentLabel(message.attachments)}
-                      </div>
-                    ) : null}
                     <div className="workspace__message-body">
                       <MessageContent
                         content={message.content}
                         renderMarkdown={message.role === "assistant" || message.role === "system"}
                       />
                     </div>
+                    {message.attachments.length > 0 ? (
+                      <>
+                        {message.attachments.some((attachment) => isImageMimeType(attachment.mimeType)) ? (
+                          <div className="workspace__message-images">
+                            {message.attachments
+                              .filter((attachment) => isImageMimeType(attachment.mimeType))
+                              .map((attachment) => {
+                                const imageUrl = getAttachmentContentUrl(conversation.daemonBaseUrl, conversation.sessionId, attachment);
+                                if (!imageUrl) {
+                                  return null;
+                                }
+
+                                return (
+                                  <button
+                                    key={attachment.id}
+                                    type="button"
+                                    className="workspace__message-image-button"
+                                    onClick={() => setPreviewImage({ src: imageUrl, alt: attachment.fileName })}
+                                    aria-label={`查看大图：${attachment.fileName}`}
+                                  >
+                                    <img
+                                      className="workspace__message-image"
+                                      src={imageUrl}
+                                      alt={attachment.fileName}
+                                      loading="lazy"
+                                    />
+                                  </button>
+                                );
+                              })}
+                          </div>
+                        ) : null}
+                        {message.attachments.some((attachment) => !isImageMimeType(attachment.mimeType)) ? (
+                          <div className="workspace__message-attachments">
+                            {message.attachments
+                              .filter((attachment) => !isImageMimeType(attachment.mimeType))
+                              .map((attachment) => (
+                                <span key={attachment.id} className="workspace__attachment-chip">
+                                  {attachment.fileName}
+                                </span>
+                              ))}
+                          </div>
+                        ) : null}
+                      </>
+                    ) : null}
                     <button
                       type="button"
                       className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
@@ -1079,9 +1164,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               className="composer__input composer__input--field"
               value={composerDraft}
               onChange={(event) => setComposerDraft(event.target.value)}
+              onPaste={(event) => { void handleComposerPaste(event); }}
               onKeyDown={handleComposerKeyDown}
-              placeholder="输入消息..."
-              disabled={conversation.pending}
+              placeholder="输入消息，或直接粘贴图片..."
+              disabled={conversation.pending || conversation.pendingUpload}
             />
             <div className="composer__toolbar">
               <div className="composer__add-file">
@@ -1421,6 +1507,23 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               </footer>
             </div>
           </section>
+        </div>
+      ) : null}
+
+      {previewImage ? (
+        <div className="image-preview-overlay" onClick={() => setPreviewImage(null)}>
+          <div className="image-preview-modal" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="image-preview-close"
+              onClick={() => setPreviewImage(null)}
+              aria-label="关闭图片预览"
+            >
+              ×
+            </button>
+            <img className="image-preview-image" src={previewImage.src} alt={previewImage.alt} />
+            <div className="image-preview-caption">{previewImage.alt}</div>
+          </div>
         </div>
       ) : null}
     </>

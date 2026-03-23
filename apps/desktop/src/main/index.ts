@@ -4,11 +4,14 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { ChromeRelayHttpServer } from "./chromeRelayHttpServer";
+import { ChromeRelayService, createDefaultChromeRelayServiceOptions } from "./chromeRelayService";
 
 const daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? "http://127.0.0.1:3030";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL;
+let chromeRelayServer: ChromeRelayHttpServer | null = null;
 
 type DesktopPickedFile = {
   kind: "file";
@@ -158,6 +161,7 @@ ipcMain.handle("app:get-meta", () => ({
   daemonBaseUrl,
   name: app.getName(),
   version: app.getVersion(),
+  desktopCapabilities: chromeRelayServer?.getMeta() ?? undefined,
 }));
 
 ipcMain.handle("runtime:ping", async () => {
@@ -305,6 +309,11 @@ ipcMain.handle("window:open-settings", () => {
 });
 
 app.whenReady().then(() => {
+  const chromeRelayService = new ChromeRelayService(createDefaultChromeRelayServiceOptions(app.getPath("userData")));
+  chromeRelayServer = new ChromeRelayHttpServer(chromeRelayService);
+  void chromeRelayServer.start().catch((error) => {
+    console.error("[desktop] Failed to start Chrome relay server", error);
+  });
   createWindow();
 
   app.on("activate", () => {
@@ -318,4 +327,8 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("before-quit", () => {
+  void chromeRelayServer?.stop().catch(() => undefined);
 });

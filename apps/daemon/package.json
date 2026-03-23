@@ -12,6 +12,7 @@
     "dev": "tsx watch src/index.ts",
     "smoke:all": "npm run smoke:queue && npm run smoke:sandbox && npm run smoke:skills && npm run smoke:cli && npm run smoke:tasks && npm run smoke:tasks:api && npm run smoke:memory",
     "smoke:cli": "tsx scripts/cliSmoke.ts",
+    "smoke:desktop-relay": "tsx scripts/desktopChromeRelaySmoke.ts",
     "smoke:memory": "tsx scripts/memorySystemSmoke.ts",
     "smoke:queue": "tsx scripts/sessionRunQueueSmoke.ts",
     "smoke:sandbox": "tsx scripts/sandboxSmoke.ts",

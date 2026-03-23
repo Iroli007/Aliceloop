@@ -16,7 +16,8 @@ const projectRoot = resolve(currentDir, "../../../../../");
 const defaultAllowedReadRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedWriteRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedCwdRoots = [projectRoot, getDataDir(), getUploadsDir()];
-const defaultAllowedCommands = ["cat", "find", "git", "head", "ls", "node", "npm", "pwd", "rg", "rm", "rmdir", "sed", "tsx", "wc"];
+const defaultAllowedCommands = ["cat", "find", "git", "head", "ls", "node", "npm", "pwd", "rg", "rm", "rmdir", "screencapture", "sed", "sips", "tsx", "wc"];
+const safeAbsoluteCommandDirs = new Set(["/bin", "/usr/bin", "/usr/sbin"]);
 const developmentFindDisallowedArgs = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 const developmentNpmAllowedSubcommands = new Set([
   "help",
@@ -220,7 +221,11 @@ export function assertCommand(policy: SandboxToolPolicy, command: string) {
     return;
   }
 
-  if (command.includes("/") || !policy.allowedCommands.includes(command)) {
+  const normalizedCommand = command.includes("/")
+    ? (safeAbsoluteCommandDirs.has(dirname(command)) ? basename(command) : command)
+    : command;
+
+  if (normalizedCommand.includes("/") || !policy.allowedCommands.includes(normalizedCommand)) {
     throw new SandboxViolationError(
       `bash denied for command outside allowlist: ${command}; this action would require elevated access in development mode`,
     );

@@ -2,6 +2,7 @@ import type { ModelMessage, ToolSet } from "ai";
 import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
 import { buildFastMemoryBlock, startAsyncSemanticSearch, type AsyncSemanticSearchHandle } from "./memory/memoryContext";
+import { planMemoryRoute, type MemoryRoutePlan } from "./memory/memoryRouter";
 import { buildActiveTurnBlock, buildSessionMessages, getLatestUserMessage } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
 import { buildSkillContextBlock, listActiveSkillDefinitions } from "./skills/skillLoader";
@@ -27,8 +28,8 @@ export interface AgentContext {
   messages: ModelMessage[];
   tools: ToolSet;
   safetyConfig: SafetyConfig;
-  runtimeNotices: string[];
   timings: Record<string, number | string | null>;
+  memoryRoute: MemoryRoutePlan;
   /**
    * Async handle for semantic (vector) memory search.
    * Fire-and-forget: starts immediately and resolves in the background.
@@ -57,6 +58,14 @@ export async function loadContext(
   const userQuery = getLatestUserMessage(sessionId);
   timings.latestUserMs = roundMs(nowMs() - latestUserStartedAt);
 
+  const routeStartedAt = nowMs();
+  const memoryRoute = planMemoryRoute(userQuery);
+  timings.memoryRouteMs = roundMs(nowMs() - routeStartedAt);
+  timings.memoryRoute = JSON.stringify(memoryRoute.timings);
+  timings.memoryRouteReasons = memoryRoute.reasons.join(",");
+  timings.sessionArchiveMode = memoryRoute.sessionArchiveMode;
+  timings.atomicRecallMode = memoryRoute.atomicRecallMode;
+
   const projectBindingStartedAt = nowMs();
   const projectBinding = getSessionProjectBinding(sessionId);
   timings.projectBindingMs = roundMs(nowMs() - projectBindingStartedAt);
@@ -66,19 +75,21 @@ export async function loadContext(
   timings.activeTurnMs = roundMs(nowMs() - activeTurnStartedAt);
 
   const historyStartedAt = nowMs();
-  const history = buildHistoricalContextBlock(sessionId, userQuery ?? undefined);
+  const history = memoryRoute.useSessionArchive
+    ? buildHistoricalContextBlock(sessionId, memoryRoute.query ?? undefined)
+    : { content: "", timings: { skipReason: "router_skipped", totalMs: 0 } };
   timings.historyMs = roundMs(nowMs() - historyStartedAt);
   timings.history = JSON.stringify(history.timings);
 
-  // Fast memory block: attention + summary + notes only (no vector search)
-  // Vector search is started as fire-and-forget and injected async as runtime notice
+  // Fast memory block: attention + high-level summary only.
+  // Semantic recall is started separately as fire-and-forget so first token is not blocked.
   const memoryStartedAt = nowMs();
   const memory = buildFastMemoryBlock(sessionId);
   timings.memoryMs = roundMs(nowMs() - memoryStartedAt);
 
   // Start async semantic search (fire-and-forget, won't block first token)
-  const asyncSemanticSearch = userQuery
-    ? startAsyncSemanticSearch(sessionId, userQuery, abortSignal)
+  const asyncSemanticSearch = memoryRoute.atomicRecallMode === "async" && memoryRoute.query
+    ? startAsyncSemanticSearch(sessionId, memoryRoute.query, abortSignal)
     : undefined;
   asyncSemanticSearch?.start();
   timings.asyncSemanticStarted = asyncSemanticSearch ? 1 : 0;
@@ -146,7 +157,7 @@ export async function loadContext(
   timings.activeSkillsMs = roundMs(nowMs() - activeSkillsStartedAt);
 
   const toolsStartedAt = nowMs();
-  const tools = buildToolSet(sandbox, activeSkills);
+  const tools = buildToolSet(sandbox, activeSkills, sessionId);
   timings.toolsMs = roundMs(nowMs() - toolsStartedAt);
 
   const projectContext = projectBinding?.projectPath
@@ -188,6 +199,7 @@ export async function loadContext(
   timings.totalMs = roundMs(Object.values({
     personaMs: timings.personaMs,
     latestUserMs: timings.latestUserMs,
+    memoryRouteMs: timings.memoryRouteMs,
     activeTurnMs: timings.activeTurnMs,
     historyMs: timings.historyMs,
     memoryMs: timings.memoryMs,
@@ -215,8 +227,8 @@ export async function loadContext(
       ...DEFAULT_SAFETY,
       abortSignal,
     },
-    runtimeNotices: memory.runtimeNotices,
     timings,
+    memoryRoute,
     asyncSemanticSearch,
   };
 }

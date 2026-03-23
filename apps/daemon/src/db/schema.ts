@@ -101,7 +101,8 @@ export const schemaStatements = [
       device_type TEXT NOT NULL,
       label TEXT NOT NULL,
       status TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL
+      last_seen_at TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL DEFAULT '{}'
     )
   `,
   `

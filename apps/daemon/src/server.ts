@@ -1,9 +1,11 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
+import { createReadStream, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   primarySessionId,
+  type DeviceCapabilities,
   type ContentBlock,
   type CrossReference,
   type DeviceType,
@@ -81,6 +83,7 @@ import {
   listSessionMessageReactions,
   removeSessionMessageReaction,
   getRuntimePresence,
+  getSessionAttachment,
   getSessionSnapshot,
   heartbeatDevice,
   listSessionThreads,
@@ -128,6 +131,10 @@ import {
 
 interface SessionParams {
   id: string;
+}
+
+interface SessionAttachmentParams extends SessionParams {
+  attachmentId: string;
 }
 
 interface ProjectParams {
@@ -212,6 +219,7 @@ interface HeartbeatBody {
   deviceType: DeviceType;
   label?: string;
   sessionId?: string;
+  capabilities?: DeviceCapabilities;
 }
 
 interface UpdateProviderBody {
@@ -1758,6 +1766,32 @@ export async function createServer() {
     };
   });
 
+  server.get<{ Params: SessionAttachmentParams }>("/api/session/:id/attachments/:attachmentId/content", async (request, reply) => {
+    const attachment = getSessionAttachment(request.params.id, request.params.attachmentId);
+    if (!attachment) {
+      return reply.code(404).send({
+        error: "attachment_not_found",
+      });
+    }
+
+    try {
+      const stats = statSync(attachment.storagePath);
+      if (!stats.isFile()) {
+        return reply.code(400).send({
+          error: "attachment_not_file",
+        });
+      }
+    } catch {
+      return reply.code(404).send({
+        error: "attachment_missing",
+      });
+    }
+
+    reply.type(attachment.mimeType);
+    reply.header("Content-Disposition", `inline; filename="${encodeURIComponent(attachment.fileName)}"`);
+    return reply.send(createReadStream(attachment.storagePath));
+  });
+
   server.post<{ Params: SessionParams; Body: CreateFolderAttachmentBody }>("/api/session/:id/attachment-folders", async (request, reply) => {
     const { folderName, files, deviceType } = request.body;
 
@@ -1909,6 +1943,7 @@ export async function createServer() {
       deviceType: request.body.deviceType,
       label,
       sessionId,
+      capabilities: request.body.capabilities,
     });
 
     publishSessionEvent(result.event);

@@ -4,17 +4,14 @@ import { logPerfTrace, nowMs, roundMs } from "../../runtime/perfTrace";
 import { getMemoryConfig } from "./memoryConfig";
 import {
   countSemanticMemoryCandidates,
-  incrementAccessCount,
-  listMemoryNotes,
   MEMORY_RETRIEVAL_TIMEOUT_REASON,
   searchMemories,
   searchMemoriesLexically,
-  searchMemoryNotes,
   type MemorySearchFallbackReason,
   type MemorySearchMode,
 } from "./memoryRepository";
 import { rewriteQuery } from "./queryRewriter";
-import { buildSummaryMemoryBlock, isSummaryMemorySource } from "./summaryMemory";
+import { buildSummaryMemoryBlock } from "./summaryMemory";
 
 export interface AsyncSemanticSearchResult {
   content: string;
@@ -43,7 +40,10 @@ function parsePositiveInt(value: string | undefined, fallback: number) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const SEMANTIC_MEMORY_BUDGET_MS = parsePositiveInt(process.env.ALICELOOP_MEMORY_BUDGET_MS, 500);
+const SEMANTIC_MEMORY_BUDGET_MS = parsePositiveInt(
+  process.env.ALICELOOP_MEMORY_ASYNC_BUDGET_MS ?? process.env.ALICELOOP_MEMORY_BUDGET_MS,
+  1000,
+);
 const MIN_SEMANTIC_MEMORY_CANDIDATES = parsePositiveInt(process.env.ALICELOOP_MIN_SEMANTIC_MEMORY_CANDIDATES, 10);
 const MICRO_TURN_MAX_CHARS = parsePositiveInt(process.env.ALICELOOP_MICRO_TURN_MAX_CHARS, 12);
 const MICRO_TURN_MAX_WORDS = parsePositiveInt(process.env.ALICELOOP_MICRO_TURN_MAX_WORDS, 4);
@@ -51,13 +51,12 @@ const MICRO_TURN_MAX_CHARS_WITH_SPACES = parsePositiveInt(process.env.ALICELOOP_
 
 export interface MemoryBlockResult {
   content: string;
-  runtimeNotices: string[];
   timings: Record<string, number | string | null>;
 }
 
 /**
- * Fast-path memory block: attention + summary + notes only.
- * No vector search — designed for non-blocking first-token delivery.
+ * Fast-path memory block: attention + high-level summary only.
+ * No note scan, no vector search — designed for non-blocking first-token delivery.
  */
 export function buildFastMemoryBlock(sessionId: string): MemoryBlockResult {
   const startedAt = nowMs();
@@ -99,31 +98,14 @@ export function buildFastMemoryBlock(sessionId: string): MemoryBlockResult {
   if (sections.length === 0) {
     return {
       content: "",
-      runtimeNotices: [],
       timings,
     };
   }
 
   return {
     content: `# Context\n\n${sections.join("\n\n")}`,
-    runtimeNotices: [],
     timings,
   };
-}
-
-function buildMemoryFallbackNotice(
-  fallbackReason: "embedding_provider_unavailable" | "embedding_generation_failed" | "embedding_timeout" | "embedding_index_missing",
-) {
-  switch (fallbackReason) {
-    case "embedding_provider_unavailable":
-      return "提醒你一下：向量记忆现在不可用，已经自动降级成关键词记忆检索了。通常是 embedding 网关、API key 或预算没接上。";
-    case "embedding_generation_failed":
-      return "提醒你一下：这轮向量记忆请求失败了，已经自动降级成关键词记忆检索。可能是 embedding 网关临时出错，或者额度不够了。";
-    case "embedding_timeout":
-      return "提醒你一下：这轮向量记忆检索超时了，已经自动降级成关键词记忆检索，先保证回复速度。";
-    case "embedding_index_missing":
-      return "提醒你一下：当前还没有可用的向量记忆索引，这轮先用关键词记忆检索顶上。";
-  }
 }
 
 function createMemoryBudgetSignal(parentSignal?: AbortSignal, budgetMs = SEMANTIC_MEMORY_BUDGET_MS) {
@@ -199,7 +181,7 @@ function resolveSemanticSkipReason(queryText: string, semanticCandidateCount: nu
 /**
  * Fire-and-forget semantic (vector) memory search.
  * Does not block — call start() then await result when ready.
- * Results are suitable for injection as a runtime notice.
+ * Results are consumed during post-processing to enrich high-level summary memory.
  */
 export function startAsyncSemanticSearch(
   sessionId: string,
@@ -208,11 +190,16 @@ export function startAsyncSemanticSearch(
 ): AsyncSemanticSearchHandle {
   const budget = createMemoryBudgetSignal(abortSignal);
   let disposed = false;
+  let scheduledTimer: ReturnType<typeof setTimeout> | null = null;
   let task: Promise<AsyncSemanticSearchResult | null> | null = null;
 
   function dispose() {
     if (disposed) return;
     disposed = true;
+    if (scheduledTimer) {
+      clearTimeout(scheduledTimer);
+      scheduledTimer = null;
+    }
     budget.dispose();
   }
 
@@ -333,7 +320,15 @@ export function startAsyncSemanticSearch(
       return ensureTask();
     },
     start() {
-      void ensureTask();
+      if (scheduledTimer || task) {
+        return;
+      }
+      scheduledTimer = setTimeout(() => {
+        scheduledTimer = null;
+        if (!disposed) {
+          void ensureTask();
+        }
+      }, 0);
     },
     dispose,
   };
@@ -355,185 +350,4 @@ function formatMemoryBlock(memories: MemoryWithScore[]): string {
 
   lines.push("</relevant_memories>");
   return lines.join("\n");
-}
-
-export async function buildMemoryBlock(
-  sessionId: string,
-  userQuery?: string,
-  abortSignal?: AbortSignal,
-): Promise<MemoryBlockResult> {
-  const startedAt = nowMs();
-  const sections: string[] = [];
-  const runtimeNotices: string[] = [];
-  const timings: Record<string, number | string | null> = {};
-
-  const attentionStartedAt = nowMs();
-  const attention = getAttentionState();
-  if (attention.currentLibraryTitle || attention.focusSummary) {
-    const attentionLines = ["## Current Attention"];
-    if (attention.currentLibraryTitle) {
-      attentionLines.push(`- Focused on: ${attention.currentLibraryTitle}`);
-    }
-    if (attention.currentSectionLabel) {
-      attentionLines.push(`- Current section: ${attention.currentSectionLabel}`);
-    }
-    if (attention.focusSummary) {
-      attentionLines.push(`- Summary: ${attention.focusSummary}`);
-    }
-    if (attention.concepts.length > 0) {
-      attentionLines.push(`- Key concepts: ${attention.concepts.join(", ")}`);
-    }
-    sections.push(attentionLines.join("\n"));
-  }
-  timings.attentionMs = roundMs(nowMs() - attentionStartedAt);
-
-  const summaryStartedAt = nowMs();
-  const summary = buildSummaryMemoryBlock(sessionId);
-  if (summary.content) {
-    sections.push(summary.content);
-  }
-  timings.summaryMs = roundMs(nowMs() - summaryStartedAt);
-  timings.summary = JSON.stringify(summary.timings);
-
-  const config = getMemoryConfig();
-  const trimmedQuery = userQuery?.trim();
-  let semanticMemoryCount = 0;
-
-  if (config.enabled && config.autoRetrieval && trimmedQuery) {
-    const semanticCandidateCount = countSemanticMemoryCandidates(config.embeddingDimension);
-    timings.semanticCandidateCount = semanticCandidateCount;
-    const semanticSkipReason = resolveSemanticSkipReason(trimmedQuery, semanticCandidateCount);
-    timings.semanticSkipReason = semanticSkipReason;
-
-    if (semanticSkipReason) {
-      const lexicalStartedAt = nowMs();
-      const memories = searchMemoriesLexically(
-        trimmedQuery,
-        config.maxRetrievalCount,
-        config.similarityThreshold,
-      );
-      timings.semanticSearchMs = roundMs(nowMs() - lexicalStartedAt);
-      timings.semanticMode = "lexical";
-      timings.semanticFallbackReason = semanticSkipReason;
-      timings.semantic = JSON.stringify({
-        lexicalLookupMs: timings.semanticSearchMs,
-        candidateCount: semanticCandidateCount,
-        skipReason: semanticSkipReason,
-        totalMs: timings.semanticSearchMs,
-      });
-
-      if (memories.length > 0) {
-        semanticMemoryCount = memories.length;
-        const memoryLines = [
-          "<relevant_memories>",
-          "以下是与当前请求最相关的长期记忆：",
-          "",
-        ];
-
-        for (const memory of memories) {
-          incrementAccessCount(memory.id);
-          memoryLines.push(`- ${memory.content} (score: ${memory.similarityScore.toFixed(2)})`);
-          if (memory.relatedTopics.length > 0) {
-            memoryLines.push(`  topics: ${memory.relatedTopics.join(", ")}`);
-          }
-        }
-
-        memoryLines.push("</relevant_memories>");
-        sections.push(memoryLines.join("\n"));
-      }
-    } else {
-      const budget = createMemoryBudgetSignal(abortSignal);
-
-      try {
-        const rewriteStartedAt = nowMs();
-        const effectiveQuery = config.queryRewrite
-          ? await rewriteQuery(trimmedQuery, budget.signal)
-          : trimmedQuery;
-        timings.queryRewriteMs = roundMs(nowMs() - rewriteStartedAt);
-
-        const semanticStartedAt = nowMs();
-        const result = await searchMemories(
-          effectiveQuery,
-          config.maxRetrievalCount,
-          config.similarityThreshold,
-          undefined,
-          budget.signal,
-        );
-        timings.semanticSearchMs = roundMs(nowMs() - semanticStartedAt);
-        timings.semanticMode = result.mode;
-        timings.semanticFallbackReason = result.fallbackReason;
-        timings.semantic = JSON.stringify({
-          candidateCount: semanticCandidateCount,
-          ...result.timings,
-        });
-        const memories = result.memories;
-
-        if (result.mode === "lexical" && result.fallbackReason) {
-          runtimeNotices.push(buildMemoryFallbackNotice(result.fallbackReason));
-        }
-
-        if (memories.length > 0) {
-          semanticMemoryCount = memories.length;
-          const memoryLines = [
-            "<relevant_memories>",
-            "以下是与当前请求最相关的长期记忆：",
-            "",
-          ];
-
-          for (const memory of memories) {
-            incrementAccessCount(memory.id);
-            memoryLines.push(`- ${memory.content} (score: ${memory.similarityScore.toFixed(2)})`);
-            if (memory.relatedTopics.length > 0) {
-              memoryLines.push(`  topics: ${memory.relatedTopics.join(", ")}`);
-            }
-          }
-
-          memoryLines.push("</relevant_memories>");
-          sections.push(memoryLines.join("\n"));
-        }
-      } catch (error) {
-        if (abortSignal?.aborted) {
-          throw error;
-        }
-        console.warn(`[memory] Failed to build semantic memory block for session ${sessionId}`, error);
-      } finally {
-        budget.dispose();
-      }
-    }
-  }
-
-  if (semanticMemoryCount === 0) {
-    const notesStartedAt = nowMs();
-    const relevantNotes = trimmedQuery
-      ? searchMemoryNotes(trimmedQuery, 5)
-      : listMemoryNotes(5);
-    const filteredNotes = relevantNotes.filter((note) => !isSummaryMemorySource(note.source));
-
-    if (filteredNotes.length > 0) {
-      const memoryLines = ["## Memory Notes"];
-      for (const note of filteredNotes) {
-        memoryLines.push(`### ${note.title} (${note.kind})`);
-        memoryLines.push(note.content);
-        memoryLines.push("");
-      }
-      sections.push(memoryLines.join("\n"));
-    }
-    timings.notesLookupMs = roundMs(nowMs() - notesStartedAt);
-  }
-
-  timings.totalMs = roundMs(nowMs() - startedAt);
-
-  if (sections.length === 0) {
-    return {
-      content: "",
-      runtimeNotices,
-      timings,
-    };
-  }
-
-  return {
-    content: `# Context\n\n${sections.join("\n\n")}`,
-    runtimeNotices,
-    timings,
-  };
 }

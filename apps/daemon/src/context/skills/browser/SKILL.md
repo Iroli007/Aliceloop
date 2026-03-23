@@ -43,7 +43,12 @@ Examples:
 
 ## Aliceloop status
 
-This skill is active through the local Playwright adapter.
+This skill is active.
+
+Runtime behavior:
+
+- On Aliceloop Desktop with a healthy browser relay, it controls a visible Google Chrome window through the local desktop relay.
+- Outside Desktop, or when no healthy relay is registered, it falls back to the local Playwright adapter.
 
 Available tools:
 
@@ -55,6 +60,6 @@ Available tools:
 
 Current limitations:
 
-- runs a single shared headless Chromium page per live agent context
-- element refs come from `browser_snapshot`, so refresh the snapshot after page-changing actions
-- the local machine still needs Playwright browsers installed; if Chromium is missing, run `npx playwright install chromium`
+- each Aliceloop session binds to one browser tab at a time, so refresh snapshots after page-changing actions
+- desktop relay uses an Aliceloop-managed Chrome profile, not the user's personal Chrome profile
+- Playwright fallback still requires local Playwright browsers; if Chromium is missing, run `npx playwright install chromium`

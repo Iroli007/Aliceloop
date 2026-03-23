@@ -1,0 +1,157 @@
+import type { BrowserRelayCapability } from "@aliceloop/runtime-core";
+import { getHealthyBrowserRelayDevice } from "../../repositories/sessionRepository";
+
+export interface DesktopRelayReadablePayload {
+  url: string;
+  title: string;
+  publishedAt: string | null;
+  modifiedAt: string | null;
+  pageText: string;
+  backend: "desktop_chrome";
+  tabId: string;
+}
+
+export interface DesktopRelaySearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  domain: string;
+}
+
+export interface DesktopRelaySearchPayload {
+  url: string;
+  backend: "desktop_chrome";
+  tabId: string;
+  results: DesktopRelaySearchResult[];
+}
+
+function getHealthyBrowserRelayCapability(): BrowserRelayCapability | null {
+  return getHealthyBrowserRelayDevice()?.capabilities?.browserRelay ?? null;
+}
+
+async function requestRelay<T>(
+  relay: BrowserRelayCapability,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const response = await fetch(`${relay.baseUrl}${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${relay.token}`,
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  const payload = await response.json().catch(() => null) as {
+    error?: unknown;
+    detail?: unknown;
+  } | null;
+
+  if (!response.ok) {
+    const detail = typeof payload?.detail === "string"
+      ? payload.detail
+      : typeof payload?.error === "string"
+        ? payload.error
+        : `Desktop relay request failed (${response.status})`;
+    throw new Error(detail);
+  }
+
+  return payload as T;
+}
+
+async function openRelayTab(relay: BrowserRelayCapability) {
+  const payload = await requestRelay<{ tabId?: unknown }>(relay, "/tabs/open", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  const tabId = typeof payload.tabId === "string" ? payload.tabId : null;
+  if (!tabId) {
+    throw new Error("Desktop relay did not return a tab id.");
+  }
+
+  return tabId;
+}
+
+async function closeRelayTab(relay: BrowserRelayCapability, tabId: string) {
+  await requestRelay(relay, `/tabs/${encodeURIComponent(tabId)}`, {
+    method: "DELETE",
+  }).catch(() => undefined);
+}
+
+export async function withDesktopRelayTab<T>(
+  callback: (
+    relay: BrowserRelayCapability,
+    tabId: string,
+  ) => Promise<T>,
+): Promise<T | null> {
+  const relay = getHealthyBrowserRelayCapability();
+  if (!relay) {
+    return null;
+  }
+
+  const tabId = await openRelayTab(relay);
+  try {
+    return await callback(relay, tabId);
+  } finally {
+    await closeRelayTab(relay, tabId);
+  }
+}
+
+export async function navigateRelayTab(
+  relay: BrowserRelayCapability,
+  tabId: string,
+  url: string,
+  waitUntil: "load" | "domcontentloaded" | "networkidle" = "domcontentloaded",
+) {
+  return requestRelay(relay, `/tabs/${encodeURIComponent(tabId)}/navigate`, {
+    method: "POST",
+    body: JSON.stringify({
+      url,
+      waitUntil,
+    }),
+  });
+}
+
+export async function readRelayReadableContent(
+  relay: BrowserRelayCapability,
+  tabId: string,
+  options?: {
+    maxTextLength?: number;
+    extractMain?: boolean;
+  },
+) {
+  const searchParams = new URLSearchParams();
+  if (typeof options?.maxTextLength === "number") {
+    searchParams.set("maxTextLength", String(options.maxTextLength));
+  }
+  if (typeof options?.extractMain === "boolean") {
+    searchParams.set("extractMain", String(options.extractMain));
+  }
+
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+  return requestRelay<DesktopRelayReadablePayload>(
+    relay,
+    `/tabs/${encodeURIComponent(tabId)}/readable${suffix}`,
+    { method: "GET" },
+  );
+}
+
+export async function readRelaySearchResults(
+  relay: BrowserRelayCapability,
+  tabId: string,
+  maxResults: number,
+) {
+  const searchParams = new URLSearchParams({
+    maxResults: String(maxResults),
+  });
+  return requestRelay<DesktopRelaySearchPayload>(
+    relay,
+    `/tabs/${encodeURIComponent(tabId)}/search-results?${searchParams.toString()}`,
+    { method: "GET" },
+  );
+}
+
+export function hasHealthyDesktopRelay() {
+  return Boolean(getHealthyBrowserRelayCapability());
+}

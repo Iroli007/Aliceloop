@@ -105,6 +105,7 @@ export function useShellData(): ShellState {
 
     const heartbeat = async () => {
       try {
+        const meta = await bridge.getAppMeta();
         await fetch(`${daemonBaseUrl}/api/runtime/presence/heartbeat`, {
           method: "POST",
           headers: {
@@ -114,6 +115,7 @@ export function useShellData(): ShellState {
             deviceId,
             deviceType: "desktop",
             label,
+            capabilities: meta.desktopCapabilities,
           }),
         });
       } catch {

@@ -24,13 +24,6 @@ function resolvePromptRoot() {
 
 const promptRootDir = resolvePromptRoot();
 
-// --- Process-level caches for static .md files ---
-let cachedIdentity: string | null = null;
-let cachedSoul: string | null = null;
-let cachedTools: string | null = null;
-let cachedHeartbeat: string | null = null;
-let cachedHumor: string | null = null;
-
 function readCached(cache: { value: string | null }, filename: string): string {
   if (cache.value) return cache.value;
   cache.value = readFileSync(join(promptRootDir, filename), "utf-8");
@@ -114,10 +107,4 @@ export function buildPersonaPrompt(): Array<{ role: "system"; content: string; p
   }
 
   return messages;
-}
-
-/** @deprecated Use buildPersonaPrompt() instead */
-export function buildIdentityPrompt(): string {
-  const messages = buildPersonaPrompt();
-  return messages.map(m => m.content).join("\n\n");
 }

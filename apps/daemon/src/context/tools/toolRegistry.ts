@@ -37,6 +37,7 @@ export function assertResolvableSkillTools(activeSkills: SkillDefinition[]) {
 export function buildToolSet(
   sandbox: SandboxExecutor,
   activeSkills: SkillDefinition[],
+  sessionId?: string,
 ): ToolSet {
   // Layer 1: always load the 6 base sandbox tools
   const baseTools = createSandboxTools(sandbox);
@@ -49,7 +50,7 @@ export function buildToolSet(
   assertResolvableSkillTools(activeSkills);
 
   // Layer 3: resolve and attach on-demand tools (not cached)
-  Object.assign(tools, resolveSkillTools(requested));
+  Object.assign(tools, resolveSkillTools(requested, { sessionId }));
 
   return tools;
 }

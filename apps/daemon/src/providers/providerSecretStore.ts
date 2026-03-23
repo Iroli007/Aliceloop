@@ -126,7 +126,7 @@ function deleteFallbackApiKey(providerId: ProviderKind) {
 
 export function getProviderApiKey(providerId: ProviderKind) {
   if (process.platform === "darwin") {
-    return readKeychainApiKey(providerId);
+    return readKeychainApiKey(providerId) ?? readFallbackApiKey(providerId);
   }
 
   return readFallbackApiKey(providerId);
@@ -143,7 +143,12 @@ export function setProviderApiKey(providerId: ProviderKind, apiKey: string) {
   }
 
   if (process.platform === "darwin") {
-    writeKeychainApiKey(providerId, normalized);
+    try {
+      writeKeychainApiKey(providerId, normalized);
+      deleteFallbackApiKey(providerId);
+    } catch {
+      writeFallbackApiKey(providerId, normalized);
+    }
     return;
   }
 
@@ -153,6 +158,7 @@ export function setProviderApiKey(providerId: ProviderKind, apiKey: string) {
 export function deleteProviderApiKey(providerId: ProviderKind) {
   if (process.platform === "darwin") {
     deleteKeychainApiKey(providerId);
+    deleteFallbackApiKey(providerId);
     return;
   }
 

@@ -205,6 +205,16 @@ export const previewSessionSnapshot: SessionSnapshot = {
       label: "Aliceloop Desktop",
       status: "online",
       lastSeenAt: "2026-03-17T07:28:00.000Z",
+      capabilities: {
+        browserRelay: {
+          enabled: true,
+          backend: "desktop_chrome",
+          baseUrl: "http://127.0.0.1:39999",
+          token: "preview-browser-relay-token",
+          visible: true,
+          healthy: true,
+        },
+      },
     },
     {
       deviceId: "mobile-preview",

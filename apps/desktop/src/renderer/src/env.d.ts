@@ -1,3 +1,5 @@
+import type { BrowserRelayCapability } from "@aliceloop/runtime-core";
+
 export {};
 
 declare global {
@@ -7,6 +9,9 @@ declare global {
         daemonBaseUrl: string;
         name: string;
         version: string;
+        desktopCapabilities?: {
+          browserRelay?: BrowserRelayCapability;
+        };
       }>;
       pingRuntime(): Promise<{
         ok: boolean;

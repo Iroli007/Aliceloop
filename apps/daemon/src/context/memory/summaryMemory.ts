@@ -39,6 +39,7 @@ interface SummaryMemoryRecallPrefetch {
 interface RefreshSummaryMemoryOptions {
   prefetchedRecall?: SummaryMemoryRecallPrefetch | null;
   prefetchedRecallWaitMs?: number | null;
+  allowSemanticFallback?: boolean;
 }
 
 function getProjectSummarySource(projectId: string) {
@@ -224,6 +225,7 @@ export async function refreshSummaryMemory(
   const bindingStartedAt = nowMs();
   const binding = getSessionProjectBinding(sessionId);
   timings.bindingLookupMs = roundMs(nowMs() - bindingStartedAt);
+  const allowSemanticFallback = options.allowSemanticFallback ?? true;
 
   let relevantMemories: MemoryWithScore[] = [];
   if (options.prefetchedRecall) {
@@ -236,6 +238,11 @@ export async function refreshSummaryMemory(
     timings.prefetchedRecallFallbackReason = options.prefetchedRecall.fallbackReason;
     timings.prefetchedRecallSkipReason = options.prefetchedRecall.skipReason;
     timings.prefetchedRecall = JSON.stringify(options.prefetchedRecall.timings);
+    timings.semanticSearchMs = 0;
+  } else if (!allowSemanticFallback) {
+    timings.prefetchedRecallUsed = 0;
+    timings.prefetchedRecallWaitMs = options.prefetchedRecallWaitMs ?? 0;
+    timings.prefetchedRecallSkipReason = "router_skipped";
     timings.semanticSearchMs = 0;
   } else {
     const semanticStartedAt = nowMs();

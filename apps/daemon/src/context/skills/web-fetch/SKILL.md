@@ -29,16 +29,22 @@ Examples:
 
 ## Escalation rules
 
-- If the page is login-protected, dynamic, or blocked, switch to the browser skill once browser tooling exists.
+- If Aliceloop Desktop has a healthy browser relay, `web_fetch` can read through the visible desktop Chrome path before falling back to raw HTTP.
+- If the page is login-protected, highly interactive, or needs multi-step manipulation, switch to the browser skill.
 - If the task depends on freshness, pair this with the web-search skill so you do not fetch the wrong page.
 - If multiple URLs conflict, prefer official or primary sources.
 
 ## Aliceloop status
 
-The `web_fetch` tool is active. HTML pages are automatically converted to Markdown with boilerplate removed.
+The `web_fetch` tool is active.
+
+Runtime behavior:
+
+- Desktop relay available: open a temporary visible Chrome tab, load the page, extract readable content, then close the tab
+- No relay available: fall back to direct HTTP fetch and HTML-to-Markdown extraction
 
 Limitations:
 
-- Login-protected or heavily JS-rendered pages may return incomplete content
+- Login-protected pages still require the browser skill for interactive auth flows
 - Response is capped at 50K characters to protect context budget
 - 15-second timeout per request

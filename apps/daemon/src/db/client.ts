@@ -415,12 +415,15 @@ function seedDevicePresence(db: Database.Database, device: DevicePresence) {
   db.prepare(
     `
       INSERT OR REPLACE INTO device_presence (
-        device_id, device_type, label, status, last_seen_at
+        device_id, device_type, label, status, last_seen_at, capabilities_json
       ) VALUES (
-        @deviceId, @deviceType, @label, @status, @lastSeenAt
+        @deviceId, @deviceType, @label, @status, @lastSeenAt, @capabilitiesJson
       )
     `,
-  ).run(device);
+  ).run({
+    ...device,
+    capabilitiesJson: JSON.stringify(device.capabilities ?? {}),
+  });
 }
 
 function seedJobRun(db: Database.Database, job: JobRunDetail) {
@@ -553,6 +556,7 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "device_presence", "capabilities_json", "TEXT NOT NULL DEFAULT '{}'");
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
   db.prepare("UPDATE task_runs SET task_type = 'script-runner' WHERE task_type = 'local-script-runner'").run();
   db.prepare("UPDATE job_runs SET kind = 'script-runner' WHERE kind = 'local-script-runner'").run();

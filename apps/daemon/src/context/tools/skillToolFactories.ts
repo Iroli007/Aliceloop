@@ -16,21 +16,25 @@ function getManagedTaskTools(): ToolSet {
   return cachedManagedTaskTools;
 }
 
+interface SkillToolFactoryOptions {
+  sessionId?: string;
+}
+
 // Tool name -> factory, each factory returns { [toolName]: tool({...}) }
-const skillToolFactories = new Map<string, () => ToolSet>([
-  ["browser_navigate", () => createBrowserTools()],
-  ["browser_snapshot", () => createBrowserTools()],
-  ["browser_click", () => createBrowserTools()],
-  ["browser_type", () => createBrowserTools()],
-  ["browser_screenshot", () => createBrowserTools()],
+const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) => ToolSet>([
+  ["browser_navigate", (options) => createBrowserTools(options?.sessionId)],
+  ["browser_snapshot", (options) => createBrowserTools(options?.sessionId)],
+  ["browser_click", (options) => createBrowserTools(options?.sessionId)],
+  ["browser_type", (options) => createBrowserTools(options?.sessionId)],
+  ["browser_screenshot", (options) => createBrowserTools(options?.sessionId)],
   ["coding_agent_run", () => createCodingAgentTool()],
   ["document_ingest", () => ({ document_ingest: getManagedTaskTools().document_ingest })],
   ["review_coach", () => ({ review_coach: getManagedTaskTools().review_coach })],
-  ["web_fetch", () => createWebFetchTool()],
-  ["web_search", () => createWebSearchTool()],
+  ["web_fetch", (options) => createWebFetchTool(options?.sessionId)],
+  ["web_search", (options) => createWebSearchTool(options?.sessionId)],
 ]);
 
-function resolveSkillToolSelection(requestedNames: Set<string>) {
+function resolveSkillToolSelection(requestedNames: Set<string>, options?: SkillToolFactoryOptions) {
   const tools: ToolSet = {};
   const unresolved: string[] = [];
 
@@ -41,7 +45,7 @@ function resolveSkillToolSelection(requestedNames: Set<string>) {
 
     const factory = skillToolFactories.get(name);
     if (factory) {
-      Object.assign(tools, factory());
+      Object.assign(tools, factory(options));
       continue;
     }
 
@@ -67,8 +71,8 @@ function resolveSkillToolSelection(requestedNames: Set<string>) {
  * Base tools (grep/glob/read/write/edit/bash) are skipped — they are always loaded.
  * runtime_script_* names use prefix matching against managedTaskTools.
  */
-export function resolveSkillTools(requestedNames: Set<string>): ToolSet {
-  return resolveSkillToolSelection(requestedNames).tools;
+export function resolveSkillTools(requestedNames: Set<string>, options?: SkillToolFactoryOptions): ToolSet {
+  return resolveSkillToolSelection(requestedNames, options).tools;
 }
 
 export function listUnresolvedSkillTools(requestedNames: Set<string>) {

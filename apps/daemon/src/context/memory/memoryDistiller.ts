@@ -6,10 +6,8 @@ import { getMemoryConfig } from "./memoryConfig";
 import { createMemory, findMemoryByExactContent } from "./memoryRepository";
 
 interface DistillationInput {
-  sessionId: string;
   userMessages: string[];
   assistantResponse: string;
-  toolCalls?: Array<{ name: string; args: unknown; result: unknown }>;
 }
 
 const extractedMemorySchema = z.object({

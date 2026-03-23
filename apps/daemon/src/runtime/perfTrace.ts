@@ -1,6 +1,8 @@
 import { performance } from "node:perf_hooks";
 
-const perfTraceEnabled = process.env.ALICELOOP_TRACE_TIMINGS?.trim() === "1";
+const perfTraceSetting = process.env.ALICELOOP_TRACE_TIMINGS?.trim();
+const perfTraceEnabled = perfTraceSetting === "1"
+  || (perfTraceSetting !== "0" && process.env.NODE_ENV !== "production");
 
 export function nowMs() {
   return performance.now();

@@ -925,6 +925,7 @@ button {
   justify-self: end;
   width: fit-content;
   max-width: min(var(--workspace-user-message-width), 100%);
+  justify-items: end;
 }
 
 .workspace__message--assistant,
@@ -1068,10 +1069,12 @@ button {
 }
 
 .workspace__message--user .workspace__message-body {
+  margin-left: auto;
   background: #f4f6f8;
   border: 1px solid #d8dee6;
   border-radius: 12px;
   color: #334155;
+  text-align: right;
 }
 
 .workspace__message--system .workspace__message-body {
@@ -1089,6 +1092,64 @@ button {
   flex-wrap: wrap;
   gap: 8px;
   padding: 0 4px;
+}
+
+.workspace__message-images {
+  display: grid;
+  gap: 10px;
+  padding: 0 4px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.workspace__message--user .workspace__message-images {
+  justify-self: end;
+  justify-items: end;
+}
+
+.workspace__message--user .workspace__message-attachments {
+  justify-content: flex-end;
+}
+
+.workspace__message-image-button {
+  display: grid;
+  place-items: center;
+  justify-self: start;
+  width: 80px;
+  aspect-ratio: 16 / 10;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: #f8fafc;
+}
+
+.workspace__message--user .workspace__message-image-button {
+  justify-self: end;
+}
+
+.workspace__message-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  object-fit: cover;
+  object-position: center top;
+  transition: transform 140ms ease, box-shadow 140ms ease;
+}
+
+.workspace__message-image-button:hover .workspace__message-image,
+.workspace__message-image-button:focus-visible .workspace__message-image {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+}
+
+.workspace__message--user .workspace__message-copy {
+  justify-self: end;
 }
 
 .workspace__attachment-chip {
@@ -1721,6 +1782,56 @@ button {
   background: rgba(244, 246, 248, 0.34);
   backdrop-filter: blur(18px);
   z-index: 40;
+}
+
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(15, 23, 42, 0.68);
+  backdrop-filter: blur(10px);
+}
+
+.image-preview-modal {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  max-width: min(92vw, 1080px);
+  max-height: 90vh;
+  padding: 18px 18px 14px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+}
+
+.image-preview-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: #334155;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.image-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(90vh - 80px);
+  border-radius: 14px;
+  object-fit: contain;
+}
+
+.image-preview-caption {
+  font-size: 13px;
+  color: #64748b;
+  text-align: center;
 }
 
 .settings-modal {

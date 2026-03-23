@@ -43,6 +43,7 @@ interface FolderUploadPayload {
 
 export interface ShellConversationState {
   status: "loading" | "ready" | "error";
+  daemonBaseUrl: string | null;
   sessionId: string;
   sessionTitle: string;
   threads: SessionThreadSummary[];
@@ -82,6 +83,7 @@ export interface ShellConversationState {
 interface ActiveToolCall {
   toolCallId: string;
   toolName: string;
+  backend?: string | null;
 }
 
 function upsertActiveToolCall(toolCalls: ActiveToolCall[], nextCall: ActiveToolCall) {
@@ -90,8 +92,8 @@ function upsertActiveToolCall(toolCalls: ActiveToolCall[], nextCall: ActiveToolC
   return next;
 }
 
-function formatThinkingStep(toolName: string) {
-  return `Thinking · ${toolName}`;
+function formatThinkingStep(toolName: string, backend?: string | null) {
+  return backend ? `Thinking · ${toolName} · ${backend}` : `Thinking · ${toolName}`;
 }
 
 function getStableDesktopSessionDeviceId() {
@@ -576,23 +578,25 @@ export function useShellConversation(): ShellConversationState {
         lastEventSeqRef.current = Math.max(lastEventSeqRef.current, sessionEvent.seq);
 
         if (sessionEvent.type === "tool.call.started") {
-          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string };
+          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string; backend?: string };
           if (payload.toolCallId && payload.toolName) {
             const toolCallId = payload.toolCallId;
             const toolName = payload.toolName;
             setActiveToolCalls((current) => upsertActiveToolCall(current, {
               toolCallId,
               toolName,
+              backend: payload.backend ?? null,
             }));
           }
         } else if (sessionEvent.type === "tool.call.completed") {
-          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string };
+          const payload = sessionEvent.payload as { toolCallId?: string; toolName?: string; backend?: string };
           if (payload.toolCallId && payload.toolName) {
             const toolCallId = payload.toolCallId;
             const toolName = payload.toolName;
             setActiveToolCalls((current) => upsertActiveToolCall(current, {
               toolCallId,
               toolName,
+              backend: payload.backend ?? null,
             }));
           }
         } else if (sessionEvent.type === "job.updated") {
@@ -1110,7 +1114,7 @@ export function useShellConversation(): ShellConversationState {
   const latestArtifact = snapshot.artifacts[0] ?? null;
   const isAwaitingToolApproval = snapshot.pendingToolApprovals.length > 0;
   const currentToolName = activeToolCalls.at(-1)?.toolName ?? snapshot.pendingToolApprovals[0]?.toolName ?? null;
-  const thinkingSteps = activeToolCalls.map((toolCall) => formatThinkingStep(toolCall.toolName));
+  const thinkingSteps = activeToolCalls.map((toolCall) => formatThinkingStep(toolCall.toolName, toolCall.backend));
   const isResponding = isProviderCompletionActive(latestJob) && !isAwaitingToolApproval;
   const sessionTitle =
     (activeSessionId === localDraftSessionId ? null : threads.find((thread) => thread.id === activeSessionId)?.title) ??
@@ -1125,6 +1129,7 @@ export function useShellConversation(): ShellConversationState {
 
   return {
     status,
+    daemonBaseUrl,
     sessionId: activeSessionId,
     sessionTitle,
     threads,

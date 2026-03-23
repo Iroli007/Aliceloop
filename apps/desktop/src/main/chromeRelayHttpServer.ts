@@ -1,0 +1,251 @@
+import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { URL } from "node:url";
+import type { ChromeRelayMeta } from "./chromeRelayTypes";
+import { ChromeRelayService } from "./chromeRelayService";
+
+type JsonRecord = Record<string, unknown>;
+
+async function readJsonBody(request: IncomingMessage): Promise<JsonRecord> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  if (chunks.length === 0) {
+    return {};
+  }
+
+  const rawBody = Buffer.concat(chunks).toString("utf8").trim();
+  if (!rawBody) {
+    return {};
+  }
+
+  return JSON.parse(rawBody) as JsonRecord;
+}
+
+function writeJson(response: ServerResponse, statusCode: number, payload: unknown) {
+  response.statusCode = statusCode;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.end(JSON.stringify(payload));
+}
+
+function unauthorized(response: ServerResponse) {
+  writeJson(response, 401, {
+    error: "unauthorized",
+  });
+}
+
+function badRequest(response: ServerResponse, detail: string) {
+  writeJson(response, 400, {
+    error: "bad_request",
+    detail,
+  });
+}
+
+function internalError(response: ServerResponse, error: unknown) {
+  writeJson(response, 500, {
+    error: "internal_error",
+    detail: error instanceof Error ? error.message : String(error),
+  });
+}
+
+export class ChromeRelayHttpServer {
+  private readonly service: ChromeRelayService;
+
+  private readonly token: string;
+
+  private server: Server | null = null;
+
+  private baseUrl: string | null = null;
+
+  constructor(service: ChromeRelayService) {
+    this.service = service;
+    this.token = randomUUID();
+  }
+
+  getMeta(): ChromeRelayMeta | null {
+    if (!this.baseUrl) {
+      return null;
+    }
+
+    return this.service.getCapability(this.baseUrl, this.token);
+  }
+
+  private isAuthorized(request: IncomingMessage) {
+    return request.headers.authorization === `Bearer ${this.token}`;
+  }
+
+  private async handleRequest(request: IncomingMessage, response: ServerResponse) {
+    const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+
+    if (requestUrl.pathname === "/health" && request.method === "GET") {
+      const meta = this.getMeta();
+      writeJson(response, 200, {
+        ok: true,
+        browserRelay: meta?.browserRelay ?? null,
+      });
+      return;
+    }
+
+    if (!this.isAuthorized(request)) {
+      unauthorized(response);
+      return;
+    }
+
+    try {
+      if (requestUrl.pathname === "/tabs/open" && request.method === "POST") {
+        const result = await this.service.openTab();
+        writeJson(response, 200, result);
+        return;
+      }
+
+      const tabRouteMatch = requestUrl.pathname.match(/^\/tabs\/([^/]+)\/(navigate|snapshot|click|type|screenshot|readable|search-results)$/);
+      if (tabRouteMatch) {
+        const [, tabId, action] = tabRouteMatch;
+        if (action === "navigate" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const url = typeof body.url === "string" ? body.url.trim() : "";
+          if (!url) {
+            badRequest(response, "url is required");
+            return;
+          }
+
+          const waitUntil = typeof body.waitUntil === "string" ? body.waitUntil : undefined;
+          writeJson(response, 200, await this.service.navigate(tabId, url, waitUntil));
+          return;
+        }
+
+        if (action === "snapshot" && request.method === "GET") {
+          const maxTextLength = requestUrl.searchParams.get("maxTextLength");
+          const maxElements = requestUrl.searchParams.get("maxElements");
+          writeJson(
+            response,
+            200,
+            await this.service.snapshot(tabId, {
+              maxTextLength: maxTextLength ? Number(maxTextLength) : undefined,
+              maxElements: maxElements ? Number(maxElements) : undefined,
+            }),
+          );
+          return;
+        }
+
+        if (action === "click" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const ref = typeof body.ref === "string" ? body.ref.trim() : "";
+          if (!ref) {
+            badRequest(response, "ref is required");
+            return;
+          }
+
+          const waitUntil = typeof body.waitUntil === "string" ? body.waitUntil : undefined;
+          writeJson(response, 200, await this.service.click(tabId, ref, waitUntil));
+          return;
+        }
+
+        if (action === "type" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const ref = typeof body.ref === "string" ? body.ref.trim() : "";
+          const text = typeof body.text === "string" ? body.text : "";
+          if (!ref) {
+            badRequest(response, "ref is required");
+            return;
+          }
+
+          writeJson(response, 200, await this.service.type(tabId, ref, text, body.submit === true));
+          return;
+        }
+
+        if (action === "screenshot" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const outputPath = typeof body.outputPath === "string" ? body.outputPath : undefined;
+          const fullPage = body.fullPage !== false;
+          writeJson(response, 200, await this.service.screenshot(tabId, outputPath, fullPage));
+          return;
+        }
+
+        if (action === "readable" && request.method === "GET") {
+          const maxTextLength = requestUrl.searchParams.get("maxTextLength");
+          const extractMain = requestUrl.searchParams.get("extractMain");
+          writeJson(
+            response,
+            200,
+            await this.service.readable(tabId, {
+              maxTextLength: maxTextLength ? Number(maxTextLength) : undefined,
+              extractMain: extractMain ? extractMain === "true" : undefined,
+            }),
+          );
+          return;
+        }
+
+        if (action === "search-results" && request.method === "GET") {
+          const maxResults = Number(requestUrl.searchParams.get("maxResults") ?? "5");
+          writeJson(response, 200, await this.service.searchResults(tabId, Number.isFinite(maxResults) ? maxResults : 5));
+          return;
+        }
+      }
+
+      const closeMatch = requestUrl.pathname.match(/^\/tabs\/([^/]+)$/);
+      if (closeMatch && request.method === "DELETE") {
+        const [, tabId] = closeMatch;
+        await this.service.closeTab(tabId);
+        writeJson(response, 200, { ok: true, tabId });
+        return;
+      }
+
+      writeJson(response, 404, {
+        error: "not_found",
+      });
+    } catch (error) {
+      internalError(response, error);
+    }
+  }
+
+  async start() {
+    if (this.server && this.baseUrl) {
+      return this.baseUrl;
+    }
+
+    const server = createServer((request, response) => {
+      void this.handleRequest(request, response);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Failed to determine Chrome relay server address");
+    }
+
+    this.server = server;
+    this.baseUrl = `http://127.0.0.1:${address.port}`;
+    return this.baseUrl;
+  }
+
+  async stop() {
+    if (!this.server) {
+      return;
+    }
+
+    const server = this.server;
+    this.server = null;
+    this.baseUrl = null;
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+    await this.service.dispose().catch(() => undefined);
+  }
+}
