@@ -100,7 +100,7 @@ export class ChromeRelayHttpServer {
         return;
       }
 
-      const tabRouteMatch = requestUrl.pathname.match(/^\/tabs\/([^/]+)\/(navigate|snapshot|click|type|screenshot|readable|search-results)$/);
+      const tabRouteMatch = requestUrl.pathname.match(/^\/tabs\/([^/]+)\/(navigate|snapshot|click|type|screenshot|media-probe|capture-audio|readable|search-results)$/);
       if (tabRouteMatch) {
         const [, tabId, action] = tabRouteMatch;
         if (action === "navigate" && request.method === "POST") {
@@ -160,7 +160,27 @@ export class ChromeRelayHttpServer {
           const body = await readJsonBody(request);
           const outputPath = typeof body.outputPath === "string" ? body.outputPath : undefined;
           const fullPage = body.fullPage !== false;
-          writeJson(response, 200, await this.service.screenshot(tabId, outputPath, fullPage));
+          const ref = typeof body.ref === "string" ? body.ref : undefined;
+          writeJson(response, 200, await this.service.screenshot(tabId, outputPath, fullPage, ref));
+          return;
+        }
+
+        if (action === "media-probe" && request.method === "GET") {
+          const ref = requestUrl.searchParams.get("ref") || undefined;
+          writeJson(response, 200, await this.service.mediaProbe(tabId, ref));
+          return;
+        }
+
+        if (action === "capture-audio" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const outputPath = typeof body.outputPath === "string" ? body.outputPath : undefined;
+          const ref = typeof body.ref === "string" ? body.ref : undefined;
+          const clipMs = typeof body.clipMs === "number" ? body.clipMs : undefined;
+          writeJson(response, 200, await this.service.captureAudioClip(tabId, {
+            outputPath,
+            ref,
+            clipMs,
+          }));
           return;
         }
 

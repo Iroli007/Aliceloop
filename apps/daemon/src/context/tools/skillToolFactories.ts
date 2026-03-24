@@ -1,7 +1,9 @@
+import { createAudioUnderstandTool } from "./audioUnderstandTool";
 import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
 import { createCodingAgentTool } from "./codingAgentTool";
 import { createManagedTaskTools } from "./managedTaskTools";
+import { createSkillTool } from "./skillTool";
 import { createWebFetchTool } from "./webFetchTool";
 import { createWebSearchTool } from "./webSearchTool";
 
@@ -16,30 +18,113 @@ function getManagedTaskTools(): ToolSet {
   return cachedManagedTaskTools;
 }
 
+const cachedBrowserTools = new Map<string, ToolSet>();
+const cachedWebFetchTools = new Map<string, ToolSet>();
+const cachedWebSearchTools = new Map<string, ToolSet>();
+const cachedAudioUnderstandTools = new Map<string, ToolSet>();
+
 interface SkillToolFactoryOptions {
   sessionId?: string;
 }
 
+function getSessionCacheKey(sessionId?: string) {
+  return sessionId ?? "default";
+}
+
+function getBrowserToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedBrowserTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createBrowserTools(sessionId);
+  cachedBrowserTools.set(cacheKey, tools);
+  return tools;
+}
+
+function getWebFetchToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedWebFetchTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createWebFetchTool(sessionId);
+  cachedWebFetchTools.set(cacheKey, tools);
+  return tools;
+}
+
+function getWebSearchToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedWebSearchTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createWebSearchTool(sessionId);
+  cachedWebSearchTools.set(cacheKey, tools);
+  return tools;
+}
+
+function getAudioUnderstandToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedAudioUnderstandTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createAudioUnderstandTool(sessionId);
+  cachedAudioUnderstandTools.set(cacheKey, tools);
+  return tools;
+}
+
+const BROWSER_TOOL_NAMES = new Set([
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_click",
+  "browser_type",
+  "browser_screenshot",
+  "browser_media_probe",
+  "browser_video_watch_start",
+  "browser_video_watch_poll",
+  "browser_video_watch_stop",
+]);
+
 // Tool name -> factory, each factory returns { [toolName]: tool({...}) }
 const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) => ToolSet>([
-  ["browser_navigate", (options) => createBrowserTools(options?.sessionId)],
-  ["browser_snapshot", (options) => createBrowserTools(options?.sessionId)],
-  ["browser_click", (options) => createBrowserTools(options?.sessionId)],
-  ["browser_type", (options) => createBrowserTools(options?.sessionId)],
-  ["browser_screenshot", (options) => createBrowserTools(options?.sessionId)],
+  ["audio_understand", (options) => getAudioUnderstandToolSet(options?.sessionId)],
+  ["browser_navigate", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_snapshot", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_click", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_type", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_screenshot", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_media_probe", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_video_watch_start", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_video_watch_poll", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_video_watch_stop", (options) => getBrowserToolSet(options?.sessionId)],
   ["coding_agent_run", () => createCodingAgentTool()],
   ["document_ingest", () => ({ document_ingest: getManagedTaskTools().document_ingest })],
   ["review_coach", () => ({ review_coach: getManagedTaskTools().review_coach })],
-  ["web_fetch", (options) => createWebFetchTool(options?.sessionId)],
-  ["web_search", (options) => createWebSearchTool(options?.sessionId)],
+  ["web_fetch", (options) => getWebFetchToolSet(options?.sessionId)],
+  ["web_search", (options) => getWebSearchToolSet(options?.sessionId)],
 ]);
 
 function resolveSkillToolSelection(requestedNames: Set<string>, options?: SkillToolFactoryOptions) {
   const tools: ToolSet = {};
   const unresolved: string[] = [];
+  let browserToolsAttached = false;
 
   for (const name of requestedNames) {
     if (BASE_TOOL_NAMES.has(name)) {
+      continue;
+    }
+
+    if (BROWSER_TOOL_NAMES.has(name)) {
+      if (!browserToolsAttached) {
+        Object.assign(tools, getBrowserToolSet(options?.sessionId));
+        browserToolsAttached = true;
+      }
       continue;
     }
 
@@ -82,4 +167,21 @@ export function listUnresolvedSkillTools(requestedNames: Set<string>) {
 /** Reset the managed-task cache (for testing). */
 export function resetSkillToolCache() {
   cachedManagedTaskTools = null;
+  cachedBrowserTools.clear();
+  cachedWebFetchTools.clear();
+  cachedWebSearchTools.clear();
+  cachedAudioUnderstandTools.clear();
+  cachedSkillTool = undefined;
+}
+
+/**
+ * Get the Skill tool - always available for agent to invoke skills.
+ */
+let cachedSkillTool: ToolSet | undefined;
+
+export function getSkillTool(): ToolSet {
+  if (!cachedSkillTool) {
+    cachedSkillTool = createSkillTool();
+  }
+  return cachedSkillTool;
 }

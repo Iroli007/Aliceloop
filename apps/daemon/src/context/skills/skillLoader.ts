@@ -1,7 +1,14 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SkillDefinition, SkillMode, SkillStatus } from "@aliceloop/runtime-core";
+import {
+  type SkillRouteHints,
+  expandRoutedSkillIds,
+  getSkillGroupIdsForSkill,
+  getSkillGroupLabel,
+  isRelevantSkillForTurn,
+} from "./skillRouting";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +40,15 @@ interface ParsedFrontmatter {
   sourceUrl?: string;
   allowedTools?: string[];
 }
+
+interface SkillCatalogCacheState {
+  fingerprint: string;
+  definitions: SkillDefinition[];
+  activeDefinitions: SkillDefinition[];
+  byId: Map<string, SkillDefinition>;
+}
+
+let skillCatalogCache: SkillCatalogCacheState | null = null;
 
 class SkillFrontmatterError extends Error {
   constructor(sourcePath: string, message: string) {
@@ -202,49 +218,146 @@ function readSkillDefinition(directoryName: string) {
   } satisfies SkillDefinition;
 }
 
-export function listSkillDefinitions() {
+function listSkillDirectoryNames() {
   return readdirSync(skillsRootDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => readSkillDefinition(entry.name))
+    .map((entry) => entry.name)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function buildSkillCatalogFingerprint(directoryNames: string[]) {
+  return directoryNames
+    .map((directoryName) => {
+      const sourcePath = join(skillsRootDir, directoryName, "SKILL.md");
+      if (!existsSync(sourcePath)) {
+        return `${directoryName}:missing`;
+      }
+
+      return `${directoryName}:${statSync(sourcePath).mtimeMs}`;
+    })
+    .join("|");
+}
+
+function getSkillCatalogCache() {
+  const directoryNames = listSkillDirectoryNames();
+  const fingerprint = buildSkillCatalogFingerprint(directoryNames);
+  if (skillCatalogCache?.fingerprint === fingerprint) {
+    return skillCatalogCache;
+  }
+
+  const definitions = directoryNames
+    .map((directoryName) => readSkillDefinition(directoryName))
     .filter((skill): skill is SkillDefinition => Boolean(skill))
     .sort((left, right) => left.id.localeCompare(right.id));
+  const activeDefinitions = definitions.filter((skill) => skill.status === "available");
+
+  skillCatalogCache = {
+    fingerprint,
+    definitions,
+    activeDefinitions,
+    byId: new Map(definitions.map((skill) => [skill.id, skill])),
+  };
+
+  return skillCatalogCache;
+}
+
+export function listSkillDefinitions() {
+  return getSkillCatalogCache().definitions;
 }
 
 export function listActiveSkillDefinitions() {
-  return listSkillDefinitions().filter((skill) => skill.status === "available");
+  return getSkillCatalogCache().activeDefinitions;
+}
+
+export function selectRelevantSkillDefinitions(query: string | null | undefined, hints?: SkillRouteHints) {
+  const normalizedQuery = query?.trim() ?? "";
+  if (
+    !normalizedQuery
+    && (hints?.stickySkillIds.length ?? 0) === 0
+    && (hints?.stickyGroupIds.length ?? 0) === 0
+  ) {
+    return [] as SkillDefinition[];
+  }
+
+  const activeSkills = listActiveSkillDefinitions();
+  const directlyRelevantSkillIds = activeSkills
+    .filter((skill) => isRelevantSkillForTurn(skill, normalizedQuery, hints))
+    .map((skill) => skill.id);
+  const expanded = expandRoutedSkillIds(directlyRelevantSkillIds, normalizedQuery, hints);
+  const routedSkillIds = new Set(expanded.routedSkillIds);
+
+  return activeSkills.filter((skill) => routedSkillIds.has(skill.id));
 }
 
 export function getSkillDefinition(skillId: string) {
-  return listSkillDefinitions().find((skill) => skill.id === skillId) ?? null;
+  return getSkillCatalogCache().byId.get(skillId) ?? null;
 }
 
-let cachedSkillContextBlock: string | null = null;
+export function resetSkillCatalogCache() {
+  skillCatalogCache = null;
+}
 
-export function buildSkillContextBlock() {
-  if (cachedSkillContextBlock !== null) {
-    return cachedSkillContextBlock;
-  }
+interface BuildSkillContextBlockOptions {
+  browserRelayAvailable?: boolean;
+  routeHints?: SkillRouteHints;
+}
 
-  const skills = listActiveSkillDefinitions();
+export function buildSkillContextBlock(skills: SkillDefinition[], options?: BuildSkillContextBlockOptions) {
   if (skills.length === 0) {
-    cachedSkillContextBlock = "";
-    return "";
+    return [
+      "Skill routing rule: the six sandbox primitives (Bash/Read/Write/Edit/Glob/Grep) are the always-on native tools.",
+      "Bash can invoke unlimited scripts = unlimited capabilities. Skills封装这些能力。",
+      "Skill routing policy: preserve high availability by keeping relevant capability groups sticky across short follow-up turns, but never load the whole skill catalog by default.",
+      "No extra skill was routed for this turn, so do not assume any non-primitive tool should be present.",
+    ].join("\n");
   }
 
   const sections = [
     "Project skills live in the local context catalog.",
     `Skill catalog root: ${skillsRootDir}`,
-    "When a skill clearly matches the user's request, read that SKILL.md before acting.",
-    "Only the skills below are currently available.",
+    "Architecture rule: the six sandbox primitives (Bash/Read/Write/Edit/Glob/Grep) are the always-on native tools; skills are routed capabilities.",
+    "Bash can invoke unlimited scripts = unlimited capabilities. Skills封装这些能力。",
+    "If a turn needs better capability coverage, improve skill routing accuracy instead of expanding the primitive tool base.",
+    "Routing policy: keep the current capability groups sticky across short continuation turns so the agent does not drop critical skills mid-workflow, but do not load the entire skill catalog.",
+    "The skills below were routed as relevant for this turn. Read their SKILL.md files before acting when needed.",
     "",
-    "Available skills:",
+    "Routed skills for this turn:",
   ];
+
+  const routedSkillIds = new Set(skills.map((skill) => skill.id));
+  const routedGroupIds = [...new Set(skills.flatMap((skill) => getSkillGroupIdsForSkill(skill.id)))];
+  if ((options?.routeHints?.stickyGroupIds.length ?? 0) > 0) {
+    const labels = options?.routeHints?.stickyGroupIds.map((groupId) => getSkillGroupLabel(groupId)).join(", ");
+    sections.push(`- Sticky capability groups for this turn: ${labels}.`);
+  }
+  if ((options?.routeHints?.stickySkillIds.length ?? 0) > 0) {
+    sections.push(`- Sticky skill carry-forward for this turn: ${options?.routeHints?.stickySkillIds.join(", ")}.`);
+  }
+  if (routedGroupIds.length > 0) {
+    sections.push(`- Active capability groups for this turn: ${routedGroupIds.map((groupId) => getSkillGroupLabel(groupId)).join(", ")}.`);
+  }
+  if (routedSkillIds.has("web-search") || routedSkillIds.has("web-fetch")) {
+    sections.push("- Routing priority: when the user needs exact factual verification, current metrics, dates, or source-backed corrections, treat `web_search` as the default first step and only route `web_fetch` when a specific page still needs to be read.");
+    sections.push("- Source priority: primary platform pages and clearly dated sources come before encyclopedia overviews; 百度百科 is extremely low priority for live facts.");
+    sections.push("- Research memory rule: keep a running evidence ledger. Search results are discovery only, and the next `web_fetch` should target the strongest unfetched candidate URL from the ledger instead of restarting the topic from scratch.");
+  }
+  if (routedSkillIds.has("system-info")) {
+    sections.push("- Routing priority: when the user needs the current local time, date, weekday, or host diagnostics, treat `system-info` as the first step. It can call `bash` commands such as `date`, `sw_vers`, `df -h`, or `uptime`.");
+  }
+
+  if (routedSkillIds.has("browser")) {
+    if (options?.browserRelayAvailable) {
+      sections.push("- Browser runtime status for this turn: a healthy visible Aliceloop Desktop Chrome relay is available right now.");
+      sections.push("- Do not claim that browser automation is headless, stateless, or unable to retain login data when using this relay. Use the visible Chrome path and reuse its persistent login session.");
+    } else {
+      sections.push("- Browser runtime status for this turn: no healthy desktop relay is currently registered, so browser automation will fall back to local Playwright.");
+    }
+  }
 
   for (const skill of skills) {
     const relativeSourcePath = relative(skillsRootDir, skill.sourcePath).replace(/\\/g, "/");
     sections.push(`- ${skill.label}: ${skill.description} [${relativeSourcePath}]`);
   }
 
-  cachedSkillContextBlock = sections.join("\n");
-  return cachedSkillContextBlock;
+  return sections.join("\n");
 }

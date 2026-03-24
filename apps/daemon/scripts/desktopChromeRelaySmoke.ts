@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,9 +15,39 @@ async function listen(server: ReturnType<typeof createServer>) {
   });
 }
 
+function createSpeechDemoWav(outputDir: string) {
+  const sayPath = "/usr/bin/say";
+  const afconvertPath = "/usr/bin/afconvert";
+  if (!existsSync(sayPath) || !existsSync(afconvertPath)) {
+    return null;
+  }
+
+  const aiffPath = join(outputDir, "relay-demo.aiff");
+  const wavPath = join(outputDir, "relay-demo.wav");
+  const sayResult = spawnSync(sayPath, ["-o", aiffPath, "hello aliceloop relay"], {
+    stdio: "pipe",
+  });
+  if (sayResult.status !== 0) {
+    return null;
+  }
+
+  const convertResult = spawnSync(afconvertPath, ["-f", "WAVE", "-d", "LEI16@22050", aiffPath, wavPath], {
+    stdio: "pipe",
+  });
+  if (convertResult.status !== 0 || !existsSync(wavPath)) {
+    return null;
+  }
+
+  return {
+    wavPath,
+    wavData: readFileSync(wavPath),
+  };
+}
+
 async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-desktop-relay-smoke-"));
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
+  const speechFixture = createSpeechDemoWav(tempDataDir);
 
   const relayUserData = mkdtempSync(join(tmpdir(), "aliceloop-relay-user-"));
   const [{ ChromeRelayService, createDefaultChromeRelayServiceOptions }, { ChromeRelayHttpServer }] = await Promise.all([
@@ -49,6 +80,44 @@ async function main() {
       const q = url.searchParams.get("q") ?? "";
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(`<!doctype html><html><body><div class="result"><a class="result__a" href="http://127.0.0.1:${address.port}/article">Relay Search Result</a><div class="result__snippet">Query was ${q}</div></div></body></html>`);
+      return;
+    }
+
+    if (url.pathname === "/media") {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html>
+<html>
+  <body>
+    <h1>Relay Media Demo</h1>
+    <audio id="demo-audio" controls preload="auto" src="http://127.0.0.1:${address.port}/speech.wav"></audio>
+    <button id="start-demo">Start demo</button>
+    <div class="subtitle" aria-live="polite">准备播放</div>
+    <script>
+      const audio = document.getElementById("demo-audio");
+      const button = document.getElementById("start-demo");
+      const subtitle = document.querySelector(".subtitle");
+      button.addEventListener("click", async () => {
+        subtitle.textContent = "第一句：正在播放演示语音。";
+        audio.currentTime = 0;
+        try {
+          await audio.play();
+        } catch (error) {
+          subtitle.textContent = "播放失败：" + String(error);
+          return;
+        }
+        setTimeout(() => {
+          subtitle.textContent = "第二句：hello aliceloop relay";
+        }, 600);
+      });
+    </script>
+  </body>
+</html>`);
+      return;
+    }
+
+    if (url.pathname === "/speech.wav" && speechFixture) {
+      response.setHeader("content-type", "audio/wav");
+      response.end(speechFixture.wavData);
       return;
     }
 
@@ -116,6 +185,48 @@ async function main() {
   assert.equal(screenshotPayload.backend, "desktop_chrome");
   assert.ok(existsSync(screenshotPayload.path));
 
+  if (speechFixture) {
+    const mediaUrl = `http://127.0.0.1:${address.port}/media`;
+    const mediaNavigatePayload = JSON.parse(await browserTools.browser_navigate.execute({ url: mediaUrl }));
+    const startButtonRef = mediaNavigatePayload.elements.find((element: { tag: string; ref: string; text: string }) => {
+      return element.tag === "button" && /start demo/i.test(element.text);
+    })?.ref;
+    assert.ok(startButtonRef, "media page should expose a start button ref");
+
+    const mediaProbePayload = JSON.parse(await browserTools.browser_media_probe.execute({}));
+    assert.equal(mediaProbePayload.backend, "desktop_chrome");
+    assert.ok(mediaProbePayload.playerRef, "media probe should detect the demo audio element");
+
+    const watchStartPayload = JSON.parse(await browserTools.browser_video_watch_start.execute({
+      goal: "听懂这个演示音频在说什么",
+      clipSeconds: 4,
+    }));
+    assert.equal(watchStartPayload.ok, true, "watch start should succeed on the media page");
+    assert.ok(watchStartPayload.watchId, "watch start should return a watch id");
+    assert.equal(watchStartPayload.reused, false, "first watch start should create a fresh watch");
+
+    const watchResumePayload = JSON.parse(await browserTools.browser_video_watch_start.execute({
+      goal: "继续听这个演示音频",
+      clipSeconds: 4,
+    }));
+    assert.equal(watchResumePayload.ok, true, "restarting watch on the same player should still succeed");
+    assert.equal(watchResumePayload.reused, true, "same player should reuse the existing watch session");
+    assert.equal(watchResumePayload.watchId, watchStartPayload.watchId, "same player should keep the same watch id");
+
+    await browserTools.browser_click.execute({ ref: startButtonRef, waitUntil: "domcontentloaded" });
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+
+    const watchPollPayload = JSON.parse(await browserTools.browser_video_watch_poll.execute({}));
+    assert.equal(watchPollPayload.ok, true, "watch poll should succeed");
+    assert.equal(watchPollPayload.watchId, watchStartPayload.watchId, "poll without watchId should reuse the active watch");
+    assert.match(JSON.stringify(watchPollPayload), /第二句|provider|字幕|静音模式/i, "watch poll should return structured watch evidence or explicit limitations");
+
+    const watchStopPayload = JSON.parse(await browserTools.browser_video_watch_stop.execute({}));
+    assert.equal(watchStopPayload.ok, true, "watch stop should succeed");
+    assert.equal(watchStopPayload.watchId, watchStartPayload.watchId, "stop without watchId should stop the active watch");
+    assert.ok(typeof watchStopPayload.rollingSummary === "string", "watch stop should return a final rolling summary");
+  }
+
   const fetchOutput = await createWebFetchTool(session.id).web_fetch.execute({
     url: `http://127.0.0.1:${address.port}/article`,
     extractMain: true,
@@ -151,6 +262,7 @@ async function main() {
     searchBackend: searchOutput.backend,
     finalPageText: clickedPayload.pageText,
     screenshotPath: screenshotPayload.path,
+    mediaFixture: Boolean(speechFixture),
     unavailableError: unavailableError.message,
   }, null, 2));
 }

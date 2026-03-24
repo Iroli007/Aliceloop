@@ -1,6 +1,8 @@
 import type { Browser, BrowserContext, Page } from "playwright";
 import {
   type BrowserBackend,
+  captureMediaAudioClip,
+  collectMediaProbe,
   type BrowserSessionRecord,
   type BrowserWaitUntil,
   collectSnapshot,
@@ -54,9 +56,18 @@ class PlaywrightSessionManager {
     if (!this.contextPromise) {
       this.contextPromise = this.getBrowser()
         .then(async (browser) => {
+          const { getDataDir } = await import("../../db/client");
+          const userDataDir = `${getDataDir()}/browser-profiles/default`;
           return browser.newContext({
             viewport: DEFAULT_VIEWPORT,
             ignoreHTTPSErrors: true,
+            storageState: userDataDir + "/state.json",
+          }).catch(() => {
+            // First time, no state file exists
+            return browser.newContext({
+              viewport: DEFAULT_VIEWPORT,
+              ignoreHTTPSErrors: true,
+            });
           });
         })
         .catch((error) => {
@@ -97,6 +108,7 @@ class PlaywrightSessionManager {
       this.idleTimer = null;
     }
 
+    const contextPromise = this.contextPromise;
     const browserPromise = this.browserPromise;
     this.pagePromise = null;
     this.contextPromise = null;
@@ -107,6 +119,14 @@ class PlaywrightSessionManager {
     }
 
     try {
+      if (contextPromise) {
+        const context = await contextPromise;
+        const { getDataDir } = await import("../../db/client");
+        const { mkdirSync } = await import("node:fs");
+        const stateDir = `${getDataDir()}/browser-profiles/default`;
+        mkdirSync(stateDir, { recursive: true });
+        await context.storageState({ path: stateDir + "/state.json" });
+      }
       const browser = await browserPromise;
       await browser.close();
     } catch {
@@ -191,16 +211,30 @@ class PlaywrightSessionManager {
     }
   }
 
-  async screenshot(session: BrowserSessionRecord, outputPath: string | undefined, fullPage: boolean | undefined, onDispose: () => void) {
+  async screenshot(
+    session: BrowserSessionRecord,
+    outputPath: string | undefined,
+    fullPage: boolean | undefined,
+    ref: string | undefined,
+    onDispose: () => void,
+  ) {
     try {
       const page = await this.getPage();
       session.tabId ??= `playwright:${session.sessionId}`;
       const targetPath = outputPath?.trim() || resolveDefaultScreenshotPath();
       ensureDirectoryForFile(targetPath);
-      await page.screenshot({
-        path: targetPath,
-        fullPage: fullPage ?? true,
-      });
+      if (ref?.trim()) {
+        const locator = page.locator(`[data-aliceloop-ref="${escapeAttributeValue(ref.trim())}"]`).first();
+        await locator.waitFor({ state: "visible", timeout: 10_000 });
+        await locator.screenshot({
+          path: targetPath,
+        });
+      } else {
+        await page.screenshot({
+          path: targetPath,
+          fullPage: fullPage ?? true,
+        });
+      }
 
       return {
         path: targetPath,
@@ -208,6 +242,34 @@ class PlaywrightSessionManager {
         backend: "playwright" as const,
         tabId: session.tabId,
       };
+    } catch (error) {
+      throw new Error(friendlyBrowserError(error));
+    } finally {
+      this.scheduleIdleDisposal(onDispose);
+    }
+  }
+
+  async mediaProbe(session: BrowserSessionRecord, ref: string | undefined, onDispose: () => void) {
+    try {
+      const page = await this.getPage();
+      session.tabId ??= `playwright:${session.sessionId}`;
+      return await collectMediaProbe(page, "playwright", session.tabId, ref);
+    } catch (error) {
+      throw new Error(friendlyBrowserError(error));
+    } finally {
+      this.scheduleIdleDisposal(onDispose);
+    }
+  }
+
+  async captureAudioClip(
+    session: BrowserSessionRecord,
+    options: { outputPath?: string; ref?: string; clipMs?: number } | undefined,
+    onDispose: () => void,
+  ) {
+    try {
+      const page = await this.getPage();
+      session.tabId ??= `playwright:${session.sessionId}`;
+      return await captureMediaAudioClip(page, "playwright", session.tabId, options);
     } catch (error) {
       throw new Error(friendlyBrowserError(error));
     } finally {
@@ -250,8 +312,18 @@ export const playwrightBrowserBackend: BrowserBackend = {
       managers.delete(session.sessionId);
     });
   },
-  screenshot(session, outputPath, fullPage) {
-    return getManager(session.sessionId).screenshot(session, outputPath, fullPage, () => {
+  screenshot(session, outputPath, fullPage, ref) {
+    return getManager(session.sessionId).screenshot(session, outputPath, fullPage, ref, () => {
+      managers.delete(session.sessionId);
+    });
+  },
+  mediaProbe(session, ref) {
+    return getManager(session.sessionId).mediaProbe(session, ref, () => {
+      managers.delete(session.sessionId);
+    });
+  },
+  captureAudioClip(session, options) {
+    return getManager(session.sessionId).captureAudioClip(session, options, () => {
       managers.delete(session.sessionId);
     });
   },
@@ -262,4 +334,3 @@ export const playwrightBrowserBackend: BrowserBackend = {
     session.tabId = null;
   },
 };
-

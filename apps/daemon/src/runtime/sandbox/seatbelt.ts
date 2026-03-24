@@ -39,9 +39,10 @@ export function buildSeatbeltProfile(options: {
     lines.push("");
   }
 
-  // --- File write restrictions ---
+  // --- File access restrictions ---
   const home = homedir();
-  lines.push(";; Restrict file writes under /Users");
+  lines.push(";; Restrict file reads and writes under /Users");
+  lines.push(`(deny file-read* (subpath "/Users"))`);
   lines.push(`(deny file-write* (subpath "/Users"))`);
 
   if (options.allowedWriteRoots.length > 0) {

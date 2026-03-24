@@ -1,5 +1,6 @@
 import {
   defaultRuntimeSettings,
+  type ReasoningEffort,
   type RuntimeSettings,
   type SandboxPermissionProfile,
 } from "@aliceloop/runtime-core";
@@ -7,7 +8,9 @@ import { useEffect, useMemo, useState } from "react";
 import { getDesktopBridge } from "../../platform/desktopBridge";
 
 interface SaveRuntimeSettingsInput {
-  sandboxProfile: SandboxPermissionProfile;
+  sandboxProfile?: SandboxPermissionProfile;
+  autoApproveToolRequests?: boolean;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface RuntimeSettingsState {
@@ -70,6 +73,8 @@ export function useRuntimeSettings(): RuntimeSettingsState {
         },
         body: JSON.stringify({
           sandboxProfile: input.sandboxProfile,
+          autoApproveToolRequests: input.autoApproveToolRequests,
+          reasoningEffort: input.reasoningEffort,
         }),
       });
 

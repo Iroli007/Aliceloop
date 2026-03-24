@@ -31,6 +31,44 @@ export interface BrowserScreenshotPayload {
   tabId: string;
 }
 
+export interface BrowserMediaCandidate {
+  ref: string;
+  tag: "video" | "audio";
+  label: string;
+  area: number;
+  paused: boolean;
+  muted: boolean;
+  currentTime: number | null;
+  duration: number | null;
+  playbackRate: number;
+  textTrackCount: number;
+  activeCaptions: string[];
+  canCaptureAudio: boolean;
+}
+
+export interface BrowserMediaProbePayload {
+  url: string;
+  title: string;
+  backend: BrowserBackendKind;
+  tabId: string;
+  playerRef: string | null;
+  subtitleSource: "textTracks" | "dom" | "none";
+  subtitles: string[];
+  candidates: BrowserMediaCandidate[];
+}
+
+export interface BrowserAudioCapturePayload {
+  path: string | null;
+  mediaType: string | null;
+  url: string;
+  backend: BrowserBackendKind;
+  tabId: string;
+  ref: string | null;
+  currentTime: number | null;
+  durationMs: number;
+  limitation: string | null;
+}
+
 export interface BrowserReadablePayload {
   url: string;
   title: string;

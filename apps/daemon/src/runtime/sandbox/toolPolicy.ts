@@ -173,6 +173,8 @@ function isPathAllowedForAccess(
 export function buildSandboxToolPolicy(options: SandboxExecutorOptions): SandboxToolPolicy {
   const permissionProfile = normalizeSandboxPermissionProfile(options.permissionProfile);
   const fullAccess = permissionProfile === "full-access";
+  const workspaceRoot = options.workspaceRoot?.trim();
+  const workspaceRoots = workspaceRoot ? uniqueRoots([workspaceRoot]) : null;
 
   return {
     label: options.label,
@@ -181,9 +183,21 @@ export function buildSandboxToolPolicy(options: SandboxExecutorOptions): Sandbox
     elevatedAccess: permissionProfile === "development" ? "elevated" : "standard",
     supportsElevatedActions: permissionProfile === "development",
     requiresBashApproval: !fullAccess && Boolean(options.requestBashApproval),
-    allowedReadRoots: fullAccess ? null : uniqueRoots([...defaultAllowedReadRoots, ...(options.extraReadRoots ?? [])]),
-    allowedWriteRoots: fullAccess ? null : uniqueRoots([...defaultAllowedWriteRoots, ...(options.extraWriteRoots ?? [])]),
-    allowedCwdRoots: fullAccess ? null : uniqueRoots([...defaultAllowedCwdRoots, ...(options.extraCwdRoots ?? [])]),
+    allowedReadRoots: workspaceRoots
+      ? workspaceRoots
+      : fullAccess
+        ? null
+        : uniqueRoots([...defaultAllowedReadRoots, ...(options.extraReadRoots ?? [])]),
+    allowedWriteRoots: workspaceRoots
+      ? workspaceRoots
+      : fullAccess
+        ? null
+        : uniqueRoots([...defaultAllowedWriteRoots, ...(options.extraWriteRoots ?? [])]),
+    allowedCwdRoots: workspaceRoots
+      ? workspaceRoots
+      : fullAccess
+        ? null
+        : uniqueRoots([...defaultAllowedCwdRoots, ...(options.extraCwdRoots ?? [])]),
     allowedCommands: [...new Set([...(options.allowedCommands ?? []), ...defaultAllowedCommands])],
   };
 }
@@ -191,7 +205,7 @@ export function buildSandboxToolPolicy(options: SandboxExecutorOptions): Sandbox
 export function assertReadable(policy: SandboxToolPolicy, targetPath: string) {
   if (policy.allowedReadRoots && !isPathAllowed(targetPath, policy.allowedReadRoots)) {
     throw new SandboxViolationError(
-      `read denied for path outside allowed roots: ${targetPath}; this action would require elevated access in development mode or an explicit read root`,
+      `read denied for path outside allowed roots: ${targetPath}; add this path to the sandbox read roots before retrying`,
     );
   }
 }
@@ -199,7 +213,7 @@ export function assertReadable(policy: SandboxToolPolicy, targetPath: string) {
 export function assertWritable(policy: SandboxToolPolicy, targetPath: string) {
   if (policy.allowedWriteRoots && !isPathAllowed(targetPath, policy.allowedWriteRoots)) {
     throw new SandboxViolationError(
-      `write denied for path outside allowed roots: ${targetPath}; this action would require elevated access in development mode`,
+      `write denied for path outside allowed roots: ${targetPath}; add this path to the sandbox write roots before retrying`,
     );
   }
 }
@@ -207,7 +221,7 @@ export function assertWritable(policy: SandboxToolPolicy, targetPath: string) {
 export function assertCwd(policy: SandboxToolPolicy, cwd: string) {
   if (policy.allowedCwdRoots && !isPathAllowed(cwd, policy.allowedCwdRoots)) {
     throw new SandboxViolationError(
-      `bash denied for cwd outside allowed roots: ${cwd}; add this folder to sandbox roots before retrying`,
+      `bash denied for cwd outside allowed roots: ${cwd}; add this folder to the workspace sandbox roots before retrying`,
     );
   }
 }
@@ -236,40 +250,41 @@ export function assertCommandArguments(
   policy: SandboxToolPolicy,
   input: Pick<RunBashInput, "command"> & { args: string[]; cwd: string },
 ) {
-  if (policy.fullAccess) {
-    return;
-  }
-
-  if (input.command === "ls") {
-    return;
-  }
-
-  if (input.command === "find") {
-    for (const arg of input.args) {
-      if (developmentFindDisallowedArgs.has(arg)) {
-        throw new SandboxViolationError(`bash denied for dangerous find expression: ${arg}`);
+  if (!policy.fullAccess) {
+    if (input.command === "find") {
+      for (const arg of input.args) {
+        if (developmentFindDisallowedArgs.has(arg)) {
+          throw new SandboxViolationError(`bash denied for dangerous find expression: ${arg}`);
+        }
       }
     }
-  }
 
-  if (input.command === "rm" || input.command === "rmdir") {
-    const dangerousRmFlags = new Set(["-r", "-R", "--recursive", "-rf", "-Rf", "-fr", "-fR"]);
-    for (const arg of input.args) {
-      if (dangerousRmFlags.has(arg)) {
+    if (input.command === "rm" || input.command === "rmdir") {
+      const dangerousRmFlags = new Set(["-r", "-R", "--recursive", "-rf", "-Rf", "-fr", "-fR"]);
+      for (const arg of input.args) {
+        if (dangerousRmFlags.has(arg)) {
+          throw new SandboxViolationError(
+            `bash denied for dangerous rm flag: ${arg}; use bash with rm on individual files or empty directories only`,
+          );
+        }
+      }
+    }
+
+    if (input.command === "npm") {
+      const subcommand = getNpmSubcommand(input.args);
+      if (subcommand && !developmentNpmAllowedSubcommands.has(subcommand)) {
         throw new SandboxViolationError(
-          `bash denied for dangerous rm flag: ${arg}; use bash with rm on individual files or empty directories only`,
+          `bash denied for npm subcommand in development mode: ${subcommand}`,
         );
       }
     }
   }
 
-  if (input.command === "npm") {
-    const subcommand = getNpmSubcommand(input.args);
-    if (subcommand && !developmentNpmAllowedSubcommands.has(subcommand)) {
-      throw new SandboxViolationError(
-        `bash denied for npm subcommand in development mode: ${subcommand}`,
-      );
-    }
+  const hasFilesystemBoundary = policy.allowedReadRoots !== null
+    || policy.allowedWriteRoots !== null
+    || policy.allowedCwdRoots !== null;
+  if (!hasFilesystemBoundary) {
+    return;
   }
 
   const pathLikeArgs = collectPathArguments(input.command, input.args);
@@ -282,10 +297,10 @@ export function assertCommandArguments(
           ? "executable path"
           : "write path";
       const guidance = access === "read"
-        ? "this action would require elevated access in development mode or an explicit read root"
+        ? "this command is confined to the configured workspace read roots"
         : access === "execute"
-          ? "this action would require elevated access in development mode"
-          : "this action would require elevated access in development mode";
+          ? "this command is confined to the configured workspace roots"
+          : "this command is confined to the configured workspace write roots";
       throw new SandboxViolationError(
         `bash denied for ${reason} outside allowed roots: ${value}; ${guidance}`,
       );
@@ -296,9 +311,14 @@ export function assertCommandArguments(
 export function getDefaultSandboxRoots() {
   return {
     projectRoot,
+    workspaceRoot: getDefaultWorkspaceRoot(),
     dataDir: getDataDir(),
     uploadsDir: getUploadsDir(),
   };
+}
+
+export function getDefaultWorkspaceRoot() {
+  return resolve(getDataDir(), "workspaces", "default");
 }
 
 export function getSandboxProjectRoot() {

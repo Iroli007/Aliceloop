@@ -13,6 +13,7 @@ import {
   type DocumentStructure,
   type MemoryKind,
   type ProviderKind,
+  type ReasoningEffort,
   type SandboxPermissionProfile,
   type ProviderTransportKind,
   type SectionSpan,
@@ -167,6 +168,10 @@ interface SessionMessageParams {
   messageId: string;
 }
 
+interface SessionEventsQuery {
+  since?: string;
+}
+
 interface CreateMessageBody {
   clientMessageId: string;
   content: string;
@@ -254,6 +259,8 @@ interface UpdateSessionProjectBody {
 
 interface UpdateRuntimeSettingsBody {
   sandboxProfile?: SandboxPermissionProfile;
+  autoApproveToolRequests?: boolean;
+  reasoningEffort?: ReasoningEffort;
 }
 
 interface TaskParams {
@@ -1459,6 +1466,17 @@ export async function createServer() {
     return getSessionSnapshot(request.params.id);
   });
 
+  server.get<{ Params: SessionParams; Querystring: SessionEventsQuery }>("/api/session/:id/events", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    const since = Math.max(0, Number.parseInt(request.query?.since ?? "0", 10) || 0);
+    return listSessionEventsSince(request.params.id, since);
+  });
+
   server.get<{ Params: SessionParams }>("/api/session/:id/project", async (request, reply) => {
     try {
       return getSessionSnapshot(request.params.id).project;
@@ -1562,33 +1580,69 @@ export async function createServer() {
 
     const initialEvents = listSessionEventsSince(sessionId, since);
 
+    // Mark ready only after all buffered writes complete — prevents race between
+    // flush loop and new events that would bypass try-catch protection.
+    ready = true;
+
+    // Safe write helper: silently swallows EPIPE/ECONNRESET so broken connections
+    // don't crash the SSE handler. Returns true only if the write succeeded.
+    const safeWrite = (write: (chunk: string) => boolean | void, chunk: string) => {
+      try {
+        return write(chunk) !== false;
+      } catch {
+        return false;
+      }
+    };
+
+    // Helper to write a full SSE event with safeWrite protection
+    const safeWriteSseEvent = (event: unknown, seq: number) => {
+      safeWrite(reply.raw.write.bind(reply.raw), `id: ${seq}\n`);
+      safeWrite(reply.raw.write.bind(reply.raw), "event: session\n");
+      safeWrite(reply.raw.write.bind(reply.raw), `data: ${JSON.stringify(event)}\n\n`);
+    };
+
     for (const event of initialEvents) {
-      writeSseEvent(reply.raw.write.bind(reply.raw), event, event.seq);
+      safeWriteSseEvent(event, event.seq);
     }
 
-    const initialSeqs = new Set(initialEvents.map((event) => event.seq));
+    const initialSeqs = new Set(initialEvents.map((e) => e.seq));
     bufferedEvents
       .filter((event) => event.seq > since && !initialSeqs.has(event.seq))
       .sort((left, right) => left.seq - right.seq)
       .forEach((event) => {
-        writeSseEvent(reply.raw.write.bind(reply.raw), event, event.seq);
+        safeWriteSseEvent(event, event.seq);
       });
 
-    ready = true;
-
-    request.raw.on("error", () => {
-      unsubscribe();
-    });
-
-    const keepAlive = setInterval(() => {
-      reply.raw.write(": keep-alive\n\n");
-    }, 15_000);
-
-    request.raw.on("close", () => {
+    // Unified cleanup — idempotent, clears interval + unsubscribe + closes response
+    let cleanedUp = false;
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
       clearInterval(keepAlive);
       unsubscribe();
       reply.raw.end();
+    };
+
+    const keepAlive = setInterval(() => {
+      try {
+        reply.raw.write(": keep-alive\n\n");
+      } catch {
+        // Stream already closed — interval will be cleared on next event
+      }
+    }, 10_000);
+
+    // Handle all disconnect paths: error on either stream, or either stream closing
+    reply.raw.on("error", (err) => {
+      console.warn(`[SSE] Session ${sessionId} reply error: ${err.message}`);
+      cleanup();
     });
+
+    request.raw.on("error", () => {
+      cleanup();
+    });
+
+    reply.raw.on("close", cleanup);
+    request.raw.on("close", cleanup);
   });
 
   server.post<{ Params: SessionParams; Body: CreateMessageBody }>("/api/session/:id/messages", async (request, reply) => {
@@ -1734,10 +1788,9 @@ export async function createServer() {
     const attachmentId = randomUUID();
     const safeName = sanitizeFileName(fileName);
     const storagePath = join(getUploadsDir(), `${attachmentId}-${safeName}`);
-    const runtimeSettings = getRuntimeSettings();
     const sandbox = createPermissionSandboxExecutor({
       label: `attachment:${request.params.id}:${fileName}`,
-      permissionProfile: runtimeSettings.sandboxProfile,
+      permissionProfile: "full-access",
     });
     await sandbox.writeBinaryFile({
       targetPath: storagePath,
@@ -1810,10 +1863,9 @@ export async function createServer() {
 
     const safeFolderName = sanitizeFileName(folderName) || "folder";
     const folderStoragePath = join(getUploadsDir(), `${randomUUID()}-${safeFolderName}`);
-    const runtimeSettings = getRuntimeSettings();
     const sandbox = createPermissionSandboxExecutor({
       label: `attachment-folder:${request.params.id}:${folderName}`,
-      permissionProfile: runtimeSettings.sandboxProfile,
+      permissionProfile: "full-access",
     });
 
     let totalBytes = 0;
@@ -1884,6 +1936,8 @@ export async function createServer() {
   server.put<{ Body: UpdateRuntimeSettingsBody }>("/api/runtime/settings", async (request) => {
     return updateRuntimeSettings({
       sandboxProfile: request.body?.sandboxProfile,
+      autoApproveToolRequests: request.body?.autoApproveToolRequests,
+      reasoningEffort: request.body?.reasoningEffort,
     });
   });
 

@@ -92,6 +92,32 @@ function noteBashApprovalAttempt(
   context.seenBashApprovalFingerprints.add(fingerprint);
 }
 
+async function requestDeleteApproval(
+  context: SandboxRuntimeContext,
+  input: {
+    title: string;
+    detail: string;
+    commandLine: string;
+    command: string;
+    args: string[];
+    cwd: string;
+  },
+) {
+  if (!context.requestElevatedApproval) {
+    return;
+  }
+
+  await context.requestElevatedApproval({
+    toolName: "delete",
+    title: input.title,
+    detail: input.detail,
+    commandLine: input.commandLine,
+    command: input.command,
+    args: input.args,
+    cwd: input.cwd,
+  });
+}
+
 function resolveExecution(command: string, args: string[]) {
   if (command === "node") {
     return {
@@ -120,7 +146,7 @@ function canUseElevatedFallback(context: SandboxRuntimeContext, error: unknown) 
     && !error.message.includes("bash denied for cwd outside allowed roots")
     && context.toolPolicy.permissionProfile === "development"
     && context.toolPolicy.supportsElevatedActions
-    && Boolean(context.requestElevatedApproval);
+    && (context.autoApproveToolRequests || Boolean(context.requestElevatedApproval));
 }
 
 async function recordBlockedAttempt<T>(
@@ -154,7 +180,9 @@ async function withPolicyFallback<T>(input: {
         ...input.run,
         access: "elevated",
         execute: async () => {
-          await input.context.requestElevatedApproval!(input.buildElevatedApproval());
+          if (!input.context.autoApproveToolRequests && input.context.requestElevatedApproval) {
+            await input.context.requestElevatedApproval!(input.buildElevatedApproval());
+          }
           return input.executeElevated();
         },
       });
@@ -235,6 +263,7 @@ async function resolveDeleteTargetKind(targetPath: string): Promise<DeleteTarget
 async function validateDeletePath(context: SandboxRuntimeContext, targetPath: string) {
   const kind = await resolveDeleteTargetKind(targetPath);
   if (context.toolPolicy.fullAccess) {
+    assertWritable(context.toolPolicy, targetPath);
     return kind;
   }
 
@@ -324,9 +353,6 @@ function buildSeatbeltProfileForContext(context: SandboxRuntimeContext): string 
   if (!context.seatbeltEnabled) {
     return null;
   }
-  if (context.toolPolicy.fullAccess) {
-    return null;
-  }
   return buildSeatbeltProfile({
     allowedWriteRoots: context.toolPolicy.allowedWriteRoots ?? [],
     allowedReadRoots: context.toolPolicy.allowedReadRoots ?? [],
@@ -362,6 +388,143 @@ function createBashElevatedApproval(command: string, args: string[], cwd: string
     args,
     cwd,
   };
+}
+
+const destructiveShellCommandPattern = /(?:^|[;&|(){}])\s*(?:sudo\s+)?(?:rm|rmdir|unlink|trash|srm|shred)\b/;
+const destructiveFindPattern = /\bfind\b[\s\S]*?(?:\B-delete\b|\b-exec(?:dir)?\b[\s\S]*?(?:\brm\b|\brmdir\b|\bunlink\b|\btrash\b|\bsrm\b|\bshred\b))/i;
+const destructiveGitPattern = /\bgit\b[\s\S]*?\b(?:rm\b|clean\b[\s\S]*?(?:\b-f\b|--force))/i;
+const destructiveScriptApiPattern = /\b(?:fs|node:fs)\.(?:rmSync|unlinkSync|rm|unlink)\b|\b(?:os|path)\.(?:remove|unlink)\b|\bshutil\.rmtree\b|\bPath\.unlink\b/;
+
+function getFirstNonFlagArgument(args: string[]) {
+  return args.find((arg) => arg && !arg.startsWith("-")) ?? null;
+}
+
+function isDeleteLikeGitInvocation(args: string[]) {
+  const subcommand = getFirstNonFlagArgument(args);
+  if (subcommand === "rm") {
+    return true;
+  }
+
+  if (subcommand !== "clean") {
+    return false;
+  }
+
+  return args.some((arg) => arg === "-f" || arg === "--force" || arg === "-fd" || arg === "-df");
+}
+
+function isDeleteLikeFindInvocation(args: string[]) {
+  if (args.includes("-delete")) {
+    return true;
+  }
+
+  if (!args.some((arg) => arg === "-exec" || arg === "-execdir")) {
+    return false;
+  }
+
+  return args.some((arg) => /(?:^|[;&|(){}])\s*(?:sudo\s+)?(?:rm|rmdir|unlink|trash|srm|shred)\b/.test(arg));
+}
+
+function isDeleteLikeScriptInvocation(command: string, args: string[]) {
+  const scriptText = args.filter((arg) => arg && !arg.startsWith("-")).join(" ").trim();
+  if (!scriptText) {
+    return false;
+  }
+
+  if (destructiveShellCommandPattern.test(scriptText)) {
+    return true;
+  }
+
+  if (destructiveFindPattern.test(scriptText)) {
+    return true;
+  }
+
+  if (destructiveGitPattern.test(scriptText)) {
+    return true;
+  }
+
+  return destructiveScriptApiPattern.test(scriptText);
+}
+
+function isDeleteLikeWrappedInvocation(args: string[], depth = 0): boolean {
+  if (depth > 2) {
+    return false;
+  }
+
+  const wrappedCommandIndex = args.findIndex((arg) => arg && !arg.startsWith("-"));
+  if (wrappedCommandIndex < 0) {
+    return false;
+  }
+
+  const wrappedCommand = args[wrappedCommandIndex];
+  const wrappedArgs = args.slice(wrappedCommandIndex + 1);
+
+  if (wrappedCommand === "rm" || wrappedCommand === "rmdir" || wrappedCommand === "unlink" || wrappedCommand === "trash" || wrappedCommand === "srm" || wrappedCommand === "shred") {
+    return true;
+  }
+
+  if (wrappedCommand === "git") {
+    return isDeleteLikeGitInvocation(wrappedArgs);
+  }
+
+  if (wrappedCommand === "find") {
+    return isDeleteLikeFindInvocation(wrappedArgs);
+  }
+
+  if (
+    wrappedCommand === "bash"
+    || wrappedCommand === "sh"
+    || wrappedCommand === "zsh"
+    || wrappedCommand === "fish"
+    || wrappedCommand === "node"
+    || wrappedCommand === "tsx"
+    || wrappedCommand === "ts-node"
+    || wrappedCommand === "python"
+    || wrappedCommand === "python3"
+    || wrappedCommand === "perl"
+    || wrappedCommand === "ruby"
+    || wrappedCommand === "php"
+    || wrappedCommand === "deno"
+  ) {
+    return isDeleteLikeScriptInvocation(wrappedCommand, wrappedArgs);
+  }
+
+  if (
+    wrappedCommand === "sudo"
+    || wrappedCommand === "env"
+    || wrappedCommand === "command"
+    || wrappedCommand === "nice"
+    || wrappedCommand === "nohup"
+    || wrappedCommand === "timeout"
+    || wrappedCommand === "xargs"
+  ) {
+    return isDeleteLikeWrappedInvocation(wrappedArgs, depth + 1);
+  }
+
+  return false;
+}
+
+function requiresDeleteApprovalForBash(command: string, args: string[]) {
+  if (command === "rm" || command === "rmdir") {
+    return false;
+  }
+
+  if (command === "git") {
+    return isDeleteLikeGitInvocation(args);
+  }
+
+  if (command === "find") {
+    return isDeleteLikeFindInvocation(args);
+  }
+
+  if (command === "bash" || command === "sh" || command === "zsh" || command === "fish" || command === "node" || command === "tsx" || command === "ts-node" || command === "python" || command === "python3" || command === "perl" || command === "ruby" || command === "php" || command === "deno") {
+    return isDeleteLikeScriptInvocation(command, args);
+  }
+
+  if (command === "sudo" || command === "env" || command === "command" || command === "nice" || command === "nohup" || command === "timeout" || command === "xargs") {
+    return isDeleteLikeWrappedInvocation(args);
+  }
+
+  return false;
 }
 
 async function readTextFile(context: SandboxRuntimeContext, input: ReadTextFileInput) {
@@ -478,24 +641,43 @@ async function editTextFile(context: SandboxRuntimeContext, input: EditTextFileI
 
 async function deletePath(context: SandboxRuntimeContext, input: DeletePathInput) {
   const targetPath = resolve(input.targetPath);
-  return withPolicyFallback({
-    context,
-    run: {
-      primitive: "delete",
-      targetPath,
-      detail: `deleting ${targetPath}`,
-    },
-    async preflight() {
-      await validateDeletePath(context, targetPath);
-    },
-    buildElevatedApproval() {
-      return createFileElevatedApproval("delete", "等待确认 Elevated 删除", "删除", targetPath);
-    },
-    async executeStandard() {
-      const kind = await validateDeletePath(context, targetPath);
-      return deletePathResult(context, targetPath, kind);
-    },
-    async executeElevated() {
+  const run = {
+    primitive: "delete" as const,
+    targetPath,
+    detail: `deleting ${targetPath}`,
+  };
+  const approval = {
+    title: "等待确认删除文件",
+    detail: `即将删除 ${targetPath}。确认后只执行这一次删除。`,
+    commandLine: targetPath,
+    command: "delete",
+    args: [targetPath],
+    cwd: dirname(targetPath),
+  };
+
+  try {
+    await validateDeletePath(context, targetPath);
+  } catch (error) {
+    if (canUseElevatedFallback(context, error)) {
+      return context.audit.withRun({
+        ...run,
+        access: "elevated",
+        execute: async () => {
+          await requestDeleteApproval(context, approval);
+          const kind = await validateDeletePath(context, targetPath);
+          return deletePathResult(context, targetPath, kind);
+        },
+      });
+    }
+
+    return recordBlockedAttempt<string>(context, run, error);
+  }
+
+  return context.audit.withRun({
+    ...run,
+    access: "standard",
+    execute: async () => {
+      await requestDeleteApproval(context, approval);
       const kind = await validateDeletePath(context, targetPath);
       return deletePathResult(context, targetPath, kind);
     },
@@ -512,6 +694,14 @@ async function runBashAsDelete(context: SandboxRuntimeContext, command: string, 
   }
 
   const results: string[] = [];
+  await requestDeleteApproval(context, {
+    title: "等待确认删除命令",
+    detail: `即将通过 ${command} 删除以下路径：${pathArgs.join(", ")}。确认后只执行这一次删除。`,
+    commandLine: summarizeCommandLine(command, args),
+    command,
+    args,
+    cwd,
+  });
   for (const rawPath of pathArgs) {
     const targetPath = resolve(cwd, rawPath);
     const kind = await validateDeletePath(context, targetPath);
@@ -542,6 +732,16 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
   const args = input.args ?? [];
   const cwd = resolve(input.cwd ?? context.defaultCwd ?? projectRoot);
   const timeoutMs = Math.max(250, Math.min(input.timeoutMs ?? context.defaultTimeoutMs, 60_000));
+  const deleteLikeBashApproval = requiresDeleteApprovalForBash(command, args)
+    ? {
+        title: "等待确认删除命令",
+        detail: `即将通过 ${summarizeCommandLine(command, args)} 删除工作区内的文件。确认后只执行这一次命令。`,
+        commandLine: summarizeCommandLine(command, args),
+        command,
+        args,
+        cwd,
+      }
+    : null;
 
   if (command === "rm" || command === "rmdir") {
     return runBashAsDelete(context, command, args, cwd);
@@ -558,9 +758,7 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
     },
     preflight() {
       assertCommand(context.toolPolicy, command);
-      if (command !== "ls") {
-        assertCwd(context.toolPolicy, cwd);
-      }
+      assertCwd(context.toolPolicy, cwd);
       assertCommandArguments(context.toolPolicy, {
         command,
         args,
@@ -573,15 +771,16 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
     },
     async executeStandard() {
       assertCommand(context.toolPolicy, command);
-      if (command !== "ls") {
-        assertCwd(context.toolPolicy, cwd);
-      }
+      assertCwd(context.toolPolicy, cwd);
       assertCommandArguments(context.toolPolicy, {
         command,
         args,
         cwd,
       });
-      if (!context.toolPolicy.fullAccess && context.requestBashApproval) {
+      if (deleteLikeBashApproval) {
+        await requestDeleteApproval(context, deleteLikeBashApproval);
+      }
+      if (!context.toolPolicy.fullAccess && context.requestBashApproval && !context.autoApproveToolRequests) {
         noteBashApprovalAttempt(context, command, args, cwd);
         await context.requestBashApproval({
           command,
@@ -593,6 +792,9 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
       return executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes, profile);
     },
     async executeElevated() {
+      if (deleteLikeBashApproval) {
+        await requestDeleteApproval(context, deleteLikeBashApproval);
+      }
       return executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes);
     },
   });

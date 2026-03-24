@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SkillDefinition } from "@aliceloop/runtime-core";
@@ -35,18 +35,30 @@ async function main() {
     { assertResolvableSkillTools, buildToolSet, listRequestedSkillToolNames },
     { BASE_TOOL_NAMES, resetSkillToolCache, resolveSkillTools },
     { loadContext },
-    { createSession, createSessionMessage },
-    { listActiveSkillDefinitions, listSkillDefinitions },
+    { appendSessionEvent, createSession, createSessionMessage },
+    { buildSessionContextFragments },
+    {
+      buildSkillContextBlock,
+      getSkillDefinition,
+      listActiveSkillDefinitions,
+      listSkillDefinitions,
+      resetSkillCatalogCache,
+      selectRelevantSkillDefinitions,
+    },
+    { advanceSessionSkillCacheTurn, clearSessionSkillCache, getSessionSkillCacheHints, rememberSessionSkillRoute },
   ] = await Promise.all([
     import("../src/services/sandboxExecutor.ts"),
     import("../src/context/tools/toolRegistry.ts"),
     import("../src/context/tools/skillToolFactories.ts"),
     import("../src/context/index.ts"),
     import("../src/repositories/sessionRepository.ts"),
+    import("../src/context/session/sessionContext.ts"),
     import("../src/context/skills/skillLoader.ts"),
+    import("../src/context/skills/sessionSkillCache.ts"),
   ]);
 
   resetSkillToolCache();
+  resetSkillCatalogCache();
 
   const sandbox = createPermissionSandboxExecutor({
     label: "skill-tools-smoke",
@@ -55,9 +67,40 @@ async function main() {
     extraCwdRoots: [tempDataDir],
   });
 
-  const skillCatalog = listSkillDefinitions();
-  const availableCatalogSkills = listActiveSkillDefinitions();
-  const plannedCatalogSkills = skillCatalog.filter((skill) => skill.status === "planned");
+  let skillCatalog = listSkillDefinitions();
+  let availableCatalogSkills = listActiveSkillDefinitions();
+  let plannedCatalogSkills = skillCatalog.filter((skill) => skill.status === "planned");
+  assert.equal(
+    listSkillDefinitions(),
+    skillCatalog,
+    "skill catalog should reuse cached parsed definitions when the skill fingerprints are unchanged",
+  );
+  assert.equal(
+    listActiveSkillDefinitions(),
+    availableCatalogSkills,
+    "active skill catalog should reuse the cached available-skill slice when fingerprints are unchanged",
+  );
+  const browserSkillDefinition = getSkillDefinition("browser");
+  assert(browserSkillDefinition, "browser should resolve from the cached skill catalog");
+  assert.equal(
+    browserSkillDefinition,
+    skillCatalog.find((skill) => skill.id === "browser") ?? null,
+    "getSkillDefinition should resolve by id from the cached catalog",
+  );
+  const originalBrowserSkillStats = statSync(browserSkillDefinition.sourcePath);
+  const touchedBrowserSkillTime = new Date(originalBrowserSkillStats.mtimeMs + 60_000);
+  utimesSync(browserSkillDefinition.sourcePath, touchedBrowserSkillTime, touchedBrowserSkillTime);
+  const invalidatedSkillCatalog = listSkillDefinitions();
+  assert.notEqual(
+    invalidatedSkillCatalog,
+    skillCatalog,
+    "skill catalog should invalidate when a SKILL.md timestamp changes",
+  );
+  utimesSync(browserSkillDefinition.sourcePath, originalBrowserSkillStats.atime, originalBrowserSkillStats.mtime);
+  resetSkillCatalogCache();
+  skillCatalog = listSkillDefinitions();
+  availableCatalogSkills = listActiveSkillDefinitions();
+  plannedCatalogSkills = skillCatalog.filter((skill) => skill.status === "planned");
 
   for (const skill of skillCatalog) {
     const source = readFileSync(skill.sourcePath, "utf8");
@@ -105,11 +148,16 @@ async function main() {
   assert.deepEqual(
     listRequestedSkillToolNames(availableCatalogSkills),
     [
+      "audio_understand",
       "browser_click",
+      "browser_media_probe",
       "browser_navigate",
       "browser_screenshot",
       "browser_snapshot",
       "browser_type",
+      "browser_video_watch_poll",
+      "browser_video_watch_start",
+      "browser_video_watch_stop",
       "coding_agent_run",
       "document_ingest",
       "review_coach",
@@ -130,31 +178,22 @@ async function main() {
     allowedTools: ["runtime_script_runtime_overview"],
   };
 
-  const baseAndSkillTools = buildToolSet(sandbox, availableCatalogSkills);
+  const baseAndSkillTools = buildToolSet(sandbox, []);
+  assert.equal("time_now" in baseAndSkillTools, false, "time_now should not be part of the always-on base toolset");
+  assert.equal("weather_now" in baseAndSkillTools, false, "weather_now should not be part of the always-on base toolset");
   assert.equal(typeof baseAndSkillTools.grep, "object", "base grep tool should always be present");
   assert.equal(typeof baseAndSkillTools.bash, "object", "base bash tool should always be present");
-  assert.equal(typeof baseAndSkillTools.browser_navigate, "object", "browser_navigate should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.browser_snapshot, "object", "browser_snapshot should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.browser_click, "object", "browser_click should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.browser_type, "object", "browser_type should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.browser_screenshot, "object", "browser_screenshot should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.coding_agent_run, "object", "coding agent tool should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.document_ingest, "object", "managed task tool should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.review_coach, "object", "review coach tool should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.web_fetch, "object", "web_fetch tool should be resolved from skill metadata");
-  assert.equal(typeof baseAndSkillTools.web_search, "object", "web_search tool should be resolved from skill metadata");
+  assert.equal("browser_navigate" in baseAndSkillTools, false, "browser tools should not be injected into the default toolset");
+  assert.equal("coding_agent_run" in baseAndSkillTools, false, "coding sub-agent tools should not be injected into the default toolset");
+  assert.equal("document_ingest" in baseAndSkillTools, false, "document_ingest should not be injected into the default toolset");
+  assert.equal("review_coach" in baseAndSkillTools, false, "review_coach should not be injected into the default toolset");
+  assert.equal("web_fetch" in baseAndSkillTools, false, "web_fetch should not be injected into the default toolset");
+  assert.equal("web_search" in baseAndSkillTools, false, "web_search should not be injected into the default toolset");
   assert.equal("runtime_script_runtime_overview" in baseAndSkillTools, false, "runtime scripts should not load unless requested");
-  for (const skill of availableCatalogSkills) {
-    for (const toolName of skill.allowedTools) {
-      assert.equal(
-        typeof baseAndSkillTools[toolName],
-        "object",
-        `available skill ${skill.id} should resolve declared tool ${toolName}`,
-      );
-    }
-  }
 
-  const runtimeTools = buildToolSet(sandbox, [runtimeScriptSkill]);
+  const runtimeTools = buildToolSet(sandbox, [runtimeScriptSkill], {
+    query: "运行 runtime script 脚本任务",
+  });
   assert.equal(
     typeof runtimeTools.runtime_script_runtime_overview,
     "object",
@@ -185,10 +224,26 @@ async function main() {
   );
 
   const directResolved = resolveSkillTools(
-    new Set(["browser_navigate", "browser_snapshot", "web_fetch", "web_search", "runtime_script_runtime_overview"]),
+    new Set([
+      "audio_understand",
+      "browser_navigate",
+      "browser_snapshot",
+      "browser_media_probe",
+      "browser_video_watch_start",
+      "browser_video_watch_poll",
+      "browser_video_watch_stop",
+      "web_fetch",
+      "web_search",
+      "runtime_script_runtime_overview",
+    ]),
   );
+  assert.equal(typeof directResolved.audio_understand, "object", "resolveSkillTools should return requested audio_understand");
   assert.equal(typeof directResolved.browser_navigate, "object", "resolveSkillTools should return requested browser_navigate");
   assert.equal(typeof directResolved.browser_snapshot, "object", "resolveSkillTools should return requested browser_snapshot");
+  assert.equal(typeof directResolved.browser_media_probe, "object", "resolveSkillTools should return requested browser_media_probe");
+  assert.equal(typeof directResolved.browser_video_watch_start, "object", "resolveSkillTools should return requested browser_video_watch_start");
+  assert.equal(typeof directResolved.browser_video_watch_poll, "object", "resolveSkillTools should return requested browser_video_watch_poll");
+  assert.equal(typeof directResolved.browser_video_watch_stop, "object", "resolveSkillTools should return requested browser_video_watch_stop");
   assert.equal(typeof directResolved.web_fetch, "object", "resolveSkillTools should return requested web_fetch");
   assert.equal(typeof directResolved.web_search, "object", "resolveSkillTools should return requested web_search");
   assert.equal(
@@ -203,26 +258,63 @@ async function main() {
     clientMessageId: "skill-tools-smoke-user-1",
     deviceId: "desktop-smoke",
     role: "user",
-    content: "Please inspect a docs URL and help with coding work.",
+    content: "普通闲聊，随便打个招呼就行。",
     attachmentIds: [],
   });
 
-  const controller = new AbortController();
-  const context = await loadContext(session.id, controller.signal);
-  assert.equal(typeof context.tools.read, "object", "loadContext should keep base tools");
-  assert.equal(typeof context.tools.browser_navigate, "object", "available browser skill should attach browser_navigate to the live context");
-  assert.equal(typeof context.tools.browser_snapshot, "object", "available browser skill should attach browser_snapshot to the live context");
-  assert.equal(typeof context.tools.web_fetch, "object", "available web-fetch skill should attach web_fetch to the live context");
-  assert.equal(typeof context.tools.web_search, "object", "available web-search skill should attach web_search to the live context");
+  const sessionContextFragments = buildSessionContextFragments(session.id);
   assert.equal(
-    typeof context.tools.coding_agent_run,
-    "object",
-    "available coding-agent skill should attach coding_agent_run to the live context",
+    sessionContextFragments.timings.snapshotReads,
+    1,
+    "session context aggregation should read the session snapshot exactly once per build",
   );
   assert.equal(
-    typeof context.tools.document_ingest,
-    "object",
-    "available managed-task tools should attach through live context assembly",
+    sessionContextFragments.latestUserQuery,
+    "普通闲聊，随便打个招呼就行。",
+    "session context aggregation should preserve the latest user query",
+  );
+  assert.equal(
+    sessionContextFragments.messages.length,
+    1,
+    "session context aggregation should preserve the current message window",
+  );
+  assert.equal(
+    sessionContextFragments.projectBinding?.sessionId,
+    session.id,
+    "session context aggregation should expose the current project binding from the same snapshot",
+  );
+  assert.equal(
+    sessionContextFragments.attachmentRoots.defaultCwd,
+    sessionContextFragments.projectBinding?.projectPath ?? null,
+    "session context aggregation should derive attachment sandbox roots from the same snapshot",
+  );
+
+  const controller = new AbortController();
+  const context = await loadContext(session.id, controller.signal);
+  const contextSystemPrompt = Array.isArray(context.systemPrompt)
+    ? context.systemPrompt.map((message) => message.content).join("\n\n")
+    : context.systemPrompt;
+  assert.equal(context.timings.sessionContextAggregated, 1, "loadContext should use the aggregated session context path");
+  assert.equal(context.timings.sessionSnapshotReads, 1, "loadContext should only read one session snapshot per turn");
+  assert.equal(context.timings.projectBindingAggregated, 1, "loadContext should reuse the project binding from the aggregated session context");
+  assert.equal(context.timings.attachmentRootsAggregated, 1, "loadContext should reuse attachment roots from the aggregated session context");
+  assert.equal("time_now" in context.tools, false, "generic turns should not inject time_now");
+  assert.equal("weather_now" in context.tools, false, "generic turns should not inject weather_now");
+  assert.equal(typeof context.tools.read, "object", "loadContext should keep base tools");
+  assert.equal("browser_navigate" in context.tools, false, "generic turns should not inject browser tools");
+  assert.equal("web_fetch" in context.tools, false, "generic turns should not inject web tools");
+  assert.equal("web_search" in context.tools, false, "generic turns should not inject web tools");
+  assert.equal("coding_agent_run" in context.tools, false, "generic turns should not inject coding sub-agent tools");
+  assert.equal("document_ingest" in context.tools, false, "generic turns should not inject document_ingest");
+  assert.match(
+    contextSystemPrompt,
+    /Skill routing rule: the six sandbox primitives(?:\s*\([^)]*\))?\s+are the always-on native tools\./i,
+    "system prompt should encode the architecture rule that skills are routed rather than always-on",
+  );
+  assert.match(
+    contextSystemPrompt,
+    /No extra skill was routed for this turn, so do not assume any non-primitive tool should be present\./i,
+    "system prompt should clarify when no routed skill is attached for the current turn",
   );
   const plannedOnlyTools = new Set<string>();
   for (const skill of plannedCatalogSkills) {
@@ -247,6 +339,653 @@ async function main() {
     );
   }
 
+  const researchToolSet = buildToolSet(
+    sandbox,
+    selectRelevantSkillDefinitions("帮我查一下东莞今天天气，给我最新结果。"),
+    {
+      query: "帮我查一下东莞今天天气，给我最新结果。",
+    },
+  );
+  assert.equal(typeof researchToolSet.web_search, "object", "research turns should inject web_search");
+  assert.equal("web_fetch" in researchToolSet, false, "research turns should not inject web_fetch by default");
+  assert.equal("browser_navigate" in researchToolSet, false, "research turns should not inject browser tools by default");
+
+  const browserToolSet = buildToolSet(
+    sandbox,
+    selectRelevantSkillDefinitions("打开浏览器访问这个页面，点击按钮并截图。"),
+    {
+      query: "打开浏览器访问这个页面，点击按钮并截图。",
+    },
+  );
+  assert.equal(typeof browserToolSet.browser_navigate, "object", "browser turns should inject browser_navigate");
+  assert.equal(typeof browserToolSet.browser_snapshot, "object", "browser turns should inject browser_snapshot");
+  assert.equal(typeof browserToolSet.browser_click, "object", "browser turns should inject browser_click");
+  assert.equal(typeof browserToolSet.browser_type, "object", "browser turns should inject browser_type");
+  assert.equal(typeof browserToolSet.browser_screenshot, "object", "browser turns should inject browser_screenshot");
+  assert.equal(typeof browserToolSet.browser_media_probe, "object", "browser turns should inject browser_media_probe");
+  assert.equal(typeof browserToolSet.browser_video_watch_start, "object", "browser turns should inject browser_video_watch_start");
+  assert.equal(typeof browserToolSet.browser_video_watch_poll, "object", "browser turns should inject browser_video_watch_poll");
+  assert.equal(typeof browserToolSet.browser_video_watch_stop, "object", "browser turns should inject browser_video_watch_stop");
+  assert.equal("coding_agent_run" in browserToolSet, false, "browser turns should not inject coding sub-agent tools");
+  const browserSkillBlock = buildSkillContextBlock(
+    selectRelevantSkillDefinitions("打开浏览器访问这个页面，点击按钮并截图。"),
+    { browserRelayAvailable: true },
+  );
+  assert.match(
+    browserSkillBlock,
+    /healthy visible Aliceloop Desktop Chrome relay is available right now/i,
+    "browser skill block should surface the visible desktop relay when it is available",
+  );
+  assert.match(
+    browserSkillBlock,
+    /Do not claim that browser automation is headless, stateless, or unable to retain login data/i,
+    "browser skill block should explicitly prevent incorrect headless-browser claims when relay is healthy",
+  );
+
+  const subagentToolSet = buildToolSet(sandbox, availableCatalogSkills, {
+    query: "请把这个复杂多文件重构交给 sub-agent 去做。",
+  });
+  assert.equal(typeof subagentToolSet.coding_agent_run, "object", "explicit sub-agent turns should inject coding_agent_run");
+
+  const researchSkills = selectRelevantSkillDefinitions("帮我查一下东莞今天天气，给我最新结果。");
+  assert.deepEqual(
+    researchSkills.map((skill) => skill.id).sort(),
+    ["web-search"],
+    "fact verification turns should route to web-search first",
+  );
+  const researchSkillBlock = buildSkillContextBlock(researchSkills);
+  assert.match(
+    researchSkillBlock,
+    /Routed skills for this turn:/,
+    "skill block should list routed skills instead of the entire catalog",
+  );
+  assert.match(
+    researchSkillBlock,
+    /web-search:/i,
+    "research skill block should surface the web-search skill",
+  );
+  assert.equal(
+    researchSkillBlock.includes("coding-agent:"),
+    false,
+    "research skill block should not include unrelated skills",
+  );
+  assert.match(
+    researchSkillBlock,
+    /web_search as the default first step/i,
+    "research skill block should describe the search-first priority for fact verification turns",
+  );
+  assert.match(
+    researchSkillBlock,
+    /Research memory rule: keep a running evidence ledger/i,
+    "research skill block should explain that search results are an evidence ledger, not a final answer",
+  );
+  assert.match(
+    researchSkillBlock,
+    /Active capability groups for this turn: Research Core/i,
+    "research skill block should surface the routed capability group",
+  );
+
+  const interactionSkills = selectRelevantSkillDefinitions("去网页上回复他，和别人对线一下。");
+  assert.equal(
+    interactionSkills.some((skill) => skill.id === "browser"),
+    true,
+    "interactive external-action turns should route to the browser skill",
+  );
+
+  const socialFeedSkills = selectRelevantSkillDefinitions("去刷推特和抖音，看看主页、视频和帖子。");
+  assert.equal(
+    socialFeedSkills.some((skill) => skill.id === "browser"),
+    true,
+    "social feed browsing turns should route to the browser skill across platforms",
+  );
+
+  const surfingSkills = selectRelevantSkillDefinitions("让它上网冲浪一下");
+  assert.equal(
+    surfingSkills.some((skill) => skill.id === "browser"),
+    true,
+    "internet surfing phrasing should route to the browser skill",
+  );
+
+  const browserCapabilitySkills = selectRelevantSkillDefinitions("继续刷推特时间线，顺手看看帖子。");
+  assert.equal(
+    browserCapabilitySkills.some((skill) => skill.id === "browser"),
+    true,
+    "social browsing phrasing should keep browser routed through the browser interaction group",
+  );
+
+  const capabilityDiscoverySkills = selectRelevantSkillDefinitions("我有哪些 skills？为什么没有 browser_click，Browser Relay 开关还开着吗？");
+  assert.equal(
+    capabilityDiscoverySkills.some((skill) => skill.id === "browser"),
+    true,
+    "browser capability diagnostics should still route the browser skill itself",
+  );
+  assert.equal(
+    capabilityDiscoverySkills.some((skill) => skill.id === "skill-discovery" || skill.id === "skill-hub"),
+    true,
+    "browser capability diagnostics should route skill catalog discovery",
+  );
+  assert.equal(
+    capabilityDiscoverySkills.some((skill) => skill.id === "system-info"),
+    true,
+    "browser capability diagnostics should route system diagnostics for relay state questions",
+  );
+
+  const socialFeedToolSet = buildToolSet(
+    sandbox,
+    selectRelevantSkillDefinitions("去刷推特和抖音，看看主页、视频和帖子。"),
+    {
+      query: "去刷推特和抖音，看看主页、视频和帖子。",
+    },
+  );
+  assert.equal(typeof socialFeedToolSet.browser_navigate, "object", "social feed turns should inject browser_navigate");
+  assert.equal(typeof socialFeedToolSet.browser_snapshot, "object", "social feed turns should inject browser_snapshot");
+  assert.equal(typeof socialFeedToolSet.browser_click, "object", "social feed turns should inject browser_click");
+  assert.equal(typeof socialFeedToolSet.browser_type, "object", "social feed turns should inject browser_type");
+  assert.equal(typeof socialFeedToolSet.browser_screenshot, "object", "social feed turns should inject browser_screenshot");
+  assert.equal(typeof socialFeedToolSet.browser_media_probe, "object", "social feed turns should inject browser_media_probe");
+  assert.equal(typeof socialFeedToolSet.browser_video_watch_start, "object", "social feed turns should inject browser_video_watch_start");
+  assert.equal(typeof socialFeedToolSet.browser_video_watch_poll, "object", "social feed turns should inject browser_video_watch_poll");
+  assert.equal(typeof socialFeedToolSet.browser_video_watch_stop, "object", "social feed turns should inject browser_video_watch_stop");
+
+  const videoWatchSkills = selectRelevantSkillDefinitions("继续看这个视频后面讲了什么，顺便听听他说了什么。");
+  assert.equal(videoWatchSkills.some((skill) => skill.id === "browser"), true, "video watching should keep browser routed");
+  assert.equal(videoWatchSkills.some((skill) => skill.id === "video-analysis"), true, "video watching should route video-analysis");
+  assert.equal(videoWatchSkills.some((skill) => skill.id === "audio-analysis"), true, "spoken-video turns should route audio-analysis");
+
+  const creatorMetricSkills = selectRelevantSkillDefinitions("病院坂saki现在多少粉丝来着");
+  assert.deepEqual(
+    creatorMetricSkills.map((skill) => skill.id).sort(),
+    ["web-search"],
+    "creator metric questions should route to web-search first",
+  );
+
+  const continuationSession = createSession("continuation focus smoke");
+  createSessionMessage({
+    sessionId: continuationSession.id,
+    clientMessageId: "continuation-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "帮我调查摩的司机徐师傅，站粉丝数量搞错了。",
+    attachmentIds: [],
+  });
+  createSessionMessage({
+    sessionId: continuationSession.id,
+    clientMessageId: "continuation-user-2",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "B站内容才是准的，查一下3月22日的情况。",
+    attachmentIds: [],
+  });
+  createSessionMessage({
+    sessionId: continuationSession.id,
+    clientMessageId: "continuation-assistant-1",
+    deviceId: "desktop-smoke",
+    role: "assistant",
+    content: "我先按 B 站和时间点继续查。",
+    attachmentIds: [],
+  });
+  createSessionMessage({
+    sessionId: continuationSession.id,
+    clientMessageId: "continuation-user-3",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "你查",
+    attachmentIds: [],
+  });
+  const continuationSearchOutput = JSON.stringify({
+    query: "摩的司机徐师傅 B站 3月22日",
+    effectiveQuery: "摩的司机徐师傅 B站 3月22日",
+    sources: [
+      {
+        citationIndex: 1,
+        title: "摩的司机徐师傅的个人空间-哔哩哔哩",
+        url: "https://space.bilibili.com/3493117728656046",
+        domain: "bilibili.com",
+        sourceType: "platform",
+      },
+      {
+        citationIndex: 2,
+        title: "摩的司机徐师傅的抖音主页",
+        url: "https://www.douyin.com/user/testdouyin",
+        domain: "douyin.com",
+        sourceType: "platform",
+      },
+      {
+        citationIndex: 3,
+        title: "摩的司机徐师傅 / X",
+        url: "https://x.com/testcreator",
+        domain: "x.com",
+        sourceType: "platform",
+      },
+    ],
+  }, null, 2);
+  appendSessionEvent(continuationSession.id, "tool.call.started", {
+    toolCallId: "continuation-search-1",
+    toolName: "web_search",
+    inputPreview: "{\"query\":\"摩的司机徐师傅 B站 3月22日\"}",
+    backend: "desktop_chrome",
+  });
+  appendSessionEvent(continuationSession.id, "tool.state.change", {
+    toolCallId: "continuation-search-1",
+    toolName: "web_search",
+    status: "done",
+    input: {
+      query: "摩的司机徐师傅 B站 3月22日",
+      max_results: 10,
+    },
+    output: continuationSearchOutput,
+  });
+  appendSessionEvent(continuationSession.id, "tool.call.completed", {
+    toolCallId: "continuation-search-1",
+    toolName: "web_search",
+    success: true,
+    resultPreview: "{\"results\":[{\"url\":\"https://space.bilibili.com/3493117728656046\"}]}",
+    durationMs: 122,
+    backend: "desktop_chrome",
+  });
+  const continuationFetchOutput = [
+    "Source URL: https://space.bilibili.com/3493117728656046",
+    "Source Domain: space.bilibili.com",
+    "Retrieved At: 2026-03-24T00:00:00.000Z",
+    "Fetch Backend: desktop_chrome",
+    "Page Title: 摩的司机徐师傅的个人空间-哔哩哔哩",
+    "",
+    "---",
+    "",
+    "# 摩的司机徐师傅",
+    "粉丝 112.5 万",
+    "视频 42",
+  ].join("\n");
+  appendSessionEvent(continuationSession.id, "tool.call.started", {
+    toolCallId: "continuation-fetch-1",
+    toolName: "web_fetch",
+    inputPreview: "{\"url\":\"https://space.bilibili.com/3493117728656046\"}",
+    backend: "desktop_chrome",
+  });
+  appendSessionEvent(continuationSession.id, "tool.state.change", {
+    toolCallId: "continuation-fetch-1",
+    toolName: "web_fetch",
+    status: "done",
+    input: {
+      url: "https://space.bilibili.com/3493117728656046",
+    },
+    output: continuationFetchOutput,
+  });
+  appendSessionEvent(continuationSession.id, "tool.call.completed", {
+    toolCallId: "continuation-fetch-1",
+    toolName: "web_fetch",
+    success: true,
+    resultPreview: "B站主页，粉丝与视频列表实时展示。",
+    durationMs: 84,
+    backend: "desktop_chrome",
+  });
+
+  const continuationContext = await loadContext(continuationSession.id, controller.signal);
+  const continuationSystemPrompt = Array.isArray(continuationContext.systemPrompt)
+    ? continuationContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : continuationContext.systemPrompt;
+  assert.match(
+    continuationSystemPrompt,
+    /## Recent Conversation Focus/,
+    "loadContext should add a recent focus block for short continuation turns",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /latest user message is a continuation-style follow-up/i,
+    "continuation focus block should explicitly mark short follow-up turns",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Original topic anchor from recent turns: 帮我调查摩的司机徐师傅，站粉丝数量搞错了。/,
+    "continuation focus block should keep the original research topic visible",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Latest explicit anchor from recent turns: B站内容才是准的，查一下3月22日的情况。/,
+    "continuation focus block should retain the narrowed verification target",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Current unresolved research task: 帮我调查摩的司机徐师傅，站粉丝数量搞错了。 .*B站内容才是准的，查一下3月22日的情况。/,
+    "continuation focus block should synthesize an unresolved research task",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Source policy for this turn: prioritize the primary platform pages for Bilibili, Douyin, and X\/Twitter when relevant/i,
+    "continuation focus block should expose a strict source policy for fresh platform verification work",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Resolved current request for this turn: .*Current concrete target: B站内容才是准的，查一下3月22日的情况。.*Latest user follow-up: 你查/i,
+    "continuation focus block should operationally expand a short follow-up into a concrete work item",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /<resolved_current_request>[\s\S]*Latest user follow-up: 你查[\s\S]*<\/resolved_current_request>/i,
+    "active turn block should expose the resolved current request near the latest user message",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Required action for this turn: use the routed web_search \/ web_fetch research pair only if a specific page still needs to be read/i,
+    "continuation focus block should keep fetch lazy when the task is still source-finding only",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Sticky skill groups for this turn: research-core/i,
+    "continuation focus block should keep the research capability group sticky across short follow-ups",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Baidu Baike priority is extremely low for this thread/i,
+    "continuation focus block should explicitly de-prioritize Baidu Baike for ongoing fact verification threads",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /## Recent Tool Activity/,
+    "loadContext should surface recent tool activity for ongoing research threads",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /web_search · via desktop_chrome · completed · 122ms .*摩的司机徐师傅 B站 3月22日/i,
+    "recent tool activity block should include the recent search trace",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /web_fetch · via desktop_chrome · completed · 84ms .*space\.bilibili\.com/i,
+    "recent tool activity block should include the recent fetch trace",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /## Research Memory/,
+    "loadContext should add a research memory ledger for investigation turns",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Next fetch target: https:\/\/www\.douyin\.com\/user\/testdouyin/,
+    "research memory ledger should point at the strongest unfetched candidate URL",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /Fetched evidence:[\s\S]*摩的司机徐师傅的个人空间-哔哩哔哩/,
+    "research memory ledger should retain the already fetched upstream page",
+  );
+  assert.match(
+    continuationSystemPrompt,
+    /User: 你查/,
+    "continuation focus block should include the short follow-up itself",
+  );
+
+  const twitterContinuationSession = createSession("twitter continuation smoke");
+  createSessionMessage({
+    sessionId: twitterContinuationSession.id,
+    clientMessageId: "twitter-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "看下这个 x.com 链接里的人都在吵什么。",
+    attachmentIds: [],
+  });
+  createSessionMessage({
+    sessionId: twitterContinuationSession.id,
+    clientMessageId: "twitter-assistant-1",
+    deviceId: "desktop-smoke",
+    role: "assistant",
+    content: "我先看推文内容和媒体。",
+    attachmentIds: [],
+  });
+  createSessionMessage({
+    sessionId: twitterContinuationSession.id,
+    clientMessageId: "twitter-user-2",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "继续",
+    attachmentIds: [],
+  });
+  const twitterContinuationContext = await loadContext(twitterContinuationSession.id, controller.signal);
+  const twitterContinuationPrompt = Array.isArray(twitterContinuationContext.systemPrompt)
+    ? twitterContinuationContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : twitterContinuationContext.systemPrompt;
+  assert.equal(
+    typeof twitterContinuationContext.tools.web_search,
+    "object",
+    "twitter continuation turns should preserve research tools through the research group",
+  );
+  assert.equal(
+    typeof twitterContinuationContext.tools.web_fetch,
+    false,
+    "twitter continuation turns should not preserve fetch unless the follow-up still needs a page read",
+  );
+  assert.match(
+    twitterContinuationPrompt,
+    /Sticky skill routing for this turn: .*twitter-media/i,
+    "continuation context should keep the platform-specific twitter-media skill sticky",
+  );
+  assert.match(
+    twitterContinuationPrompt,
+    /Sticky skill groups for this turn: .*social-platform/i,
+    "continuation context should keep the social platform group sticky for short follow-ups",
+  );
+
+  const browserContinuationSession = createSession("browser continuation smoke");
+  createSessionMessage({
+    sessionId: browserContinuationSession.id,
+    clientMessageId: "browser-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "打开浏览器去 B 站登录页，我来扫码。",
+    attachmentIds: [],
+  });
+  createSessionMessage({
+    sessionId: browserContinuationSession.id,
+    clientMessageId: "browser-assistant-1",
+    deviceId: "desktop-smoke",
+    role: "assistant",
+    content: "我先打开登录页并准备截图。",
+    attachmentIds: [],
+  });
+  appendSessionEvent(browserContinuationSession.id, "tool.call.started", {
+    toolCallId: "browser-flow-1",
+    toolName: "browser_navigate",
+    inputPreview: "{\"url\":\"https://passport.bilibili.com/login\"}",
+    backend: "desktop_chrome",
+  });
+  appendSessionEvent(browserContinuationSession.id, "tool.call.completed", {
+    toolCallId: "browser-flow-1",
+    toolName: "browser_navigate",
+    success: true,
+    resultPreview: "{\"url\":\"https://passport.bilibili.com/login\"}",
+    durationMs: 155,
+    backend: "desktop_chrome",
+  });
+  createSessionMessage({
+    sessionId: browserContinuationSession.id,
+    clientMessageId: "browser-user-2",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "继续",
+    attachmentIds: [],
+  });
+  const browserContinuationContext = await loadContext(browserContinuationSession.id, controller.signal);
+  const browserContinuationPrompt = Array.isArray(browserContinuationContext.systemPrompt)
+    ? browserContinuationContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : browserContinuationContext.systemPrompt;
+  assert.equal(
+    typeof browserContinuationContext.tools.browser_navigate,
+    "object",
+    "browser continuation turns should preserve browser_navigate through sticky browser capability routing",
+  );
+  assert.equal(
+    typeof browserContinuationContext.tools.browser_snapshot,
+    "object",
+    "browser continuation turns should preserve browser_snapshot through sticky browser capability routing",
+  );
+  assert.match(
+    browserContinuationPrompt,
+    /Sticky skill groups for this turn: .*browser-interaction/i,
+    "browser continuation context should keep the browser interaction group sticky",
+  );
+  assert.match(
+    browserContinuationPrompt,
+    /Recent Tool Activity[\s\S]*browser_navigate · via desktop_chrome · completed/i,
+    "browser continuation context should retain recent browser tool momentum",
+  );
+
+  const cachedSkillSession = createSession("sticky skill cache smoke");
+  clearSessionSkillCache(cachedSkillSession.id);
+  rememberSessionSkillRoute(cachedSkillSession.id, {
+    skillIds: ["browser", "twitter-media", "web-search", "web-fetch"],
+    groupIds: ["browser-interaction", "social-platform", "research-core"],
+  });
+  assert.deepEqual(
+    getSessionSkillCacheHints(cachedSkillSession.id, { includeSticky: false }),
+    {
+      stickySkillIds: [],
+      stickyGroupIds: [],
+      reasons: [],
+    },
+    "session skill cache should stay dormant unless the turn actually needs sticky skill reuse",
+  );
+  const cachedHints = getSessionSkillCacheHints(cachedSkillSession.id, { includeSticky: true });
+  const cachedContinuationSkills = selectRelevantSkillDefinitions("继续", cachedHints);
+  assert.equal(
+    cachedContinuationSkills.some((skill) => skill.id === "browser"),
+    true,
+    "sticky skill cache should keep browser alive for short continuation turns",
+  );
+  assert.equal(
+    cachedContinuationSkills.some((skill) => skill.id === "twitter-media"),
+    true,
+    "sticky skill cache should keep the platform-specific social skill alive for short continuation turns",
+  );
+  assert.equal(
+    cachedContinuationSkills.some((skill) => skill.id === "web-search"),
+    true,
+    "sticky skill cache should keep research search alive for short continuation turns",
+  );
+  assert.equal(
+    cachedContinuationSkills.some((skill) => skill.id === "web-fetch"),
+    true,
+    "sticky skill cache should keep research fetch alive for short continuation turns",
+  );
+  for (let index = 0; index < 4; index += 1) {
+    advanceSessionSkillCacheTurn(cachedSkillSession.id);
+  }
+  assert.deepEqual(
+    getSessionSkillCacheHints(cachedSkillSession.id, { includeSticky: true }),
+    {
+      stickySkillIds: [],
+      stickyGroupIds: [],
+      reasons: [],
+    },
+    "session skill cache should decay away after a few turns when it is no longer refreshed",
+  );
+
+  const timeSession = createSession("time verification smoke");
+  createSessionMessage({
+    sessionId: timeSession.id,
+    clientMessageId: "time-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "现在几点？",
+    attachmentIds: [],
+  });
+
+  const timeContext = await loadContext(timeSession.id, controller.signal);
+  assert.equal("time_now" in timeContext.tools, false, "time questions should not inject a dedicated time tool");
+  assert.equal("weather_now" in timeContext.tools, false, "time questions should not inject weather tools");
+  const timeSkills = selectRelevantSkillDefinitions("现在几点？");
+  assert.equal(
+    timeSkills.some((skill) => skill.id === "system-info"),
+    true,
+    "current time questions should route the system-info skill",
+  );
+  const timeSkillBlock = buildSkillContextBlock(timeSkills);
+  assert.match(
+    timeSkillBlock,
+    /system-info:/i,
+    "current time questions should surface the system-info skill in the routed skill block",
+  );
+  const timeSystemPrompt = Array.isArray(timeContext.systemPrompt)
+    ? timeContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : timeContext.systemPrompt;
+  assert.match(
+    timeSystemPrompt,
+    /Required action for this turn: verify it before replying\. Use the routed `system-info` skill first; it can call `bash` with an exact local time command such as `date`/i,
+    "active turn block should force system-info-backed date verification for current time questions",
+  );
+
+  const timeChallengeSession = createSession("time challenge smoke");
+  createSessionMessage({
+    sessionId: timeChallengeSession.id,
+    clientMessageId: "time-user-2",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "今天不是23号吗？",
+    attachmentIds: [],
+  });
+  const timeChallengeContext = await loadContext(timeChallengeSession.id, controller.signal);
+  const timeChallengeSkills = selectRelevantSkillDefinitions("今天不是23号吗？");
+  assert.equal(
+    timeChallengeSkills.some((skill) => skill.id === "system-info"),
+    true,
+    "date challenge questions should route the system-info skill",
+  );
+  const timeChallengePrompt = Array.isArray(timeChallengeContext.systemPrompt)
+    ? timeChallengeContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : timeChallengeContext.systemPrompt;
+  assert.match(
+    timeChallengePrompt,
+    /Required action for this turn: verify it before replying\. Use the routed `system-info` skill first; it can call `bash` with an exact local time command such as `date`/i,
+    "active turn block should force system-info-backed date verification for date challenge questions too",
+  );
+
+  const weatherSession = createSession("weather verification smoke");
+  createSessionMessage({
+    sessionId: weatherSession.id,
+    clientMessageId: "weather-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "东莞今天天气怎么样？",
+    attachmentIds: [],
+  });
+  const weatherContext = await loadContext(weatherSession.id, controller.signal);
+  assert.equal(typeof weatherContext.tools.web_search, "object", "weather questions should inject web_search");
+  assert.equal("web_fetch" in weatherContext.tools, false, "weather questions should not inject web_fetch by default");
+  assert.equal("time_now" in weatherContext.tools, false, "weather questions should not inject time tools");
+  const weatherSystemPrompt = Array.isArray(weatherContext.systemPrompt)
+    ? weatherContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : weatherContext.systemPrompt;
+  assert.match(
+    weatherSystemPrompt,
+    /Required action for this turn: verify it before replying\. Use `web_search` to find a fresh weather source, then `web_fetch` if needed/i,
+    "active turn block should force web verification for weather questions",
+  );
+
+  const creatorMetricSession = createSession("creator metric verification smoke");
+  createSessionMessage({
+    sessionId: creatorMetricSession.id,
+    clientMessageId: "creator-metric-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "病院坂saki现在多少粉丝来着",
+    attachmentIds: [],
+  });
+  const creatorMetricContext = await loadContext(creatorMetricSession.id, controller.signal);
+  assert.equal(typeof creatorMetricContext.tools.web_search, "object", "creator metric turns should inject web_search");
+  assert.equal("web_fetch" in creatorMetricContext.tools, false, "creator metric turns should not inject web_fetch by default");
+  const creatorMetricPrompt = Array.isArray(creatorMetricContext.systemPrompt)
+    ? creatorMetricContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : creatorMetricContext.systemPrompt;
+  assert.match(
+    creatorMetricPrompt,
+    /Required action for this turn: start with `web_search` before replying\. If the snippets and source links are enough, answer from them; otherwise call `web_fetch` on the strongest candidate source/i,
+    "active turn block should keep creator metric verification search-first and fetch-lazy",
+  );
+  assert.match(
+    creatorMetricPrompt,
+    /Baidu Baike has extremely low priority/i,
+    "active turn block should explicitly de-prioritize Baidu Baike for creator metric verification turns",
+  );
+
   const server = createServer((request, response) => {
     if (request.url === "/article") {
       response.setHeader("content-type", "text/html; charset=utf-8");
@@ -270,7 +1009,51 @@ async function main() {
     }
 
     if (request.url?.startsWith("/search?")) {
+      const requestUrl = new URL(request.url, "http://127.0.0.1");
+      const query = requestUrl.searchParams.get("q") ?? "";
+      if (query.includes("病院坂saki")) {
+        response.setHeader("content-type", "text/html; charset=utf-8");
+        if (/(B站|bilibili|抖音|douyin|推特|twitter)/u.test(query)) {
+          response.end([
+            "<html><body>",
+            '<div class="result"><a class="result__a" href="https://space.bilibili.com/999999999">病院坂saki的个人空间-哔哩哔哩</a><div class="result__snippet">B站主页，粉丝与投稿实时展示。</div></div>',
+            '<div class="result"><a class="result__a" href="https://www.douyin.com/user/byouinsakii">病院坂saki 的抖音主页</a><div class="result__snippet">抖音主页，展示粉丝和作品。</div></div>',
+            '<div class="result"><a class="result__a" href="https://x.com/byouinsaki">病院坂saki / X</a><div class="result__snippet">X 主页，展示关注者和动态。</div></div>',
+            '<div class="result"><a class="result__a" href="https://baike.baidu.com/item/%E7%97%85%E9%99%A2%E5%9D%82saki/123456">病院坂saki_百度百科</a><div class="result__snippet">截至2025年4月的旧资料。</div></div>',
+            "</body></html>",
+          ].join(""));
+          return;
+        }
+
+        response.end([
+          "<html><body>",
+          '<div class="result"><a class="result__a" href="https://baike.baidu.com/item/%E7%97%85%E9%99%A2%E5%9D%82saki/123456">病院坂saki_百度百科</a><div class="result__snippet">截至2025年4月的旧资料。</div></div>',
+          "</body></html>",
+        ].join(""));
+        return;
+      }
       response.setHeader("content-type", "text/html; charset=utf-8");
+      if (query.includes("摩的司机徐师傅") || query.includes("B站") || query.includes("粉丝")) {
+        response.end([
+          "<html><body>",
+          '<div class="result"><a class="result__a" href="https://baike.baidu.com/item/%E6%91%A9%E7%9A%84%E5%8F%B8%E6%9C%BA%E5%BE%90%E5%B8%88%E5%82%85/65934547">摩的司机徐师傅_百度百科</a><div class="result__snippet">截至2025年4月，粉丝112.5万。</div></div>',
+          '<div class="result"><a class="result__a" href="https://space.bilibili.com/3493117728656046">摩的司机徐师傅的个人空间-哔哩哔哩</a><div class="result__snippet">B站主页，粉丝与视频列表实时展示。</div></div>',
+          '<div class="result"><a class="result__a" href="https://www.mcndata.cn/details/3493117728656046">MCN DATA - 摩的司机徐师傅</a><div class="result__snippet">第三方监测数据，可作补充参考。</div></div>',
+          "</body></html>",
+        ].join(""));
+        return;
+      }
+      if (query.includes("抖音") || query.includes("douyin") || query.includes("推特") || query.includes("twitter")) {
+        response.end([
+          "<html><body>",
+          '<div class="result"><a class="result__a" href="https://www.douyin.com/user/testdouyin">测试创作者的抖音主页</a><div class="result__snippet">抖音主页，展示粉丝和作品。</div></div>',
+          '<div class="result"><a class="result__a" href="https://x.com/testcreator">Test Creator / X</a><div class="result__snippet">X 主页，展示关注者和动态。</div></div>',
+          '<div class="result"><a class="result__a" href="https://zh.wikipedia.org/wiki/Test_Creator">Test Creator - Wikipedia</a><div class="result__snippet">人物背景资料。</div></div>',
+          "</body></html>",
+        ].join(""));
+        return;
+      }
+
       response.end([
         "<html><body>",
         '<div class="result"><a class="result__a" href="https://docs.example.com/runtime-core">Runtime Core Docs</a><div class="result__snippet">Official runtime core overview.</div></div>',
@@ -322,8 +1105,8 @@ async function main() {
     }
 
     const baseUrl = `http://127.0.0.1:${address.port}`;
-    const webFetchTool = baseAndSkillTools.web_fetch as any;
-    const webSearchTool = baseAndSkillTools.web_search as any;
+    const webFetchTool = researchToolSet.web_fetch as any;
+    const webSearchTool = researchToolSet.web_search as any;
     process.env.ALICELOOP_WEB_SEARCH_ENDPOINT = `${baseUrl}/search`;
 
     const articleResult = String(
@@ -335,6 +1118,7 @@ async function main() {
     );
     assert(articleResult.includes("# Skill Tool Smoke"), "web_fetch should convert article heading into Markdown");
     assert(articleResult.includes("This page verifies HTML extraction."), "web_fetch should preserve main article text");
+    assert(articleResult.includes("Source URL: "), "web_fetch should stamp HTML pages with source metadata");
     assert.equal(articleResult.includes("site-nav"), false, "web_fetch should strip navigation noise");
     assert.equal(articleResult.includes("footer-noise"), false, "web_fetch should strip footer noise");
 
@@ -345,7 +1129,8 @@ async function main() {
         maxLength: 5000,
       }),
     );
-    assert(jsonResult.includes("\"ok\":true"), "web_fetch should return JSON payloads as-is");
+    assert(jsonResult.includes("Source URL: "), "web_fetch should stamp JSON payloads with source metadata");
+    assert(jsonResult.includes("\"ok\":true"), "web_fetch should preserve JSON payload content");
 
     const searchResult = JSON.parse(
       String(
@@ -355,17 +1140,102 @@ async function main() {
           domains: ["docs.example.com"],
         }),
       ),
-    ) as { results: Array<{ title: string; url: string; snippet: string }> };
+    ) as {
+      results: Array<{ title: string; url: string; snippet: string }>;
+      sources?: Array<{ title: string; url: string }>;
+    };
     assert.equal(searchResult.results.length > 0, true, "web_search should return search results");
     assert.equal(searchResult.results[0]?.title, "Runtime Core Docs", "web_search should parse result titles");
     assert.equal(searchResult.results[0]?.url, "https://docs.example.com/runtime-core", "web_search should parse result URLs");
     assert(searchResult.results[0]?.snippet.includes("Official runtime core overview."), "web_search should parse result snippets");
+    assert.equal(searchResult.sources?.length > 0, true, "web_search should include source links for citation");
 
-    const browserNavigateTool = baseAndSkillTools.browser_navigate as any;
-    const browserSnapshotTool = baseAndSkillTools.browser_snapshot as any;
-    const browserTypeTool = baseAndSkillTools.browser_type as any;
-    const browserClickTool = baseAndSkillTools.browser_click as any;
-    const browserScreenshotTool = baseAndSkillTools.browser_screenshot as any;
+    const metricSearchResult = JSON.parse(
+      String(
+        await webSearchTool.execute({
+          query: "摩的司机徐师傅 B站 粉丝 最新",
+          maxResults: 5,
+        }),
+      ),
+    ) as {
+      effectiveDomains?: string[];
+      results: Array<{ domain: string; sourceType: string }>;
+    };
+    assert.equal(
+      metricSearchResult.effectiveDomains?.includes("bilibili.com"),
+      true,
+      "web_search should auto-scope bilibili metric queries to bilibili.com",
+    );
+    assert.equal(
+      metricSearchResult.results.some((result) => result.domain === "baike.baidu.com"),
+      false,
+      "web_search should suppress encyclopedia results for fresh platform metric queries when better sources exist",
+    );
+    assert.equal(
+      metricSearchResult.results[0]?.domain,
+      "space.bilibili.com",
+      "web_search should prioritize the primary platform page for bilibili metric queries",
+    );
+
+    const multiPlatformSearchResult = JSON.parse(
+      String(
+        await webSearchTool.execute({
+          query: "测试创作者 抖音 推特 粉丝 最新",
+          maxResults: 5,
+        }),
+      ),
+    ) as {
+      effectiveDomains?: string[];
+      results: Array<{ domain: string }>;
+    };
+    assert.equal(
+      multiPlatformSearchResult.effectiveDomains?.includes("douyin.com"),
+      true,
+      "web_search should track Douyin as a preferred primary domain when the query mentions 抖音",
+    );
+    assert.equal(
+      multiPlatformSearchResult.effectiveDomains?.includes("x.com"),
+      true,
+      "web_search should track X as a preferred primary domain when the query mentions 推特/Twitter",
+    );
+    assert.equal(
+      multiPlatformSearchResult.results.some((result) => result.domain.includes("wikipedia.org")),
+      false,
+      "web_search should suppress wiki results for fresh multi-platform metric queries when primary platform results exist",
+    );
+
+    const creatorMetricSearchResult = JSON.parse(
+      String(
+        await webSearchTool.execute({
+          query: "病院坂saki现在多少粉丝来着",
+          maxResults: 5,
+        }),
+      ),
+    ) as {
+      effectiveQuery?: string;
+      results: Array<{ domain: string }>;
+    };
+    assert.match(
+      creatorMetricSearchResult.effectiveQuery ?? "",
+      /B站 .*抖音 .*推特/u,
+      "web_search should expand generic creator metric queries toward primary platforms",
+    );
+    assert.equal(
+      creatorMetricSearchResult.results.some((result) => result.domain === "baike.baidu.com"),
+      false,
+      "web_search should suppress Baidu Baike when primary platform results become available for creator metric queries",
+    );
+    assert.deepEqual(
+      creatorMetricSearchResult.results.slice(0, 3).map((result) => result.domain),
+      ["space.bilibili.com", "www.douyin.com", "x.com"],
+      "web_search should prioritize primary platform pages for generic creator metric queries",
+    );
+
+    const browserNavigateTool = browserToolSet.browser_navigate as any;
+    const browserSnapshotTool = browserToolSet.browser_snapshot as any;
+    const browserTypeTool = browserToolSet.browser_type as any;
+    const browserClickTool = browserToolSet.browser_click as any;
+    const browserScreenshotTool = browserToolSet.browser_screenshot as any;
     disposeBrowser = browserNavigateTool.__dispose;
 
     const browserLanding = JSON.parse(

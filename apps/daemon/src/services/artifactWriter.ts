@@ -205,7 +205,7 @@ export async function maybeCreateArtifactFromReply(sessionId: string, userText: 
       sessionId,
       "done",
       `已生成工件 · ${completedArtifact.title}`,
-      "这轮回复已经按块流式写入工件，桌面和 companion 会共享同一份正文。",
+      "这轮回复已经按块流式写入工件，多端会共享同一份正文。",
     );
     return completedArtifact;
   } catch (error) {

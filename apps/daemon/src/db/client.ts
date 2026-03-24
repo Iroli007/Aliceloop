@@ -556,7 +556,10 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "runtime_settings", "reasoning_effort", "TEXT NOT NULL DEFAULT 'medium'");
+  ensureColumn(db, "runtime_settings", "auto_approve_tool_requests", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "device_presence", "capabilities_json", "TEXT NOT NULL DEFAULT '{}'");
+  db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
   db.prepare("UPDATE task_runs SET task_type = 'script-runner' WHERE task_type = 'local-script-runner'").run();
   db.prepare("UPDATE job_runs SET kind = 'script-runner' WHERE kind = 'local-script-runner'").run();
@@ -566,17 +569,17 @@ function runMigrations(db: Database.Database) {
       SET
         title = CASE id
           WHEN 'book-bianzheng' THEN 'Aliceloop Runtime Notes'
-          WHEN 'book-fangji' THEN 'Companion Sync Workshop'
+          WHEN 'book-fangji' THEN 'Session Sync Workshop'
           ELSE title
         END,
         source_path = CASE id
           WHEN 'book-bianzheng' THEN '/Library/Projects/Aliceloop/runtime-notes.md'
-          WHEN 'book-fangji' THEN '/Library/Projects/Aliceloop/companion-sync.pdf'
+          WHEN 'book-fangji' THEN '/Library/Projects/Aliceloop/session-sync.pdf'
           ELSE source_path
         END,
         last_attention_label = CASE id
           WHEN 'book-bianzheng' THEN '第 3 节 · Session Stream'
-          WHEN 'book-fangji' THEN '移动端同步'
+          WHEN 'book-fangji' THEN '多端同步'
           ELSE last_attention_label
         END
       WHERE id IN ('book-bianzheng', 'book-fangji')
@@ -593,12 +596,12 @@ function runMigrations(db: Database.Database) {
         END,
         summary = CASE id
           WHEN 'artifact-study-bianzheng' THEN '聚焦 session、sandbox、artifact 和 memory 的关系，适合快速回看和后续实现前定位。'
-          WHEN 'artifact-review-pack' THEN '围绕 runtime 分层、provider 接入和 companion 同步关系做抽问。'
+          WHEN 'artifact-review-pack' THEN '围绕 runtime 分层、provider 接入和多端同步关系做抽问。'
           ELSE summary
         END,
         body = CASE id
           WHEN 'artifact-study-bianzheng' THEN '1. Session、queue 和 events 组成 runtime 的真相层，负责持续状态和多端同步。'||char(10)||'2. Sandbox 只提供 read、grep、glob、write、edit、bash 六个执行原子命令，skills 通过它做副作用操作。'||char(10)||'3. Artifact、memory 和 tasks 是提交层结果，不该和底层执行 ABI 混在一起。'
-          WHEN 'artifact-review-pack' THEN '今晚先复习三件事：'||char(10)||'1. 先说清 gateway、runtime core 和 sandbox 各自负责什么。'||char(10)||'2. 回忆为什么 policy loop 不是 workflow，而是模型面对统一状态的下一跳决策。'||char(10)||'3. 再看一次 companion 同步链路，确认 snapshot、stream 和 heartbeat 的分工。'
+          WHEN 'artifact-review-pack' THEN '今晚先复习三件事：'||char(10)||'1. 先说清 gateway、runtime core 和 sandbox 各自负责什么。'||char(10)||'2. 回忆为什么 policy loop 不是 workflow，而是模型面对统一状态的下一跳决策。'||char(10)||'3. 再看一次多端同步链路，确认 snapshot、stream 和 heartbeat 的分工。'
           ELSE body
         END,
         related_library_title = 'Aliceloop Runtime Notes'
@@ -615,7 +618,7 @@ function runMigrations(db: Database.Database) {
           ELSE title
         END,
         content = CASE id
-          WHEN 'memory-1' THEN '用户最近主要围绕 runtime core、provider 接入和 companion 同步的边界来回切换。'
+          WHEN 'memory-1' THEN '用户最近主要围绕 runtime core、provider 接入和多端同步的边界来回切换。'
           WHEN 'memory-2' THEN '遇到 runtime 设计问题时，优先给分层图和最小执行边界，而不是先展开大而全的流程图。'
           ELSE content
         END

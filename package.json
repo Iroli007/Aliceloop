@@ -14,5 +14,11 @@
   "workspaces": [
     "apps/*",
     "packages/*"
-  ]
+  ],
+  "devDependencies": {
+    "markdown-docx": "^1.5.1"
+  },
+  "dependencies": {
+    "docx": "^9.6.1"
+  }
 }

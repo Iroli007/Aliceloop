@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import type {
   BrowserReadablePayload,
+  BrowserAudioCapturePayload,
+  BrowserMediaProbePayload,
   BrowserScreenshotPayload,
   BrowserSearchResultsPayload,
   BrowserSnapshotPayload,
@@ -19,6 +21,7 @@ const DEFAULT_MAX_TEXT_LENGTH = 4_000;
 const DEFAULT_MAX_ELEMENTS = 30;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_SCREENSHOT_ROOT_NAME = "browser-screenshots";
+const DEFAULT_AUDIO_CAPTURE_ROOT_NAME = "browser-watch-audio";
 
 function escapeAttributeValue(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -84,7 +87,13 @@ async function collectSnapshot(
         "summary",
         "[role='button']",
         "[role='link']",
-        "[contenteditable='true']"
+        "[contenteditable='true']",
+        "video",
+        "audio",
+        "img",
+        "canvas",
+        "svg",
+        "[role='img']"
       ].join(",");
 
       const headings = Array.from(document.querySelectorAll("h1,h2,h3"))
@@ -317,6 +326,413 @@ async function collectSearchResults(
   };
 }
 
+type PageAudioCaptureResult = {
+  ok: boolean;
+  ref: string | null;
+  mediaType: string | null;
+  currentTime: number | null;
+  dataBase64?: string;
+  limitation?: string;
+};
+
+function ensureDirectoryForFile(filePath: string) {
+  mkdirSync(dirname(filePath), { recursive: true });
+}
+
+async function collectMediaProbe(
+  page: Page,
+  tabId: string,
+  ref?: string,
+): Promise<BrowserMediaProbePayload> {
+  const payload = JSON.stringify({ ref: ref ?? null });
+  const result = await page.evaluate(`
+    (() => {
+      const { ref: requestedRef } = ${payload};
+      const counterKey = "__ALICELOOP_BROWSER_REF_COUNTER__";
+      const scope = globalThis;
+      let nextRef = Number.isFinite(scope[counterKey]) ? Number(scope[counterKey]) : 1;
+
+      function compact(value, limit) {
+        return String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, limit);
+      }
+
+      function isVisible(element) {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      }
+
+      function ensureRef(element) {
+        const existing = element.getAttribute("data-aliceloop-ref");
+        if (existing) {
+          return existing;
+        }
+
+        const next = "e" + nextRef;
+        nextRef += 1;
+        element.setAttribute("data-aliceloop-ref", next);
+        return next;
+      }
+
+      function uniqueTexts(values) {
+        const normalized = values
+          .map(function (value) {
+            return compact(value, 200);
+          })
+          .filter(function (value) {
+            return value.length > 0;
+          });
+        return Array.from(new Set(normalized)).slice(0, 8);
+      }
+
+      function collectTrackCaptions(media) {
+        const captions = [];
+        const tracks = Array.from(media.textTracks ?? []);
+        for (const track of tracks) {
+          const cues = Array.from(track.activeCues ?? []);
+          for (const cue of cues) {
+            const text = "text" in cue ? String(cue.text ?? "") : "";
+            if (text.trim()) {
+              captions.push(text);
+            }
+          }
+        }
+
+        return uniqueTexts(captions);
+      }
+
+      function collectDomCaptions() {
+        const selectors = [
+          "[class*='caption']",
+          "[class*='Caption']",
+          "[class*='subtitle']",
+          "[class*='Subtitle']",
+          "[class*='captions']",
+          "[class*='subtitles']",
+          "[data-testid*='caption']",
+          "[data-testid*='subtitle']",
+          "[aria-live='polite']",
+          "[aria-live='assertive']"
+        ];
+
+        const texts = [];
+        for (const node of Array.from(document.querySelectorAll(selectors.join(",")))) {
+          if (!isVisible(node)) {
+            continue;
+          }
+
+          const text = compact(node.textContent, 200);
+          if (text.length >= 2) {
+            texts.push(text);
+          }
+        }
+
+        return uniqueTexts(texts);
+      }
+
+      const mediaElements = Array.from(document.querySelectorAll("video, audio"))
+        .filter(isVisible)
+        .map(function (element) {
+          const media = element;
+          const rect = media.getBoundingClientRect();
+          const activeCaptions = collectTrackCaptions(media);
+          return {
+            element: media,
+            ref: ensureRef(media),
+            tag: media.tagName.toLowerCase(),
+            label: compact(
+              media.getAttribute("aria-label")
+                || media.getAttribute("title")
+                || media.closest("[aria-label],[title]")?.getAttribute("aria-label")
+                || media.closest("[aria-label],[title]")?.getAttribute("title")
+                || media.currentSrc
+                || media.src,
+              160
+            ),
+            area: Math.max(0, rect.width) * Math.max(0, rect.height),
+            paused: media.paused,
+            muted: media.muted || media.volume === 0,
+            currentTime: Number.isFinite(media.currentTime) ? Number(media.currentTime) : null,
+            duration: Number.isFinite(media.duration) ? Number(media.duration) : null,
+            playbackRate: Number.isFinite(media.playbackRate) ? Number(media.playbackRate) : 1,
+            textTrackCount: media.textTracks?.length ?? 0,
+            activeCaptions,
+            canCaptureAudio: typeof media.captureStream === "function"
+          };
+        })
+        .sort(function (left, right) {
+          return right.area - left.area;
+        });
+
+      const requestedElement = requestedRef
+        ? document.querySelector('[data-aliceloop-ref="' + String(requestedRef).replace(/"/g, '\\"') + '"]')
+        : null;
+      const requestedCandidate = requestedElement
+        ? mediaElements.find(function (candidate) {
+            return candidate.element === requestedElement;
+          })
+        : null;
+      const primaryCandidate = requestedCandidate ?? mediaElements[0] ?? null;
+      const domCaptions = collectDomCaptions();
+      const subtitles = primaryCandidate?.activeCaptions?.length
+        ? primaryCandidate.activeCaptions
+        : domCaptions;
+
+      scope[counterKey] = nextRef;
+
+      return {
+        url: window.location.href,
+        title: compact(document.title, 200),
+        playerRef: primaryCandidate?.ref ?? null,
+        subtitleSource: primaryCandidate?.activeCaptions?.length ? "textTracks" : (domCaptions.length ? "dom" : "none"),
+        subtitles,
+        candidates: mediaElements.map(function (candidate) {
+          return {
+            ref: candidate.ref,
+            tag: candidate.tag,
+            label: candidate.label,
+            area: candidate.area,
+            paused: candidate.paused,
+            muted: candidate.muted,
+            currentTime: candidate.currentTime,
+            duration: candidate.duration,
+            playbackRate: candidate.playbackRate,
+            textTrackCount: candidate.textTrackCount,
+            activeCaptions: candidate.activeCaptions,
+            canCaptureAudio: candidate.canCaptureAudio
+          };
+        })
+      };
+    })()
+  `) as Omit<BrowserMediaProbePayload, "backend" | "tabId">;
+
+  return {
+    ...result,
+    backend: "desktop_chrome",
+    tabId,
+  };
+}
+
+async function captureMediaAudioClip(
+  page: Page,
+  tabId: string,
+  options?: {
+    outputPath?: string;
+    ref?: string;
+    clipMs?: number;
+  },
+): Promise<BrowserAudioCapturePayload> {
+  const requestedClipMs = Math.max(2_000, Math.min(12_000, options?.clipMs ?? 10_000));
+  const payload = JSON.stringify({ ref: options?.ref ?? null, clipMs: requestedClipMs });
+  const captureResult = await page.evaluate(`
+    (async () => {
+      const { ref: requestedRef, clipMs } = ${payload};
+      const counterKey = "__ALICELOOP_BROWSER_REF_COUNTER__";
+      const scope = globalThis;
+      let nextRef = Number.isFinite(scope[counterKey]) ? Number(scope[counterKey]) : 1;
+
+      function compact(value, limit) {
+        return String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, limit);
+      }
+
+      function isVisible(element) {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      }
+
+      function ensureRef(element) {
+        const existing = element.getAttribute("data-aliceloop-ref");
+        if (existing) {
+          return existing;
+        }
+
+        const next = "e" + nextRef;
+        nextRef += 1;
+        element.setAttribute("data-aliceloop-ref", next);
+        return next;
+      }
+
+      function findTargetMediaElement() {
+        if (requestedRef) {
+          const exact = document.querySelector('[data-aliceloop-ref="' + String(requestedRef).replace(/"/g, '\\"') + '"]');
+          if (exact instanceof HTMLMediaElement) {
+            return exact;
+          }
+        }
+
+        return Array.from(document.querySelectorAll("video, audio"))
+          .filter(function (element) {
+            return element instanceof HTMLMediaElement;
+          })
+          .filter(isVisible)
+          .sort(function (left, right) {
+            const leftRect = left.getBoundingClientRect();
+            const rightRect = right.getBoundingClientRect();
+            return (rightRect.width * rightRect.height) - (leftRect.width * leftRect.height);
+          })[0] ?? null;
+      }
+
+      function toBase64(data) {
+        let output = "";
+        const chunkSize = 0x8000;
+        for (let index = 0; index < data.length; index += chunkSize) {
+          output += String.fromCharCode(...data.subarray(index, index + chunkSize));
+        }
+
+        return btoa(output);
+      }
+
+      const target = findTargetMediaElement();
+      if (!target) {
+        return {
+          ok: false,
+          ref: null,
+          mediaType: null,
+          currentTime: null,
+          limitation: "No visible media element is available on the current page."
+        };
+      }
+
+      const ref = ensureRef(target);
+      if (typeof target.captureStream !== "function") {
+        return {
+          ok: false,
+          ref,
+          mediaType: null,
+          currentTime: Number.isFinite(target.currentTime) ? Number(target.currentTime) : null,
+          limitation: "This media element does not expose captureStream()."
+        };
+      }
+
+      if (target.paused) {
+        return {
+          ok: false,
+          ref,
+          mediaType: null,
+          currentTime: Number.isFinite(target.currentTime) ? Number(target.currentTime) : null,
+          limitation: "The media element is paused, so there is no live audio to sample."
+        };
+      }
+
+      try {
+        const capturedStream = target.captureStream();
+        const audioTracks = capturedStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          return {
+            ok: false,
+            ref,
+            mediaType: null,
+            currentTime: Number.isFinite(target.currentTime) ? Number(target.currentTime) : null,
+            limitation: "The media stream has no audio tracks."
+          };
+        }
+
+        const audioStream = new MediaStream(audioTracks);
+        const preferredMimeTypes = [
+          "audio/webm;codecs=opus",
+          "audio/webm",
+          "audio/ogg;codecs=opus"
+        ];
+        const mimeType = preferredMimeTypes.find(function (value) {
+          return MediaRecorder.isTypeSupported(value);
+        }) ?? "";
+        const recorder = mimeType ? new MediaRecorder(audioStream, { mimeType }) : new MediaRecorder(audioStream);
+        const chunks = [];
+
+        recorder.addEventListener("dataavailable", function (event) {
+          if (event.data && event.data.size > 0) {
+            chunks.push(event.data);
+          }
+        });
+
+        await new Promise(function (resolvePromise, rejectPromise) {
+          recorder.addEventListener("error", function () {
+            rejectPromise(new Error("MediaRecorder failed while capturing tab audio."));
+          });
+          recorder.addEventListener("stop", function () {
+            resolvePromise();
+          });
+          recorder.start();
+          setTimeout(function () {
+            if (recorder.state !== "inactive") {
+              recorder.stop();
+            }
+          }, clipMs);
+        });
+
+        audioStream.getTracks().forEach(function (track) {
+          track.stop();
+        });
+        capturedStream.getTracks().forEach(function (track) {
+          track.stop();
+        });
+
+        const blob = new Blob(chunks, {
+          type: recorder.mimeType || mimeType || "audio/webm"
+        });
+        if (blob.size === 0) {
+          return {
+            ok: false,
+            ref,
+            mediaType: null,
+            currentTime: Number.isFinite(target.currentTime) ? Number(target.currentTime) : null,
+            limitation: "The captured audio clip was empty."
+          };
+        }
+
+        const buffer = new Uint8Array(await blob.arrayBuffer());
+        scope[counterKey] = nextRef;
+        return {
+          ok: true,
+          ref,
+          mediaType: blob.type || recorder.mimeType || mimeType || "audio/webm",
+          currentTime: Number.isFinite(target.currentTime) ? Number(target.currentTime) : null,
+          dataBase64: toBase64(buffer)
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          ref,
+          mediaType: null,
+          currentTime: Number.isFinite(target.currentTime) ? Number(target.currentTime) : null,
+          limitation: compact(error instanceof Error ? error.message : String(error), 240)
+        };
+      }
+    })()
+  `) as PageAudioCaptureResult;
+
+  if (!captureResult.ok || !captureResult.dataBase64) {
+    return {
+      path: null,
+      mediaType: captureResult.mediaType,
+      url: page.url(),
+      backend: "desktop_chrome",
+      tabId,
+      ref: captureResult.ref,
+      currentTime: captureResult.currentTime,
+      durationMs: requestedClipMs,
+      limitation: captureResult.limitation ?? "The browser could not capture an audio clip.",
+    };
+  }
+
+  const targetPath = options?.outputPath?.trim() || join(process.cwd(), DEFAULT_AUDIO_CAPTURE_ROOT_NAME, `browser-audio-${Date.now()}-${tabId}.webm`);
+  ensureDirectoryForFile(targetPath);
+  writeFileSync(targetPath, Buffer.from(captureResult.dataBase64, "base64"));
+
+  return {
+    path: targetPath,
+    mediaType: captureResult.mediaType,
+    url: page.url(),
+    backend: "desktop_chrome",
+    tabId,
+    ref: captureResult.ref,
+    currentTime: captureResult.currentTime,
+    durationMs: requestedClipMs,
+    limitation: null,
+  };
+}
+
 async function readDevToolsPort(profileDir: string) {
   const portFile = join(profileDir, "DevToolsActivePort");
   if (!existsSync(portFile)) {
@@ -332,6 +748,7 @@ export interface ChromeRelayServiceOptions {
   chromeExecutablePath: string;
   profileDir: string;
   screenshotRoot: string;
+  audioCaptureRoot: string;
 }
 
 type RelayTabRecord = {
@@ -345,6 +762,8 @@ export class ChromeRelayService {
   private readonly profileDir: string;
 
   private readonly screenshotRoot: string;
+
+  private readonly audioCaptureRoot: string;
 
   private chromeProcess: ChildProcess | null = null;
 
@@ -360,6 +779,7 @@ export class ChromeRelayService {
     this.chromeExecutablePath = options.chromeExecutablePath;
     this.profileDir = options.profileDir;
     this.screenshotRoot = options.screenshotRoot;
+    this.audioCaptureRoot = options.audioCaptureRoot;
   }
 
   getCapability(baseUrl: string, token: string): ChromeRelayMeta {
@@ -596,15 +1016,23 @@ export class ChromeRelayService {
     }
   }
 
-  async screenshot(tabId: string, outputPath?: string, fullPage = true): Promise<BrowserScreenshotPayload> {
+  async screenshot(tabId: string, outputPath?: string, fullPage = true, ref?: string): Promise<BrowserScreenshotPayload> {
     try {
       const record = await this.getTabRecord(tabId);
       const targetPath = outputPath?.trim() || join(this.screenshotRoot, `browser-${Date.now()}-${tabId}.png`);
       mkdirSync(dirname(targetPath), { recursive: true });
-      await record.page.screenshot({
-        path: targetPath,
-        fullPage,
-      });
+      if (ref?.trim()) {
+        const locator = record.page.locator(`[data-aliceloop-ref="${escapeAttributeValue(ref.trim())}"]`).first();
+        await locator.waitFor({ state: "visible", timeout: 10_000 });
+        await locator.screenshot({
+          path: targetPath,
+        });
+      } else {
+        await record.page.screenshot({
+          path: targetPath,
+          fullPage,
+        });
+      }
       this.markHealthy();
 
       return {
@@ -613,6 +1041,40 @@ export class ChromeRelayService {
         backend: "desktop_chrome",
         tabId,
       };
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
+  async mediaProbe(tabId: string, ref?: string) {
+    try {
+      const record = await this.getTabRecord(tabId);
+      this.markHealthy();
+      return await collectMediaProbe(record.page, tabId, ref);
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
+  async captureAudioClip(
+    tabId: string,
+    options?: {
+      outputPath?: string;
+      ref?: string;
+      clipMs?: number;
+    },
+  ) {
+    try {
+      const record = await this.getTabRecord(tabId);
+      const outputPath = options?.outputPath?.trim() || join(this.audioCaptureRoot, `browser-audio-${Date.now()}-${tabId}.webm`);
+      ensureDirectoryForFile(outputPath);
+      this.markHealthy();
+      return await captureMediaAudioClip(record.page, tabId, {
+        ...options,
+        outputPath,
+      });
     } catch (error) {
       this.markError(error);
       throw error;
@@ -684,5 +1146,6 @@ export function createDefaultChromeRelayServiceOptions(userDataDir: string): Chr
     chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     profileDir: join(userDataDir, "chrome-relay-profile"),
     screenshotRoot: join(userDataDir, DEFAULT_SCREENSHOT_ROOT_NAME),
+    audioCaptureRoot: join(userDataDir, DEFAULT_AUDIO_CAPTURE_ROOT_NAME),
   };
 }

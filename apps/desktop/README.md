@@ -6,7 +6,7 @@ Electron 桌面本体。
 
 - GUI 入口
 - 会话线程、消息流和 provider 设置
-- shell / companion 双视图
+- shell 主界面
 - artifact、memory、runtime catalog 浏览
 - 通过 snapshot + SSE 消费 daemon 事件流
 - 人工暂停、终止和确认入口

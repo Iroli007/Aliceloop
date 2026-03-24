@@ -416,6 +416,8 @@ export const schemaStatements = [
     CREATE TABLE IF NOT EXISTS runtime_settings (
       id TEXT PRIMARY KEY,
       sandbox_profile TEXT NOT NULL,
+      auto_approve_tool_requests INTEGER NOT NULL DEFAULT 1,
+      reasoning_effort TEXT NOT NULL DEFAULT 'medium',
       updated_at TEXT NOT NULL
     )
   `,

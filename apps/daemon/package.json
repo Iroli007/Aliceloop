@@ -13,6 +13,8 @@
     "smoke:all": "npm run smoke:queue && npm run smoke:sandbox && npm run smoke:skills && npm run smoke:cli && npm run smoke:tasks && npm run smoke:tasks:api && npm run smoke:memory",
     "smoke:cli": "tsx scripts/cliSmoke.ts",
     "smoke:desktop-relay": "tsx scripts/desktopChromeRelaySmoke.ts",
+    "bench:load-context": "tsx scripts/loadContextBenchmark.ts",
+    "bench:desktop-relay": "tsx scripts/desktopChromeRelayBenchmark.ts",
     "smoke:memory": "tsx scripts/memorySystemSmoke.ts",
     "smoke:queue": "tsx scripts/sessionRunQueueSmoke.ts",
     "smoke:sandbox": "tsx scripts/sandboxSmoke.ts",

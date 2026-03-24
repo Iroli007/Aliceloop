@@ -20,6 +20,8 @@ export type SandboxRuntimeKind = "host";
 export interface SandboxExecutorOptions {
   label: string;
   permissionProfile?: SandboxPermissionProfile;
+  autoApproveToolRequests?: boolean;
+  workspaceRoot?: string;
   defaultCwd?: string;
   extraReadRoots?: string[];
   extraWriteRoots?: string[];
@@ -112,6 +114,7 @@ export interface SandboxRuntimeContext {
   label: string;
   toolPolicy: SandboxToolPolicy;
   runtimePolicy: SandboxRuntimePolicy;
+  autoApproveToolRequests: boolean;
   defaultCwd: string | null;
   audit: SandboxAuditLogger;
   defaultTimeoutMs: number;

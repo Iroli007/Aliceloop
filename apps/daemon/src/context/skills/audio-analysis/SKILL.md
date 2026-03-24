@@ -1,53 +1,48 @@
 ---
 name: audio-analysis
 label: audio-analysis
-description: Analyze audio files for metadata, structure, transcription, and signal characteristics. Use when users share music, voice notes, or other audio and want an objective report.
+description: Understand audio, voice notes, and spoken clips through a direct audio tool. Use when the user shares audio or asks what was said, summarized, or emphasized.
 status: available
 mode: instructional
 allowed-tools:
-  - bash
-  - read
+  - audio_understand
 ---
 
 # Audio Analysis
 
-Use this skill when the user wants a factual read on an audio file rather than a casual reaction.
+Use this skill when the user wants to understand what is being said in an audio file rather than just inspect file metadata.
 
 Examples:
 
-- summarize a song, podcast clip, or voice note
-- inspect codec, duration, bitrate, and embedded tags
-- transcribe spoken words or recover partial lyrics
-- generate a spectrogram or other artifact for follow-up inspection
+- transcribe a voice note or podcast clip
+- summarize a spoken recording
+- answer "他说了什么" / "这段音频在讲什么"
+- extract key moments from a short clip
+- support browser video watching by understanding sampled audio segments
 
-## Workflow
+## Intended workflow
 
-1. Inspect the file with `ffprobe` for container, stream, duration, bitrate, sample rate, and metadata tags.
-2. Convert or trim the audio with `ffmpeg` when the source format is awkward or very long.
-3. Run `whisper` when speech or lyrics matter.
-4. Generate a spectrogram when frequency balance, noise, clipping, or texture matters.
-5. Return an objective report with caveats instead of personal taste unless the user explicitly asks for an opinion.
+1. Use `audio_understand` on the local attachment path.
+2. Pass an explicit `instruction` when the user has a concrete question, such as "重点看他是怎么评价这件事的".
+3. If the tool reports limitations, surface them honestly instead of pretending the audio was understood.
+4. Separate direct transcript evidence from your own inference.
 
-## Commands
+## Reporting guide
 
-```bash
-ffprobe -v quiet -print_format json -show_format -show_streams "<audio_file>"
+- Prefer factual wording over taste or vibes unless the user asks for opinion.
+- If the result is partial, noisy, or unsupported by the current provider, say so clearly.
+- For short clips, quote the key point in plain language.
+- For long clips, summarize the main sections and list a few notable moments.
 
-ffmpeg -i "<audio_file>" -lavfi showspectrumpic=s=800x200:mode=combined:color=intensity -frames:v 1 "/tmp/music_spec_<id>.png" -y
+## Aliceloop status
 
-ffmpeg -i "<audio_file>" -acodec pcm_s16le -ar 16000 -ac 1 "/tmp/music_audio.wav" -y
-whisper "/tmp/music_audio.wav" --model turbo --output_format txt --output_dir /tmp/music_whisper
-cat /tmp/music_whisper/*.txt
-rm -rf /tmp/music_whisper /tmp/music_audio.wav
-```
+This skill is active.
 
-## Reporting Guide
+Available tools:
 
-- Separate facts from inference.
-- Mention if the transcript is partial or uncertain, especially for sung vocals or noisy audio.
-- Call out clipping, silence, mono vs stereo, unusual loudness, or obvious compression artifacts when relevant.
-- For long files, sample a representative segment before claiming file-wide conclusions.
+- `audio_understand`
 
-## Aliceloop Status
+Current limitations:
 
-This skill relies on local command-line tools such as `ffprobe`, `ffmpeg`, and `whisper` when they are installed in the runtime environment.
+- audio understanding depends on the current provider stack; if the provider cannot process audio, the tool returns structured limitations instead of fake confidence
+- this skill focuses on content understanding, not studio-grade waveform diagnostics

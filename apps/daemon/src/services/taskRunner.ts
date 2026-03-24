@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { basename, dirname, extname } from "node:path";
+import { basename, extname, resolve } from "node:path";
 import { ingestDocument, type DocumentDetection, type WorkerPlan } from "@aliceloop/pdf-ingest";
 import type {
   AttentionState,
@@ -15,13 +15,13 @@ import type {
   TaskStatus,
   TaskType,
 } from "@aliceloop/runtime-core";
-import { getDataDir } from "../db/client";
 import { createMemoryNote, getMemoryNote, upsertMemoryNote } from "../context/memory/memoryRepository";
+import { getDefaultProjectDirectory } from "../repositories/projectRepository";
 import { getPrimaryLibraryContext, getShellOverview } from "../repositories/overviewRepository";
 import { markLibraryAsFocused, persistIngestedLibrary } from "../repositories/libraryRepository";
-import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import { listFailedManagedTasksForPostmortemBackfill, upsertTaskRun } from "../repositories/taskRunRepository";
 import { createPermissionSandboxExecutor } from "./sandboxExecutor";
+import { isPathWithinRoot } from "../runtime/sandbox/toolPolicy";
 
 interface TaskRunnerResult {
   task: TaskRun;
@@ -220,31 +220,40 @@ function canUseTextFallback(sourcePath: string) {
   return extension === ".txt" || extension === ".md" || extension === ".markdown";
 }
 
+function resolveWorkspacePath(workspaceRoot: string, targetPath: string) {
+  return resolve(workspaceRoot, targetPath);
+}
+
 async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<TaskRunnerResult> {
   const taskId = randomUUID();
-  const title = inferLibraryTitle(input.sourcePath, input.title);
-  const runtimeSettings = getRuntimeSettings();
+  const workspaceRoot = getDefaultProjectDirectory().path;
+  const sourcePath = resolveWorkspacePath(workspaceRoot, input.sourcePath);
+  const title = inferLibraryTitle(sourcePath, input.title);
 
   writeTaskRun(taskId, "document-ingest", "queued", `准备接收资料 · ${title}`, "资料已经登记到任务中心，准备写入本地图书馆。", null);
   writeTaskRun(taskId, "document-ingest", "running", `正在解析资料 · ${title}`, "正在抽取章节结构、块级正文和检索索引。", null);
 
   try {
+    if (!isPathWithinRoot(sourcePath, workspaceRoot)) {
+      throw new Error(`document-ingest sourcePath must stay inside the default workspace: ${sourcePath}`);
+    }
+
     const now = new Date().toISOString();
     const libraryItemId = `library-${randomUUID()}`;
     const sandbox = createPermissionSandboxExecutor({
       label: `document-ingest:${title}`,
-      permissionProfile: runtimeSettings.sandboxProfile,
-      extraReadRoots: [dirname(input.sourcePath)],
+      permissionProfile: "full-access",
+      workspaceRoot,
     });
-    const fallbackText = canUseTextFallback(input.sourcePath)
+    const fallbackText = canUseTextFallback(sourcePath)
       ? await sandbox.readTextFile({
-          targetPath: input.sourcePath,
+          targetPath: sourcePath,
         })
       : undefined;
     const ingestResult = ingestDocument({
       libraryItemId,
       title,
-      sourcePath: input.sourcePath,
+      sourcePath,
       fallbackText,
     });
     const sections = ingestResult.structureDraft.sections;
@@ -253,7 +262,7 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       title,
       sourceKind: input.sourceKind ?? "handout",
       documentKind: input.documentKind ?? ingestResult.detection.documentKind,
-      sourcePath: input.sourcePath,
+      sourcePath,
       createdAt: now,
       updatedAt: now,
       lastAttentionLabel: sections[0]?.title ?? "已完成初版 ingest",
@@ -283,7 +292,7 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       "done",
       `资料解析完成 · ${title}`,
       `已写入 ${persisted.sections.length} 个章节、${persisted.contentBlocks.length} 个内容块和 ${persisted.crossReferences.length} 条回链。${
-        fallbackText ? " 源文本已通过权限型沙箱读取。" : " 当前仍在等待更强的 PDF 正文抽取。"
+        fallbackText ? " 源文本已直接读取。" : " 当前仍在等待更强的 PDF 正文抽取。"
       }`,
       null,
     );
@@ -309,7 +318,7 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       title,
       detail,
       updatedAt: task.updatedAt,
-      context: [`资料路径：${input.sourcePath}`],
+      context: [`资料路径：${sourcePath}`],
     });
     return { task, memoryNote };
   }
@@ -349,22 +358,25 @@ async function runReviewCoachTask(input: ReviewCoachTaskInput): Promise<TaskRunn
 
 async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRunnerResult> {
   const taskId = randomUUID();
+  const workspaceRoot = getDefaultProjectDirectory().path;
   const command = input.command.trim();
   const args = input.args ?? [];
-  const cwd = input.cwd?.trim() || getDataDir();
+  const cwd = resolveWorkspacePath(workspaceRoot, input.cwd?.trim() || ".");
   const title = input.title?.trim() || `运行脚本 · ${command}`;
-  const runtimeSettings = getRuntimeSettings();
 
-  writeTaskRun(taskId, "script-runner", "queued", title, "脚本任务已经入队，等待进入权限型沙箱执行。", input.sessionId ?? null);
-  writeTaskRun(taskId, "script-runner", "running", title, "正在通过权限型沙箱执行本地命令。", input.sessionId ?? null);
+  writeTaskRun(taskId, "script-runner", "queued", title, "脚本任务已经入队，等待直接执行。", input.sessionId ?? null);
+  writeTaskRun(taskId, "script-runner", "running", title, "正在执行本地命令。", input.sessionId ?? null);
 
   try {
+    if (!isPathWithinRoot(cwd, workspaceRoot)) {
+      throw new Error(`script-runner cwd must stay inside the default workspace: ${cwd}`);
+    }
+
     const sandbox = createPermissionSandboxExecutor({
       label: `script-runner:${title}`,
-      permissionProfile: runtimeSettings.sandboxProfile,
-      extraReadRoots: [cwd],
-      extraWriteRoots: [cwd],
-      extraCwdRoots: [cwd],
+      permissionProfile: "full-access",
+      workspaceRoot,
+      defaultCwd: workspaceRoot,
     });
     const result = await sandbox.runBash({
       command,

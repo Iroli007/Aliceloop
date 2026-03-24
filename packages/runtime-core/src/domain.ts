@@ -19,11 +19,21 @@ export type AttachmentStatus = "ready" | "failed";
 export type ProviderKind = "minimax" | "aihubmix" | "openai" | "anthropic" | "openrouter";
 export type ProviderTransportKind = "auto" | "openai-compatible" | "anthropic";
 export type SandboxPermissionProfile = "development" | "full-access";
+export type ReasoningEffort = "off" | "low" | "medium" | "high" | "xhigh";
 export type LegacySandboxPermissionProfile = "restricted" | "high-privilege";
 export type SandboxExecutionAccess = "standard" | "elevated";
 export type SandboxPrimitive = "read" | "write" | "edit" | "delete" | "bash";
 export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
 export type ToolApprovalStatus = "pending" | "approved" | "rejected";
+export type ToolCallStatus =
+  | "input-streaming"
+  | "input-available"
+  | "approval-requested"
+  | "approval-responded"
+  | "output-available"
+  | "output-error"
+  | "permission-denied"
+  | "done";
 export type SkillStatus = "available" | "planned";
 export type SkillMode = "instructional" | "task";
 export type McpServerStatus = "available" | "planned";
@@ -47,7 +57,8 @@ export type SessionEventType =
   | "tool.approval.requested"
   | "tool.approval.resolved"
   | "tool.call.started"
-  | "tool.call.completed";
+  | "tool.call.completed"
+  | "tool.state.change";
 
 export interface LibraryItem {
   id: string;
@@ -279,6 +290,8 @@ export interface ProviderConfig {
 
 export interface RuntimeSettings {
   sandboxProfile: SandboxPermissionProfile;
+  autoApproveToolRequests: boolean;
+  reasoningEffort: ReasoningEffort;
   updatedAt: string | null;
 }
 
@@ -288,6 +301,12 @@ export interface SandboxProfileDefinition {
   summary: string;
   hostAccess: "guarded" | "broad";
   elevatedBehavior: string;
+}
+
+export interface ReasoningEffortDefinition {
+  id: ReasoningEffort;
+  label: string;
+  summary: string;
 }
 
 export interface SandboxExecutionAccessDefinition {
@@ -304,6 +323,46 @@ export function normalizeSandboxPermissionProfile(
   }
 
   return "development";
+}
+
+export function normalizeReasoningEffort(
+  effort: string | null | undefined,
+): ReasoningEffort {
+  switch (effort) {
+    case "off":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+      return effort;
+    default:
+      return "medium";
+  }
+}
+
+export function normalizeAutoApproveToolRequests(
+  value: string | number | boolean | null | undefined,
+): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["false", "0", "off", "no"].includes(normalized)) {
+      return false;
+    }
+
+    if (["true", "1", "on", "yes"].includes(normalized)) {
+      return true;
+    }
+  }
+
+  return true;
 }
 
 export const sandboxProfileDefinitions: SandboxProfileDefinition[] = [
@@ -336,8 +395,38 @@ export const sandboxExecutionAccessDefinitions: SandboxExecutionAccessDefinition
   },
 ];
 
+export const reasoningEffortDefinitions: ReasoningEffortDefinition[] = [
+  {
+    id: "off",
+    label: "关闭",
+    summary: "禁用扩展思考，优先最短响应路径。",
+  },
+  {
+    id: "low",
+    label: "低",
+    summary: "快速响应，适合简单问题与轻量执行。",
+  },
+  {
+    id: "medium",
+    label: "中",
+    summary: "平衡速度与推理深度，适合大多数任务。",
+  },
+  {
+    id: "high",
+    label: "高",
+    summary: "更深的分析与规划，适合复杂任务。",
+  },
+  {
+    id: "xhigh",
+    label: "超高",
+    summary: "最强推理强度，适合最复杂的问题。",
+  },
+];
+
 export const defaultRuntimeSettings: RuntimeSettings = {
-  sandboxProfile: "development",
+  sandboxProfile: "full-access",
+  autoApproveToolRequests: true,
+  reasoningEffort: "medium",
   updatedAt: null,
 };
 
@@ -440,6 +529,18 @@ export interface ToolApproval {
   status: ToolApprovalStatus;
   requestedAt: string;
   resolvedAt: string | null;
+}
+
+export interface ToolCallState {
+  toolCallId: string;
+  toolName: string;
+  status: ToolCallStatus;
+  input: unknown;
+  output?: unknown;
+  error?: string;
+  approvalOption?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface SessionSnapshot {

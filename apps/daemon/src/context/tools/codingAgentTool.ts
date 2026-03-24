@@ -1,12 +1,16 @@
 import { execFile } from "node:child_process";
+import { resolve, join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { tool } from "ai";
+import { getDataDir } from "../../db/client";
+import { isPathWithinRoot } from "../../runtime/sandbox/toolPolicy";
 
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+const defaultWorkspaceRoot = join(getDataDir(), "workspaces", "default");
 
 export function createCodingAgentTool() {
   return {
@@ -20,7 +24,7 @@ export function createCodingAgentTool() {
         workingDir: z
           .string()
           .optional()
-          .describe("Working directory for the sub-agent (defaults to project root)"),
+          .describe("Working directory for the sub-agent (defaults to the default workspace)"),
       }),
       execute: async ({ task, workingDir }) => {
         const args = [
@@ -30,10 +34,17 @@ export function createCodingAgentTool() {
           "text",
           "--dangerously-skip-permissions",
         ];
+        const cwd = workingDir?.trim()
+          ? resolve(defaultWorkspaceRoot, workingDir)
+          : defaultWorkspaceRoot;
+
+        if (!isPathWithinRoot(cwd, defaultWorkspaceRoot)) {
+          return `Error: workingDir must stay inside the default workspace: ${defaultWorkspaceRoot}`;
+        }
 
         try {
           const { stdout, stderr } = await execFileAsync("claude", args, {
-            cwd: workingDir,
+            cwd,
             timeout: DEFAULT_TIMEOUT_MS,
             maxBuffer: MAX_BUFFER_BYTES,
             env: {

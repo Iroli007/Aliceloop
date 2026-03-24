@@ -59,37 +59,6 @@ function extractHtmlMetadata(html: string): HtmlMetadata {
   };
 }
 
-function buildHtmlSourceHeader(url: string, metadata: HtmlMetadata) {
-  const domain = (() => {
-    try {
-      return new URL(url).hostname;
-    } catch {
-      return "";
-    }
-  })();
-
-  const lines = [
-    `Source URL: ${url}`,
-    `Source Domain: ${domain || "unknown"}`,
-    `Retrieved At: ${new Date().toISOString()}`,
-  ];
-
-  if (metadata.title) {
-    lines.push(`Page Title: ${metadata.title}`);
-  }
-
-  if (metadata.publishedAt) {
-    lines.push(`Published At: ${metadata.publishedAt}`);
-  }
-
-  if (metadata.modifiedAt) {
-    lines.push(`Modified At: ${metadata.modifiedAt}`);
-  }
-
-  lines.push("", "---", "");
-  return lines.join("\n");
-}
-
 function buildReadableSourceHeader(input: {
   url: string;
   backend: "desktop_chrome" | "http_fetch";
@@ -151,7 +120,7 @@ export function createWebFetchTool(sessionId = "web_fetch") {
       description:
         "Fetch the content of a public URL and return it as readable text. " +
         "HTML pages are converted to Markdown with boilerplate removed. " +
-        "JSON and plain text are returned as-is. " +
+        "JSON and plain text keep their raw payload but are stamped with source metadata. " +
         "On Aliceloop Desktop this prefers a temporary visible Chrome relay tab before falling back to raw HTTP. " +
         "Use this when a task requires inspecting a known URL (docs page, API response, article, release notes).",
       inputSchema: z.object({
@@ -182,8 +151,8 @@ export function createWebFetchTool(sessionId = "web_fetch") {
         try {
           let relayResult = null;
           try {
-            relayResult = await withDesktopRelayTab(async (relay, tabId) => {
-              await navigateRelayTab(relay, tabId, url, "load");
+            relayResult = await withDesktopRelayTab(sessionId, async (relay, tabId) => {
+              await navigateRelayTab(relay, tabId, url, "domcontentloaded");
               return readRelayReadableContent(relay, tabId, {
                 maxTextLength: maxLength,
                 extractMain,
@@ -232,22 +201,35 @@ export function createWebFetchTool(sessionId = "web_fetch") {
 
           const contentType = response.headers.get("content-type") ?? "";
           const rawBody = await response.text();
+          const sourceHeader = buildReadableSourceHeader({
+            url,
+            backend: "http_fetch",
+            title: null,
+            publishedAt: null,
+            modifiedAt: null,
+          });
 
-          // JSON — return as-is
+          // JSON — keep the raw payload, but stamp it with source metadata.
           if (contentType.includes("application/json")) {
-            return truncate(rawBody, maxLength);
+            return truncate(`${sourceHeader}${rawBody}`, maxLength);
           }
 
-          // Plain text — return as-is
+          // Plain text — keep the raw payload, but stamp it with source metadata.
           if (contentType.includes("text/plain")) {
-            return truncate(rawBody, maxLength);
+            return truncate(`${sourceHeader}${rawBody}`, maxLength);
           }
 
           // HTML — extract and convert to Markdown
           const metadata = extractHtmlMetadata(rawBody);
           const htmlChunk = extractMain ? extractMainContent(rawBody) : rawBody;
           const markdown = turndown.turndown(htmlChunk);
-          const content = truncate(`${buildHtmlSourceHeader(url, metadata)}${markdown}`, maxLength);
+          const content = truncate(`${buildReadableSourceHeader({
+            url,
+            backend: "http_fetch",
+            title: metadata.title,
+            publishedAt: metadata.publishedAt,
+            modifiedAt: metadata.modifiedAt,
+          })}${markdown}`, maxLength);
           logPerfTrace("web_fetch", {
             sessionId,
             url,

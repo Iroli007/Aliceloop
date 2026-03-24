@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
+import type { ReasoningEffort } from "@aliceloop/runtime-core";
 import { stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
+import { autoCompactMessages } from "./autoCompact";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
 import { refreshSummaryMemory } from "../context/memory/summaryMemory";
 import { getLatestUserMessage } from "../context/session/sessionContext";
@@ -14,6 +16,7 @@ import {
   type StoredProviderConfig,
   getActiveProviderConfig,
 } from "../repositories/providerRepository";
+import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import {
   appendSessionEvent,
   createAttachment,
@@ -24,8 +27,11 @@ import {
 import { maybeCreateArtifactFromReply } from "../services/artifactWriter";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
 import { enqueueSessionRun } from "../services/sessionRunQueue";
+import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
 import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
+import { saveStreamCheckpoint, clearStreamCheckpoint } from "./streamCheckpoint";
+import { ToolStateMachine, type ToolCallState } from "./toolStateMachine";
 
 // ---------------------------------------------------------------------------
 // Helpers (unchanged)
@@ -77,40 +83,37 @@ function resolveImageMimeType(filePath: string): string | null {
   if (lowerPath.endsWith(".jpg") || lowerPath.endsWith(".jpeg")) return "image/jpeg";
   if (lowerPath.endsWith(".webp")) return "image/webp";
   if (lowerPath.endsWith(".gif")) return "image/gif";
+  if (lowerPath.endsWith(".svg")) return "image/svg+xml";
   return null;
 }
 
-function extractToolImagePath(output: unknown): string | null {
-  if (typeof output === "string") {
-    try {
-      const parsed = JSON.parse(output) as { path?: unknown };
-      return typeof parsed.path === "string" ? parsed.path : null;
-    } catch {
-      return null;
-    }
-  }
+function extractImagePathsFromText(value: string): string[] {
+  const matches = value.match(/\/[^\s"'`<>]+?\.(?:png|jpe?g|webp|gif|svg)\b/giu) ?? [];
+  return matches.filter((candidate, index, items) => items.indexOf(candidate) === index);
+}
 
+function extractImagePathsFromUnknown(value: unknown): string[] {
+  if (typeof value === "string") {
+    return extractImagePathsFromText(value);
+  }
+  // 只处理字符串，其他类型忽略
+  return [];
+}
+
+function extractToolImagePath(output: unknown): string | null {
+  // 只处理 object 类型，string 类型不处理
   if (output && typeof output === "object" && "path" in output) {
     const candidate = (output as { path?: unknown }).path;
     return typeof candidate === "string" ? candidate : null;
   }
-
   return null;
 }
 
 function extractJsonObject<T>(value: unknown): T | null {
-  if (typeof value === "string") {
-    try {
-      return JSON.parse(value) as T;
-    } catch {
-      return null;
-    }
-  }
-
+  // 只处理已经是 object 的情况
   if (value && typeof value === "object") {
     return value as T;
   }
-
   return null;
 }
 
@@ -118,20 +121,82 @@ function isBrowserToolName(toolName: string) {
   return toolName.startsWith("browser_");
 }
 
+function looksLikeBinaryTextDump(value: string) {
+  if (/data:image\/[a-z0-9.+-]+;base64,/iu.test(value)) {
+    return true;
+  }
+
+  return /[A-Za-z0-9+/=]{1800,}/u.test(value.replace(/\s+/g, ""));
+}
+
+function sanitizeAssistantTextForChat(value: string) {
+  const strippedAttachmentMarkers = value
+    .replace(/^\[(Attached files?|Attached directory tree|Attached file content):[^\n]*\]\s*$/gimu, "")
+    .trim();
+  const normalized = strippedAttachmentMarkers || value;
+
+  if (!looksLikeBinaryTextDump(normalized)) {
+    return normalized;
+  }
+
+  return [
+    "我没有返回可直接显示的真实图片附件。",
+    "如果需要二维码、登录页或截图，我应该打开真实页面并用 `browser_screenshot` 或受支持的截图链路把图片作为附件发回聊天，而不是粘贴 base64 / SVG 文本。",
+  ].join("\n");
+}
+
 function isResearchToolName(toolName: string) {
   return toolName === "web_fetch" || toolName === "web_search";
 }
 
-function extractBrowserToolPayload(value: unknown): { backend?: string; tabId?: string } {
-  if (typeof value === "string") {
-    const backendMatch = value.match(/Fetch Backend:\s*([A-Za-z0-9_-]+)/);
-    const parsed = extractJsonObject<{ backend?: unknown; tabId?: unknown }>(value);
-    return {
-      backend: typeof parsed?.backend === "string" ? parsed.backend : backendMatch?.[1],
-      tabId: typeof parsed?.tabId === "string" ? parsed.tabId : undefined,
-    };
+function normalizeReasoningModelId(modelId: string) {
+  const normalized = modelId.trim().toLowerCase();
+  const lastSlashIndex = normalized.lastIndexOf("/");
+  return lastSlashIndex >= 0 ? normalized.slice(lastSlashIndex + 1) : normalized;
+}
+
+function resolveProviderTransport(config: StoredProviderConfig) {
+  if (config.transport !== "auto") {
+    return config.transport;
   }
 
+  if (normalizeReasoningModelId(config.model).startsWith("claude")) {
+    return "anthropic" as const;
+  }
+
+  return "openai-compatible" as const;
+}
+
+function supportsReasoningEffort(config: StoredProviderConfig) {
+  if (resolveProviderTransport(config) !== "openai-compatible") {
+    return false;
+  }
+
+  const modelId = normalizeReasoningModelId(config.model);
+  return modelId.startsWith("o1")
+    || modelId.startsWith("o3")
+    || modelId.startsWith("o4-mini")
+    || (modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat"));
+}
+
+function mapReasoningEffortToOpenAI(effort: ReasoningEffort) {
+  return effort === "off" ? "none" : effort;
+}
+
+function buildAgentProviderOptions(config: StoredProviderConfig, reasoningEffort: ReasoningEffort) {
+  if (!supportsReasoningEffort(config)) {
+    return undefined;
+  }
+
+  return {
+    openai: {
+      reasoningEffort: mapReasoningEffortToOpenAI(reasoningEffort),
+      forceReasoning: true,
+    },
+  };
+}
+
+function extractBrowserToolPayload(value: unknown): { backend?: string; tabId?: string } {
   const payload = extractJsonObject<{ backend?: unknown; tabId?: unknown }>(value);
   return {
     backend: typeof payload?.backend === "string" ? payload.backend : undefined,
@@ -157,28 +222,34 @@ function predictToolBackend(sessionId: string, toolName: string): { backend?: st
   };
 }
 
-function extractBashImagePaths(input: unknown): string[] {
-  const toolInput = extractJsonObject<{ command?: unknown; args?: unknown }>(input);
-  const command = typeof toolInput?.command === "string" ? toolInput.command : null;
-  const args = Array.isArray(toolInput?.args) ? toolInput.args.filter((arg): arg is string => typeof arg === "string") : [];
+function extractBashImagePaths(input: unknown, output?: unknown): string[] {
+  const toolInput = extractJsonObject<{ command?: string; args?: string[] }>(input);
+  if (!toolInput) return [];
 
-  if (!command) {
-    return [];
-  }
+  const { command, args = [] } = toolInput;
+  const discovered = new Set<string>();
 
   if (command === "/usr/sbin/screencapture" || command === "screencapture") {
     const candidate = [...args].reverse().find((arg) => Boolean(resolveImageMimeType(arg)));
-    return candidate ? [candidate] : [];
+    if (candidate) discovered.add(candidate);
   }
 
   if (command === "/usr/bin/sips" || command === "sips") {
     const outIndex = args.findIndex((arg) => arg === "--out");
     if (outIndex >= 0 && outIndex + 1 < args.length && resolveImageMimeType(args[outIndex + 1])) {
-      return [args[outIndex + 1]];
+      discovered.add(args[outIndex + 1]);
     }
   }
 
-  return [];
+  for (const imagePath of extractImagePathsFromText(args.join(" "))) {
+    discovered.add(imagePath);
+  }
+
+  for (const imagePath of extractImagePathsFromUnknown(output)) {
+    discovered.add(imagePath);
+  }
+
+  return [...discovered];
 }
 
 function getToolImagePaths(toolName: string, output: unknown, input?: unknown): string[] {
@@ -188,7 +259,7 @@ function getToolImagePaths(toolName: string, output: unknown, input?: unknown): 
   }
 
   if (toolName === "bash") {
-    return extractBashImagePaths(input);
+    return extractBashImagePaths(input, output);
   }
 
   return [];
@@ -340,9 +411,16 @@ function summarizeUnknown(value: unknown, maxLength = 800) {
   }
 }
 
+type RuntimeEventType =
+  | "tool.call.started"
+  | "tool.call.completed"
+  | "tool.approval.requested"
+  | "tool.approval.resolved"
+  | "tool.state.change";
+
 function publishRuntimeEvent(
   sessionId: string,
-  type: "tool.call.started" | "tool.call.completed",
+  type: RuntimeEventType,
   payload: Record<string, unknown>,
 ) {
   const event = appendSessionEvent(sessionId, type, payload);
@@ -507,20 +585,61 @@ interface StreamResult {
 async function executeStream(run: AgentRun): Promise<StreamResult> {
   const requestStartedAt = nowMs();
   const toolCallInputs = new Map<string, unknown>();
+  const runtimeSettings = getRuntimeSettings();
+
+  // Tool state machine for tracking tool call lifecycle
+  const stateMachine = new ToolStateMachine();
+
+  // Publish state changes as session events
+  stateMachine.onStateChange((state) => {
+    publishRuntimeEvent(run.sessionId, "tool.state.change", {
+      toolCallId: state.toolCallId,
+      toolName: state.toolName,
+      status: state.status,
+      input: state.input,
+      output: state.output,
+      error: state.error,
+    });
+  });
 
   const stream = streamText({
     model: createProviderModel(run.provider),
     system: run.context.systemPrompt,
-    messages: run.context.messages,
+    messages: autoCompactMessages(run.context.messages, 4),
     tools: run.context.tools,
+    providerOptions: buildAgentProviderOptions(run.provider, runtimeSettings.reasoningEffort),
     stopWhen: stepCountIs(run.context.safetyConfig.maxIterations),
     abortSignal: run.abortController.signal,
+    prepareStep({ steps }) {
+      if (steps.length !== 0 || !run.context.firstStepToolChoice) {
+        return undefined;
+      }
+
+      return {
+        toolChoice: run.context.firstStepToolChoice,
+      };
+    },
     experimental_onStepStart() {
       run.safety.checkStep();
     },
     experimental_onToolCallStart({ toolCall }) {
       run.safety.checkActive();
       toolCallInputs.set(toolCall.toolCallId, toolCall.input);
+
+      // Start tracking tool call state
+      stateMachine.start(toolCall.toolCallId, toolCall.toolName, toolCall.input);
+      stateMachine.markInputAvailable(toolCall.toolCallId);
+
+      // Check if this tool needs approval
+      if (!runtimeSettings.autoApproveToolRequests && stateMachine.needsApproval(toolCall.toolName)) {
+        // Publish approval request event
+        publishRuntimeEvent(run.sessionId, "tool.approval.requested", {
+          toolCallId: toolCall.toolCallId,
+          toolName: toolCall.toolName,
+          inputPreview: summarizeUnknown(toolCall.input),
+        });
+      }
+
       const predictedRuntime = predictToolBackend(run.sessionId, toolCall.toolName);
       publishRuntimeEvent(run.sessionId, "tool.call.started", {
         toolCallId: toolCall.toolCallId,
@@ -528,6 +647,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
         inputPreview: summarizeUnknown(toolCall.input),
         backend: predictedRuntime.backend,
         tabId: predictedRuntime.tabId,
+        state: "input-available",
       });
     },
     experimental_onToolCallFinish(event) {
@@ -539,6 +659,14 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
         ?? null;
       const completedTabId = browserPayload.tabId ?? null;
 
+      // Update tool state machine
+      if (event.success) {
+        stateMachine.markOutputAvailable(event.toolCall.toolCallId, event.output);
+      } else {
+        stateMachine.markError(event.toolCall.toolCallId, event.error);
+      }
+      stateMachine.complete(event.toolCall.toolCallId);
+
       publishRuntimeEvent(run.sessionId, "tool.call.completed", {
         toolCallId: event.toolCall.toolCallId,
         toolName: event.toolCall.toolName,
@@ -547,6 +675,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
         durationMs: event.durationMs,
         backend: completedBackend,
         tabId: completedTabId,
+        state: event.success ? "output-available" : "output-error",
       });
       logPerfTrace("tool_call", {
         sessionId: run.sessionId,
@@ -604,7 +733,7 @@ async function consumeTextStream(
     const updateResult = updateSessionMessage({
       sessionId: run.sessionId,
       messageId: assistantMessageId,
-      content: text,
+      content: sanitizeAssistantTextForChat(text),
     });
     publishSessionEvent(updateResult.event);
   }
@@ -615,6 +744,9 @@ async function consumeTextStream(
 
     text += delta;
 
+    // 保存checkpoint，防止中断丢失进度
+    saveStreamCheckpoint(run.sessionId, text);
+
     if (!assistantMessageId) {
       firstTokenMs = roundMs(nowMs() - requestStartedAt);
       // First delta: create the message immediately
@@ -623,7 +755,7 @@ async function consumeTextStream(
         clientMessageId: assistantClientMessageId,
         deviceId: "runtime-agent",
         role: "assistant",
-        content: text,
+        content: sanitizeAssistantTextForChat(text),
         attachmentIds: [],
       });
 
@@ -666,7 +798,7 @@ async function consumeTextStream(
       clientMessageId: assistantClientMessageId,
       deviceId: "runtime-agent",
       role: "assistant",
-      content: text,
+      content: sanitizeAssistantTextForChat(text),
       attachmentIds: [],
     });
     assistantMessageId = messageResult.message.id;
@@ -676,6 +808,9 @@ async function consumeTextStream(
   }
 
   await syncSessionProjectHistory(run.sessionId);
+
+  // 清理checkpoint
+  clearStreamCheckpoint(run.sessionId);
 
   // Log cache statistics if available
   const metadata = await stream.providerMetadata;

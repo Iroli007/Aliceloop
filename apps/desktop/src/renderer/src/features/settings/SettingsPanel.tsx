@@ -1,16 +1,25 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRuntimeCatalogs } from "../shell/useRuntimeCatalogs";
 import { useRuntimeSettings } from "../shell/useRuntimeSettings";
 import { getDesktopBridge } from "../../platform/desktopBridge";
-import type { SandboxPermissionProfile } from "@aliceloop/runtime-core";
+import {
+  reasoningEffortDefinitions,
+  type ReasoningEffort,
+} from "@aliceloop/runtime-core";
+
+const reasoningEffortLabels = new Map(reasoningEffortDefinitions.map((definition) => [definition.id, definition.label] as const));
+
+function formatReasoningEffortLabel(value: ReasoningEffort) {
+  return reasoningEffortLabels.get(value) ?? value;
+}
 
 export function SettingsPanel() {
   const runtimeCatalogs = useRuntimeCatalogs();
   const runtimeSettings = useRuntimeSettings();
   const desktopBridge = getDesktopBridge();
 
-  const [sandboxProfileInput, setSandboxProfileInput] = useState<SandboxPermissionProfile>("development");
-  const [sandboxNotice, setSandboxNotice] = useState<string | null>(null);
+  const [reasoningEffortInput, setReasoningEffortInput] = useState<ReasoningEffort>("medium");
+  const [reasoningNotice, setReasoningNotice] = useState<string | null>(null);
   const [mcpView, setMcpView] = useState<"marketplace" | "installed">("marketplace");
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
 
@@ -19,13 +28,20 @@ export function SettingsPanel() {
     .slice()
     .sort((left, right) => Number(right.featured) - Number(left.featured) || left.label.localeCompare(right.label, "zh-CN"));
 
-  async function saveSandboxSettings() {
-    setSandboxNotice(null);
-    const result = await runtimeSettings.save({ sandboxProfile: sandboxProfileInput });
+  useEffect(() => {
+    setReasoningEffortInput(runtimeSettings.settings.reasoningEffort);
+  }, [runtimeSettings.settings.reasoningEffort]);
+
+  async function saveRuntimePreferences() {
+    setReasoningNotice(null);
+    const result = await runtimeSettings.save({
+      reasoningEffort: reasoningEffortInput,
+    });
     if (!result.ok) {
-      setSandboxNotice(result.error ?? "保存失败");
+      const message = result.error ?? "保存失败";
+      setReasoningNotice(message);
     } else {
-      setSandboxNotice("保存成功");
+      setReasoningNotice(`当前推理强度：${formatReasoningEffortLabel(reasoningEffortInput)}`);
     }
   }
 
@@ -58,44 +74,50 @@ export function SettingsPanel() {
         </header>
 
         <div className="settings-content__body">
-          {/* ── 沙箱设置 ── */}
-          <h3 className="settings-section-title">沙箱</h3>
+          {/* ── 权限设置 ── */}
+          <h3 className="settings-section-title">权限</h3>
           <div className="settings-panel">
             <div className="settings-panel__heading">
-              <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问权限" : "开发模式"}</span>
+              <span>{runtimeSettings.settings.autoApproveToolRequests ? "工具默认放行" : "工具需要确认"}</span>
             </div>
             <div className="provider-notice">
-              {runtimeSettings.settings.sandboxProfile === "full-access"
-                ? "完全访问权限下，AI Agent 会直接以宿主用户权限执行命令与文件操作，并保留审计日志。"
-                : "现在每一次 `bash` 指令都会先进入人工确认，再由你点击是否执行。命令会用单独的命令行底板展示，避免和普通说明混在一起。"}
+              {runtimeSettings.settings.autoApproveToolRequests
+                ? "工具请求默认自动批准。文件读写和命令只在默认工作区内执行，删除文件会在聊天里单独确认后再执行。"
+                : "工具请求会要求确认。文件读写和命令只在默认工作区内执行，删除文件会在聊天里单独确认后再执行。"}
             </div>
-            {sandboxNotice ? <div className="provider-notice">{sandboxNotice}</div> : null}
             {runtimeSettings.error ? <div className="provider-notice provider-notice--error">{runtimeSettings.error}</div> : null}
-            <div className="sandbox-profile-list">
-              <button
-                className={`sandbox-profile-card${sandboxProfileInput === "development" ? " sandbox-profile-card--active" : ""}`}
-                onClick={() => setSandboxProfileInput("development")}
-              >
-                <strong>开发模式</strong>
-                <span>默认开放项目目录、数据目录、上传目录，并限制命令白名单和路径范围，适合日常开发。</span>
-              </button>
-              <button
-                className={`sandbox-profile-card${sandboxProfileInput === "full-access" ? " sandbox-profile-card--active" : ""}`}
-                onClick={() => setSandboxProfileInput("full-access")}
-              >
-                <strong>完全访问权限</strong>
-                <span>AI Agent 直接按宿主用户完整权限执行，保留审计日志，但不再附加路径白名单、命令白名单或逐条 bash 审批。</span>
-              </button>
-            </div>
             <div className="settings-panel__list">
               <div className="settings-panel__item">
-                <strong>当前默认根目录</strong>
-                <span>项目目录、daemon 数据目录、uploads 目录。</span>
+                <strong>工具执行</strong>
+                <span>工具请求默认自动批准，普通读写和命令都只在默认工作区内执行。</span>
               </div>
               <div className="settings-panel__item">
-                <strong>上传目录扩展</strong>
-                <span>如果附件路径本身是一个文件夹，沙箱会自动拿到该文件夹的读写与 cwd 权限。</span>
+                <strong>删除确认</strong>
+                <span>删除文件会先通过对话确认后再执行。</span>
               </div>
+            </div>
+          </div>
+
+          <h3 className="settings-section-title">推理</h3>
+          <div className="settings-panel">
+            <div className="settings-panel__heading">
+              <span>{formatReasoningEffortLabel(runtimeSettings.settings.reasoningEffort)}</span>
+            </div>
+            <div className="provider-notice">
+              这会把推理强度传给支持该参数的 OpenAI 兼容 reasoning 模型；普通模型会继续按默认方式回复。
+            </div>
+            {reasoningNotice ? <div className="provider-notice">{reasoningNotice}</div> : null}
+            {runtimeSettings.error ? <div className="provider-notice provider-notice--error">{runtimeSettings.error}</div> : null}
+            <div className="sandbox-profile-list sandbox-profile-list--compact">
+              {reasoningEffortDefinitions.map((definition) => (
+                <button
+                  key={definition.id}
+                  className={`sandbox-profile-card sandbox-profile-card--compact${reasoningEffortInput === definition.id ? " sandbox-profile-card--active" : ""}`}
+                  onClick={() => setReasoningEffortInput(definition.id)}
+                >
+                  <strong>{definition.label}</strong>
+                </button>
+              ))}
             </div>
           </div>
 
@@ -252,11 +274,11 @@ export function SettingsPanel() {
           <button className="settings-actions__button" onClick={() => void handleCloseWindow()}>
             关闭
           </button>
-          <button
-            className="settings-actions__button settings-actions__button--primary"
-            onClick={saveSandboxSettings}
-            disabled={runtimeSettings.saving}
-          >
+            <button
+              className="settings-actions__button settings-actions__button--primary"
+              onClick={saveRuntimePreferences}
+              disabled={runtimeSettings.saving}
+            >
             {runtimeSettings.saving ? "保存中..." : "保存"}
           </button>
         </footer>

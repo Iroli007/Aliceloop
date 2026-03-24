@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { focusOrCreateSettingsWindow } from "./settingsWindow";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,88 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL;
 let chromeRelayServer: ChromeRelayHttpServer | null = null;
+const debugCaptureEnabled = process.env.ALICELOOP_DEBUG_CAPTURE === "1";
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildRendererLoadErrorPage(input: {
+  heading: string;
+  detail: string;
+  target: string;
+}) {
+  const html = `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aliceloop</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #edf2fb;
+        color: #1f2937;
+      }
+      main {
+        width: min(560px, calc(100vw - 48px));
+        padding: 28px 30px;
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.96);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 22px;
+        line-height: 1.2;
+      }
+      p {
+        margin: 0 0 12px;
+        font-size: 14px;
+        line-height: 1.65;
+        color: #516072;
+      }
+      code {
+        display: block;
+        margin-top: 16px;
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: #f8fbff;
+        border: 1px dashed rgba(148, 163, 184, 0.4);
+        font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.6;
+        color: #334155;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${escapeHtml(input.heading)}</h1>
+      <p>${escapeHtml(input.detail)}</p>
+      <p>先确认 renderer dev server 和 daemon 都在运行，然后再重新打开桌面端。</p>
+      <code>${escapeHtml(input.target)}</code>
+    </main>
+  </body>
+</html>`;
+
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
 
 type DesktopPickedFile = {
   kind: "file";
@@ -118,24 +200,23 @@ async function collectFolderFiles(folderPath: string): Promise<DesktopPickedFold
 function createWindow(): BrowserWindow {
   const display = screen.getPrimaryDisplay();
   const { width: screenWidth, height: screenHeight } = display.workAreaSize;
-  const GOLDEN_RATIO = 0.618;
+  const WINDOW_HEIGHT_TO_WIDTH_RATIO = 3 / 4;
 
-  // 上下各留 1/10 边距，窗口高度为屏幕的 8/10
-  const height = Math.floor(screenHeight * 0.8);
-  // 黄金比例: 高度 / 宽度 = 0.618，所以宽度 = 高度 / 0.618
-  const width = Math.max(1120, Math.min(1500, Math.floor(height / GOLDEN_RATIO)));
-  // 水平居中
+  const baseHeight = Math.floor(screenHeight * 0.8);
+  const baseWidth = Math.max(1120, Math.min(1500, Math.floor(baseHeight / WINDOW_HEIGHT_TO_WIDTH_RATIO)));
+  const width = Math.max(900, Math.min(1440, Math.floor(baseWidth * 0.75)));
+  const height = Math.max(675, Math.floor(width * WINDOW_HEIGHT_TO_WIDTH_RATIO));
   const x = Math.floor((screenWidth - width) / 2);
-  // 顶部留 1/10 边距
-  const y = Math.floor(screenHeight * 0.1);
+  const y = Math.floor((screenHeight - height) / 2);
 
   const window = new BrowserWindow({
     width,
     height,
     x,
     y,
-    minWidth: 1120,
-    minHeight: 760,
+    show: false,
+    minWidth: 900,
+    minHeight: 675,
     titleBarStyle: "hiddenInset",
     backgroundColor: "#edf2fb",
     webPreferences: {
@@ -148,10 +229,100 @@ function createWindow(): BrowserWindow {
     window.setWindowButtonVisibility(false);
   }
 
+  let revealed = false;
+  let showingRendererError = false;
+
+  const revealWindow = () => {
+    if (revealed || window.isDestroyed()) {
+      return;
+    }
+    revealed = true;
+    window.show();
+  };
+
+  let debugCaptureTimer: NodeJS.Timeout | null = null;
+
+  const scheduleDebugCapture = () => {
+    if (!debugCaptureEnabled || debugCaptureTimer || window.isDestroyed()) {
+      return;
+    }
+
+    debugCaptureTimer = setTimeout(async () => {
+      debugCaptureTimer = null;
+      if (window.isDestroyed()) {
+        return;
+      }
+
+      try {
+        await mkdir(join(process.cwd(), "tmp"), { recursive: true });
+        const image = await window.webContents.capturePage();
+        const outputPath = join(process.cwd(), "tmp", "electron-window-capture.png");
+        await writeFile(outputPath, image.toPNG());
+        console.info("[aliceloop-desktop] window capture saved", JSON.stringify({ outputPath }));
+      } catch (error) {
+        console.error("[aliceloop-desktop] window capture failed", error);
+      }
+    }, 1800);
+  };
+
+  const showRendererLoadError = (detail: string, target: string) => {
+    if (showingRendererError || window.isDestroyed()) {
+      return;
+    }
+
+    showingRendererError = true;
+    console.error("[aliceloop-desktop] renderer load failed", JSON.stringify({ detail, target }));
+    void window.loadURL(buildRendererLoadErrorPage({
+      heading: "桌面端页面加载失败",
+      detail,
+      target,
+    }));
+    revealWindow();
+  };
+
+  window.once("ready-to-show", revealWindow);
+  window.webContents.on("did-finish-load", () => {
+    console.info("[aliceloop-desktop] renderer loaded", JSON.stringify({
+      url: window.webContents.getURL(),
+    }));
+    revealWindow();
+    scheduleDebugCapture();
+  });
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) {
+      return;
+    }
+
+    showRendererLoadError(`did-fail-load (${errorCode}): ${errorDescription}`, validatedURL || devServerUrl || "renderer/index.html");
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    console.error("[aliceloop-desktop] render process gone", JSON.stringify(details));
+  });
+  window.on("unresponsive", () => {
+    console.error("[aliceloop-desktop] window became unresponsive");
+  });
+  window.on("closed", () => {
+    if (debugCaptureTimer) {
+      clearTimeout(debugCaptureTimer);
+      debugCaptureTimer = null;
+    }
+  });
+
   if (devServerUrl) {
-    window.loadURL(devServerUrl);
+    void window.loadURL(devServerUrl).catch((error) => {
+      showRendererLoadError(
+        error instanceof Error ? error.message : "Unknown renderer load error",
+        devServerUrl,
+      );
+    });
   } else {
-    window.loadFile(join(__dirname, "../renderer/index.html"));
+    const rendererEntry = join(__dirname, "../renderer/index.html");
+    void window.loadFile(rendererEntry).catch((error) => {
+      showRendererLoadError(
+        error instanceof Error ? error.message : "Unknown renderer load error",
+        rendererEntry,
+      );
+    });
   }
 
   return window;

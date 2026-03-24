@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { tool } from "ai";
 import type { createPermissionSandboxExecutor } from "../../services/sandboxExecutor";
-import { getSandboxProjectRoot } from "../../runtime/sandbox/toolPolicy";
+import { getSandboxProjectRoot, isPathAllowed } from "../../runtime/sandbox/toolPolicy";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,86 +19,15 @@ function hasWildcard(value: string) {
   return /[*?[\]{}]/.test(value);
 }
 
-function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-async function guardReadableFilePath(filePath: string) {
-  if (hasWildcard(filePath)) {
-    return buildToolErrorResponse(
-      "Path contains a wildcard, but read requires an exact file path.",
-      "You attempted to use `read` with a wildcard path. Please use `glob` to discover matching files first, then call `read` again with one exact file path.",
-    );
-  }
-
-  try {
-    const stats = await lstat(filePath);
-    if (stats.isDirectory()) {
-      return buildToolErrorResponse(
-        "Target is a directory, not a file.",
-        "You attempted to use `read` on a directory. Please use `glob` to view the directory structure, or provide a specific file path instead.",
-      );
-    }
-  } catch (error) {
-    const message = getErrorMessage(error);
-    if (message.includes("ENOENT")) {
-      return buildToolErrorResponse(
-        "Target file does not exist.",
-        "You attempted to use `read` on a path that does not exist. Please use `glob` or `grep` to locate the correct file path first.",
-      );
-    }
-  }
-
-  return null;
-}
-
-function mapToolExecutionError(toolName: string, error: unknown) {
-  const message = getErrorMessage(error);
-
-  if (toolName === "read" && message.includes("EISDIR")) {
-    return buildToolErrorResponse(
-      "Target is a directory, not a file.",
-      "You attempted to use `read` on a directory. Please use `glob` to view the directory structure, or provide a specific file path instead.",
-    );
-  }
-
-  if (toolName === "read" && message.includes("read denied")) {
-    return buildToolErrorResponse(
-      "Read permission denied for this path.",
-      "This path is outside the current readable roots. Please use a file inside the mounted workspace, upload the folder so it becomes a readable root, or request an elevated read if appropriate.",
-    );
-  }
-
-  if (toolName === "write" && message.includes("write denied")) {
-    return buildToolErrorResponse(
-      "Write permission denied for this path.",
-      "This path is outside the current writable roots. Please write inside the mounted workspace, upload or mount the target folder first, or request an elevated write if appropriate.",
-    );
-  }
-
-  if (toolName === "edit" && message.includes("Could not find the specified text")) {
-    return buildToolErrorResponse(
-      "Original code block was not found.",
-      "You attempted to use `edit` without providing an exact existing code block. Please read the file first, then pass the exact [Original Code Block] and [Replacement Code Block].",
-    );
-  }
-
-  throw error;
-}
-
-function pickSearchEnvironment() {
-  const env: Record<string, string> = {};
-  for (const key of ["HOME", "PATH", "LANG", "USER"]) {
-    const value = process.env[key];
-    if (typeof value === "string" && value.length > 0) {
-      env[key] = value;
-    }
-  }
-  return env;
+function normalizePolicyRoots(roots: string[]) {
+  return roots.filter((root) => root !== "<all>");
 }
 
 export function createSandboxTools(sandbox: SandboxExecutor) {
-  const projectRoot = getSandboxProjectRoot();
+  const policy = sandbox.describePolicy();
+  const allowedReadRoots = normalizePolicyRoots(policy.allowedReadRoots);
+  const allowedCwdRoots = normalizePolicyRoots(policy.allowedCwdRoots);
+  const defaultSearchRoot = policy.defaultCwd ?? allowedReadRoots[0] ?? allowedCwdRoots[0] ?? getSandboxProjectRoot();
 
   async function execRg(args: string[], cwd: string, timeoutMs: number): Promise<string> {
     try {
@@ -106,30 +35,29 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
         cwd,
         timeout: timeoutMs,
         maxBuffer: 4 * 1024 * 1024,
-        env: pickSearchEnvironment(),
+        env: { HOME: process.env.HOME!, PATH: process.env.PATH! },
       });
       return stdout || "(no matches)";
     } catch (error: unknown) {
-      const err = error as NodeJS.ErrnoException & { stdout?: string; code?: string | number };
-      const code = err.code == null ? undefined : String(err.code);
-      if (code === "1") {
-        return "(no matches)";
+      const err = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: string | number };
+      const errorCode = (err as { code?: string | number }).code;
+      // rg 返回 1 表示没有匹配，这是正常的
+      if (errorCode === 1 || errorCode === "1") {
+        return err.stdout || "(no matches)";
       }
-      if (code === "ENOENT") {
-        throw new Error("ripgrep (rg) not found on PATH; install it or ensure it is available");
+      // rg 不存在
+      if (err.code === "ENOENT") {
+        throw new Error("ripgrep (rg) not found on PATH");
       }
-      const partial = err.stdout?.trim();
-      if (partial) {
-        return partial;
-      }
-      throw error;
+      // 其他错误返回 stderr 或错误信息
+      throw new Error(err.stderr || err.message || String(error));
     }
   }
 
   return {
     grep: tool({
       description:
-        "Strictly used for global text or regular expression searches INSIDE files.\n\nUse case: Locating specific function definitions, variable names, or error logs (e.g., searching for function login). It returns the exact file path and line numbers containing the match.\n\nWARNING: If you already know the exact file path and want to view its full context, DO NOT use this tool. Use the read tool instead.",
+        "Strictly used for global text or regular expression searches inside files in the current workspace.\n\nUse case: Locating specific function definitions, variable names, or error logs (e.g., searching for function login). It returns the exact file path and line numbers containing the match.\n\nWARNING: If you already know the exact file path and want to view its full context, DO NOT use this tool. Use the read tool instead.",
       inputSchema: z.object({
         pattern: z
           .string()
@@ -137,7 +65,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
         path: z
           .string()
           .optional()
-          .describe("Directory or file to search in (defaults to project root)"),
+          .describe("Directory or file to search in (defaults to the current workspace)"),
         glob: z
           .string()
           .optional()
@@ -160,7 +88,14 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           .describe("Number of context lines before and after each match"),
       }),
       execute: async ({ pattern, path, glob: globPattern, fixedStrings, caseSensitive, maxCount, context: contextLines }) => {
-        const searchPath = resolve(path ?? projectRoot);
+        const searchPath = resolve(defaultSearchRoot, path ?? ".");
+        if (allowedReadRoots.length > 0 && !isPathAllowed(searchPath, allowedReadRoots)) {
+          return buildToolErrorResponse(
+            "Search path is outside the allowed workspace roots.",
+            `Use a path inside ${defaultSearchRoot} instead.`,
+          );
+        }
+
         const args: string[] = ["--line-number", "--no-heading", "--color", "never"];
         if (fixedStrings) args.push("--fixed-strings");
         if (caseSensitive === true) args.push("--case-sensitive");
@@ -170,13 +105,13 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
         if (globPattern) args.push("--glob", globPattern);
         args.push("--", pattern, searchPath);
 
-        return execRg(args, projectRoot, 15_000);
+        return execRg(args, defaultSearchRoot, 15_000);
       },
     }),
 
     glob: tool({
       description:
-        "Strictly used to find files and directories in the project by name or wildcard.\n\nUse case: Discovering project structure or finding specific files (e.g., **/*.test.ts).\n\nWARNING: This tool will NEVER return the internal code content of a file. If you need to search for specific code logic, you MUST use the grep tool.",
+        "Strictly used to find files and directories in the current workspace by name or wildcard.\n\nUse case: Discovering workspace structure or finding specific files (e.g., **/*.test.ts).\n\nWARNING: This tool will NEVER return the internal code content of a file. If you need to search for specific code logic, you MUST use the grep tool.",
       inputSchema: z.object({
         pattern: z
           .string()
@@ -184,10 +119,17 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
         cwd: z
           .string()
           .optional()
-          .describe("Base directory for the glob (defaults to project root)"),
+          .describe("Base directory for the glob (defaults to the current workspace)"),
       }),
       execute: async ({ pattern, cwd }) => {
-        const baseCwd = resolve(cwd ?? projectRoot);
+        const baseCwd = resolve(defaultSearchRoot, cwd ?? ".");
+        if (allowedCwdRoots.length > 0 && !isPathAllowed(baseCwd, allowedCwdRoots)) {
+          return buildToolErrorResponse(
+            "Glob cwd is outside the allowed workspace roots.",
+            `Use a cwd inside ${defaultSearchRoot} instead.`,
+          );
+        }
+
         const args: string[] = ["--files", "--glob", pattern, baseCwd];
 
         return execRg(args, baseCwd, 10_000);
@@ -216,26 +158,25 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
       }),
       execute: async ({ filePath, offset: rawOffset, limit: rawLimit }) => {
         const resolvedPath = resolve(filePath);
-        const preflightError = await guardReadableFilePath(resolvedPath);
-        if (preflightError) {
-          return preflightError;
+        // 通配符检查直接返回错误提示
+        if (hasWildcard(filePath)) {
+          return buildToolErrorResponse(
+            "Path contains a wildcard.",
+            "Please use `glob` to discover matching files first, then call `read` with one exact file path."
+          );
         }
 
-        try {
-          const content = await sandbox.readTextFile({ targetPath: resolvedPath });
-          const allLines = content.split("\n");
-          const totalLines = allLines.length;
-          const offset = rawOffset ?? 0;
-          const limit = rawLimit ?? 500;
-          const windowLines = allLines.slice(offset, offset + limit);
-          const endLine = Math.min(offset + limit, totalLines);
-          const hasMore = endLine < totalLines;
+        const content = await sandbox.readTextFile({ targetPath: resolvedPath });
+        const allLines = content.split("\n");
+        const totalLines = allLines.length;
+        const offset = rawOffset ?? 0;
+        const limit = rawLimit ?? 500;
+        const windowLines = allLines.slice(offset, offset + limit);
+        const endLine = Math.min(offset + limit, totalLines);
+        const hasMore = endLine < totalLines;
 
-          const header = `[file: ${filePath} | lines ${offset + 1}-${endLine} of ${totalLines}${hasMore ? ` | next offset: ${endLine}` : ""}]`;
-          return `${header}\n${windowLines.join("\n")}`;
-        } catch (error) {
-          return mapToolExecutionError("read", error);
-        }
+        const header = `[file: ${filePath} | lines ${offset + 1}-${endLine} of ${totalLines}${hasMore ? ` | next offset: ${endLine}` : ""}]`;
+        return `${header}\n${windowLines.join("\n")}`;
       },
     }),
 
@@ -251,12 +192,8 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           .describe("The text content to write to the file"),
       }),
       execute: async ({ targetPath, content }) => {
-        try {
-          await sandbox.writeTextFile({ targetPath, content });
-          return `File written successfully: ${targetPath}`;
-        } catch (error) {
-          return mapToolExecutionError("write", error);
-        }
+        await sandbox.writeTextFile({ targetPath, content });
+        return `File written successfully: ${targetPath}`;
       },
     }),
 
@@ -275,65 +212,53 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           .describe("The replacement text"),
       }),
       execute: async ({ filePath, oldText, newText }) => {
-        try {
-          await sandbox.editTextFile({
-            targetPath: filePath,
-            transform: (content) => {
-              // 1. 抹平操作系统差异（防止 Windows \r\n 和 Linux \n 打架）
-              const normalizedContent = content.replace(/\r\n/g, '\n');
-              const normalizedOld = oldText.replace(/\r\n/g, '\n');
+        await sandbox.editTextFile({
+          targetPath: filePath,
+          transform: (content) => {
+            // 抹平操作系统差异
+            const normalizedContent = content.replace(/\r\n/g, '\n');
+            const normalizedOld = oldText.replace(/\r\n/g, '\n');
 
-              // 2. 统计精确匹配的次数
-              const occurrences = normalizedContent.split(normalizedOld).length - 1;
+            // 精确匹配
+            const occurrences = normalizedContent.split(normalizedOld).length - 1;
+            if (occurrences === 1) {
+              return normalizedContent.replace(normalizedOld, newText);
+            }
 
-              // 🟢 完美匹配 1 次：最安全的替换
-              if (occurrences === 1) {
-                return normalizedContent.replace(normalizedOld, newText);
-              }
+            // 匹配超过 1 次
+            if (occurrences > 1) {
+              throw new Error(
+                `Ambiguous match! Found ${occurrences} identical occurrences. Please include more context.`
+              );
+            }
 
-              // 🔴 匹配超过 1 次：触发"唯一性校验拦截"
-              if (occurrences > 1) {
-                throw new Error(
-                  `Ambiguous match! Found ${occurrences} identical occurrences of the provided oldText. Please include more surrounding context (lines above and below) in your oldText to make it strictly unique.`
-                );
-              }
+            // 弹性匹配
+            const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const fuzzyRegexString = normalizedOld
+              .trim()
+              .split(/\s+/)
+              .map(escapeRegex)
+              .join('\\s+');
 
-              // 🟡 匹配 0 次：启动"弹性空白符匹配 (Fuzzy Whitespace Match)"
-              // LLM 经常漏掉前置缩进，我们把 oldText 里所有的连续空格/换行，全部转换成正则的 \s+
-              const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const fuzzyRegexString = normalizedOld
-                .trim()
-                .split(/\s+/) // 按空白符打散
-                .map(escapeRegex)
-                .join('\\s+'); // 用 \s+ 重新连接
+            if (!fuzzyRegexString) {
+              throw new Error("oldText cannot be empty or just whitespace.");
+            }
 
-              if (!fuzzyRegexString) {
-                throw new Error("oldText cannot be empty or just whitespace.");
-              }
+            const fuzzyRegex = new RegExp(fuzzyRegexString, 'g');
+            const fuzzyMatches = [...normalizedContent.matchAll(fuzzyRegex)];
 
-              const fuzzyRegex = new RegExp(fuzzyRegexString, 'g');
-              const fuzzyMatches = [...normalizedContent.matchAll(fuzzyRegex)];
+            if (fuzzyMatches.length === 0) {
+              throw new Error(`Could not find the specified text in ${filePath}.`);
+            }
 
-              if (fuzzyMatches.length === 0) {
-                throw new Error(
-                  `Could not find the specified text in ${filePath}. Please ensure indentation, spaces, and line endings match exactly. Hint: use read to get the exact original text.`
-                );
-              }
+            if (fuzzyMatches.length > 1) {
+              throw new Error(`Ambiguous fuzzy match! Found ${fuzzyMatches.length} similar occurrences.`);
+            }
 
-              if (fuzzyMatches.length > 1) {
-                throw new Error(
-                  `Ambiguous fuzzy match! Found ${fuzzyMatches.length} similar occurrences (ignoring spacing differences). Please include more surrounding context.`
-                );
-              }
-
-              // 🟢 弹性匹配成功 1 次：用原文中实际匹配到的带真实缩进的字符串块进行替换
-              return normalizedContent.replace(fuzzyMatches[0][0], newText);
-            },
-          });
-          return `File edited successfully: ${filePath}`;
-        } catch (error) {
-          return mapToolExecutionError("edit", error);
-        }
+            return normalizedContent.replace(fuzzyMatches[0][0], newText);
+          },
+        });
+        return `File edited successfully: ${filePath}`;
       },
     }),
 

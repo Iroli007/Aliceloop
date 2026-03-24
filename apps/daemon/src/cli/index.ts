@@ -32,6 +32,8 @@ interface MemoryNotePayload {
 
 interface RuntimeSettingsPayload {
   sandboxProfile: string;
+  autoApproveToolRequests: boolean;
+  reasoningEffort: string;
   updatedAt: string | null;
 }
 
@@ -547,6 +549,8 @@ async function fetchConfigSnapshot(): Promise<ConfigSnapshot> {
 function flattenConfigSnapshot(snapshot: ConfigSnapshot) {
   const flattened: Record<string, string | boolean | null> = {
     "runtime.sandboxProfile": snapshot.runtime.sandboxProfile,
+    "runtime.autoApproveToolRequests": snapshot.runtime.autoApproveToolRequests,
+    "runtime.reasoningEffort": snapshot.runtime.reasoningEffort,
     "runtime.updatedAt": snapshot.runtime.updatedAt,
     "user.displayName": snapshot.user.displayName,
     "user.preferredLanguage": snapshot.user.preferredLanguage,
@@ -633,19 +637,39 @@ async function setConfigValue(path: string, rawValue: string) {
   }
 
   if (segments[0] === "runtime") {
-    if (segments[1] !== "sandboxProfile") {
-      throw new CliError(`Unsupported runtime config path: ${path}`);
+    if (segments[1] === "sandboxProfile") {
+      const sandboxProfile = rawValue.trim();
+      if (sandboxProfile !== "development" && sandboxProfile !== "full-access") {
+        throw new CliError("runtime.sandboxProfile must be development or full-access");
+      }
+
+      return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
+        method: "PUT",
+        body: JSON.stringify({ sandboxProfile }),
+      });
     }
 
-    const sandboxProfile = rawValue.trim();
-    if (sandboxProfile !== "development" && sandboxProfile !== "full-access") {
-      throw new CliError("runtime.sandboxProfile must be development or full-access");
+    if (segments[1] === "autoApproveToolRequests") {
+      const autoApproveToolRequests = parseBoolean(rawValue);
+      return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
+        method: "PUT",
+        body: JSON.stringify({ autoApproveToolRequests }),
+      });
     }
 
-    return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
-      method: "PUT",
-      body: JSON.stringify({ sandboxProfile }),
-    });
+    if (segments[1] === "reasoningEffort") {
+      const reasoningEffort = rawValue.trim();
+      if (!["off", "low", "medium", "high", "xhigh"].includes(reasoningEffort)) {
+        throw new CliError("runtime.reasoningEffort must be off, low, medium, high, or xhigh");
+      }
+
+      return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
+        method: "PUT",
+        body: JSON.stringify({ reasoningEffort }),
+      });
+    }
+
+    throw new CliError(`Unsupported runtime config path: ${path}`);
   }
 
   if (segments[0] === "user") {

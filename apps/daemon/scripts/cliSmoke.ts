@@ -169,7 +169,15 @@ async function main() {
 
     const configGet = await capture(["config", "get", "runtime.sandboxProfile"]);
     assert.equal(configGet.code, 0, "config get should succeed");
-    assert.equal(configGet.stdout.trim(), "development", "runtime sandbox profile should default to development");
+    assert.equal(configGet.stdout.trim(), "full-access", "runtime sandbox profile should default to full-access");
+
+    const autoApproveGet = await capture(["config", "get", "runtime.autoApproveToolRequests"]);
+    assert.equal(autoApproveGet.code, 0, "runtime auto-approve config get should succeed");
+    assert.equal(autoApproveGet.stdout.trim(), "true", "runtime auto-approve should default to true");
+
+    const autoApproveSet = await capture(["config", "set", "runtime.autoApproveToolRequests", "false"]);
+    assert.equal(autoApproveSet.code, 0, "runtime auto-approve config set should succeed");
+    assert(autoApproveSet.stdout.includes("\"autoApproveToolRequests\": false"), "config set should update runtime auto-approve");
 
     const configSet = await capture(["config", "set", "runtime.sandboxProfile", "full-access"]);
     assert.equal(configSet.code, 0, "config set should succeed");

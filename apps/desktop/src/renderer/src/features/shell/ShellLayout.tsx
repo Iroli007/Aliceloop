@@ -1,14 +1,23 @@
-import type { Attachment, SandboxPermissionProfile, ToolApproval } from "@aliceloop/runtime-core";
+import {
+  reasoningEffortDefinitions,
+  type Attachment,
+  type SessionEvent,
+  type SessionMessage,
+  type ReasoningEffort,
+  type ToolApproval,
+} from "@aliceloop/runtime-core";
 import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
-import { useShellConversation } from "./useShellConversation";
+import { SourceLinksSection } from "./SourceLinks";
+import { ToolWorkflowCard, buildSummaryTitle, buildToolSourceLinks, type ToolSourceLink } from "./ToolWorkflowCard";
+import { type ToolWorkflowEntry, useShellConversation } from "./useShellConversation";
 import { useRuntimeCatalogs } from "./useRuntimeCatalogs";
 import { useRuntimeSettings } from "./useRuntimeSettings";
 import { WindowControls } from "./WindowControls";
 import type { ShellState } from "./useShellData";
 import { getDesktopBridge } from "../../platform/desktopBridge";
-import { ThinkingIndicator } from "../companion/ThinkingIndicator";
+import { ThinkingIndicator } from "./ThinkingIndicator";
 import { MessageContent } from "./MessageContent";
 
 interface ShellLayoutProps {
@@ -28,6 +37,33 @@ const defaultSidebarWidthPx = 286;
 const minSidebarWidthPx = 220;
 const maxSidebarWidthPx = 420;
 const sidebarWidthStorageKey = "aliceloop-shell-sidebar-width";
+const reasoningEffortLabels = new Map(reasoningEffortDefinitions.map((definition) => [definition.id, definition.label] as const));
+
+function formatReasoningEffortLabel(value: ReasoningEffort) {
+  return reasoningEffortLabels.get(value) ?? value;
+}
+
+function ReasoningEffortIcon() {
+  return (
+    <svg
+      className="composer__reasoning-option-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M9 4.5A2.5 2.5 0 0 0 6.5 7v.6a3.2 3.2 0 0 0-2 3c0 1.2.7 2.3 1.8 2.9V15A2.5 2.5 0 0 0 8.8 17.5H10" />
+      <path d="M15 4.5A2.5 2.5 0 0 1 17.5 7v.6a3.2 3.2 0 0 1 2 3c0 1.2-.7 2.3-1.8 2.9V15a2.5 2.5 0 0 1-2.5 2.5H14" />
+      <path d="M12 4.5v13" />
+      <path d="M9.5 8.5c1 .5 1.4 1.3 1.4 2.5s-.4 2-1.4 2.5" />
+      <path d="M14.5 8.5c-1 .5-1.4 1.3-1.4 2.5s.4 2 1.4 2.5" />
+      <path d="M10 17.5c.3 1.1 1 1.8 2 2.1 1-.3 1.7-1 2-2.1" />
+    </svg>
+  );
+}
 
 function clampSidebarWidth(width: number) {
   return Math.max(minSidebarWidthPx, Math.min(maxSidebarWidthPx, width));
@@ -83,31 +119,312 @@ function formatApprovalTime(isoString: string | null) {
   }).format(date);
 }
 
+function dedupeToolSourceLinks(links: ToolSourceLink[]) {
+  const seen = new Set<string>();
+  return links.filter((link) => {
+    if (seen.has(link.url)) {
+      return false;
+    }
+
+    seen.add(link.url);
+    return true;
+  });
+}
+
+function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflowEntries: ToolWorkflowEntry[]): TimelineEntry[] {
+  const chunks: TimelineEntry[] = [];
+  const currentTurnChunks: TimelineEntry[] = [];
+  const currentTurnSourceLinks: ToolSourceLink[] = [];
+  const sourceLinksByToolCallId = new Map<string, ToolSourceLink[]>(
+    toolWorkflowEntries.map((entry) => [entry.toolCallId, buildToolSourceLinks(entry)] as const),
+  );
+  const seenSourceToolCallIds = new Set<string>();
+  let activeMessage: SessionMessage | null = null;
+  let currentContent = "";
+  let lastEmittedContent = "";
+  let chunkIndex = 0;
+
+  function flush(sortSeq: number, sortTime: string) {
+    if (!activeMessage) {
+      return;
+    }
+
+    if (!currentContent || currentContent === lastEmittedContent) {
+      return;
+    }
+
+    currentTurnChunks.push({
+      kind: "message",
+      message: {
+        ...activeMessage,
+        id: `${activeMessage.id}::chunk-${chunkIndex++}`,
+        content: currentContent,
+      },
+      sortSeq,
+      sortTime,
+      sourceLinks: [],
+    });
+
+    lastEmittedContent = currentContent;
+  }
+
+  function finalizeTurn() {
+    if (currentTurnChunks.length === 0) {
+      currentTurnSourceLinks.length = 0;
+      return;
+    }
+
+    const sourceLinks = dedupeToolSourceLinks(currentTurnSourceLinks);
+    if (sourceLinks.length > 0) {
+      const lastChunk = currentTurnChunks.at(-1);
+      if (lastChunk?.kind === "message") {
+        lastChunk.sourceLinks = sourceLinks;
+      }
+    }
+
+    chunks.push(...currentTurnChunks);
+    currentTurnChunks.length = 0;
+    currentTurnSourceLinks.length = 0;
+  }
+
+  for (const event of sessionEvents) {
+    if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
+      const payload = event.payload as { message?: SessionMessage };
+      const message = payload.message;
+      if (!message) {
+        continue;
+      }
+
+      if (message.role !== "assistant") {
+        flush(event.seq - 0.5, event.createdAt);
+        finalizeTurn();
+        activeMessage = null;
+        currentContent = "";
+        lastEmittedContent = "";
+        continue;
+      }
+
+      activeMessage = message;
+      currentContent = message.content;
+      continue;
+    }
+
+    if (event.type.startsWith("tool.")) {
+      flush(event.seq, event.createdAt);
+      const payload = event.payload as { toolCallId?: unknown };
+      if (typeof payload.toolCallId === "string" && !seenSourceToolCallIds.has(payload.toolCallId)) {
+        seenSourceToolCallIds.add(payload.toolCallId);
+        const sourceLinks = sourceLinksByToolCallId.get(payload.toolCallId);
+        if (sourceLinks?.length) {
+          currentTurnSourceLinks.push(...sourceLinks);
+        }
+      }
+    }
+  }
+
+  const lastEvent = sessionEvents.at(-1);
+  if (activeMessage) {
+    flush((lastEvent?.seq ?? 0) + 1, lastEvent?.createdAt ?? activeMessage.createdAt);
+  }
+
+  finalizeTurn();
+  return chunks;
+}
+
 type TimelineEntry =
-  | { kind: "message"; message: import("@aliceloop/runtime-core").SessionMessage }
-  | { kind: "approval"; approval: ToolApproval };
+  | {
+      kind: "message";
+      message: import("@aliceloop/runtime-core").SessionMessage;
+      sortSeq: number | null;
+      sortTime: string;
+      sourceLinks: ToolSourceLink[];
+    }
+  | {
+      kind: "approval";
+      approval: ToolApproval;
+      sortSeq: number | null;
+      sortTime: string;
+    }
+  | {
+      kind: "tool";
+      tool: ToolWorkflowEntry;
+      sortSeq: number | null;
+      sortTime: string;
+    };
+
+type TimelineBlock =
+  | { kind: "message"; message: import("@aliceloop/runtime-core").SessionMessage; sourceLinks: ToolSourceLink[] }
+  | { kind: "approval"; approval: ToolApproval }
+  | { kind: "tool"; tool: ToolWorkflowEntry }
+  | {
+      kind: "tool-group";
+      groupKey: string;
+      groupLabel: string;
+      tools: ToolWorkflowEntry[];
+    };
+
+const fileSearchSummaries = new Set(["查找文件", "搜索内容", "查看文件", "查看目录"]);
+
+function getToolWorkflowGroupMeta(entry: ToolWorkflowEntry) {
+  const summaryTitle = buildSummaryTitle(entry);
+  if (fileSearchSummaries.has(summaryTitle)) {
+    return {
+      groupKey: "file-search",
+      groupLabel: "搜索文件",
+    };
+  }
+
+  return null;
+}
 
 function buildTimeline(
   messages: import("@aliceloop/runtime-core").SessionMessage[],
   resolvedApprovals: ToolApproval[],
-): TimelineEntry[] {
+  toolWorkflowEntries: ToolWorkflowEntry[],
+  sessionEvents: SessionEvent[],
+): TimelineBlock[] {
+  const messageSeqById = new Map<string, number>();
+  const approvalSeqById = new Map<string, number>();
+
+  for (const event of sessionEvents) {
+    if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
+      const payload = event.payload as { message?: { id?: unknown } };
+      if (typeof payload.message?.id === "string") {
+        messageSeqById.set(payload.message.id, event.seq);
+      }
+    }
+
+    if (event.type === "tool.approval.resolved") {
+      const payload = event.payload as { approval?: { id?: unknown } };
+      if (typeof payload.approval?.id === "string") {
+        approvalSeqById.set(payload.approval.id, event.seq);
+      }
+    }
+  }
+
   const entries: TimelineEntry[] = [];
 
   for (const message of messages) {
-    entries.push({ kind: "message", message });
+    if (message.role === "assistant") {
+      continue;
+    }
+
+    entries.push({
+      kind: "message",
+      message,
+      sortSeq: messageSeqById.get(message.id) ?? null,
+      sortTime: message.createdAt,
+      sourceLinks: [],
+    });
   }
 
   for (const approval of resolvedApprovals) {
-    entries.push({ kind: "approval", approval });
+    entries.push({
+      kind: "approval",
+      approval,
+      sortSeq: approvalSeqById.get(approval.id) ?? null,
+      sortTime: approval.resolvedAt ?? approval.requestedAt,
+    });
   }
 
+  for (const tool of toolWorkflowEntries) {
+    entries.push({
+      kind: "tool",
+      tool,
+      sortSeq: tool.createdSeq,
+      sortTime: tool.createdAt,
+    });
+  }
+
+  entries.push(...buildAssistantMessageChunks(sessionEvents, toolWorkflowEntries));
+
   entries.sort((a, b) => {
-    const aTime = a.kind === "message" ? a.message.createdAt : (a.approval.resolvedAt ?? a.approval.requestedAt);
-    const bTime = b.kind === "message" ? b.message.createdAt : (b.approval.resolvedAt ?? b.approval.requestedAt);
-    return aTime.localeCompare(bTime);
+    if (a.sortSeq !== null || b.sortSeq !== null) {
+      if (a.sortSeq !== null && b.sortSeq !== null && a.sortSeq !== b.sortSeq) {
+        return a.sortSeq - b.sortSeq;
+      }
+
+      if (a.sortSeq !== null && b.sortSeq === null) {
+        return -1;
+      }
+
+      if (a.sortSeq === null && b.sortSeq !== null) {
+        return 1;
+      }
+    }
+
+    const timeCompare = a.sortTime.localeCompare(b.sortTime);
+    if (timeCompare !== 0) {
+      return timeCompare;
+    }
+
+    const kindOrder: Record<TimelineEntry["kind"], number> = {
+      message: 0,
+      approval: 1,
+      tool: 2,
+    };
+
+    return kindOrder[a.kind] - kindOrder[b.kind];
   });
 
-  return entries;
+  const blocks: TimelineBlock[] = [];
+  let pendingToolGroup: {
+    groupKey: string;
+    groupLabel: string;
+    tools: ToolWorkflowEntry[];
+  } | null = null;
+
+  function flushToolGroup() {
+    if (!pendingToolGroup) {
+      return;
+    }
+
+    if (pendingToolGroup.tools.length > 1) {
+      blocks.push({
+        kind: "tool-group",
+        groupKey: pendingToolGroup.groupKey,
+        groupLabel: pendingToolGroup.groupLabel,
+        tools: pendingToolGroup.tools,
+      });
+    } else {
+      blocks.push({
+        kind: "tool",
+        tool: pendingToolGroup.tools[0],
+      });
+    }
+
+    pendingToolGroup = null;
+  }
+
+  for (const entry of entries) {
+    if (entry.kind !== "tool") {
+      flushToolGroup();
+      blocks.push(entry);
+      continue;
+    }
+
+    const groupMeta = getToolWorkflowGroupMeta(entry.tool);
+    if (!groupMeta) {
+      flushToolGroup();
+      blocks.push(entry);
+      continue;
+    }
+
+    if (pendingToolGroup && pendingToolGroup.groupKey === groupMeta.groupKey) {
+      pendingToolGroup.tools.push(entry.tool);
+      continue;
+    }
+
+    flushToolGroup();
+    pendingToolGroup = {
+      groupKey: groupMeta.groupKey,
+      groupLabel: groupMeta.groupLabel,
+      tools: [entry.tool],
+    };
+  }
+
+  flushToolGroup();
+  return blocks;
 }
 
 function getThreadDateParts(value: string | null) {
@@ -205,7 +522,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const conversation = useShellConversation();
   const desktopBridge = getDesktopBridge();
   const threadGroups = groupThreadsByDate(conversation.threads);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [sidebarMotion, setSidebarMotion] = useState<"opening" | "closing" | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     if (typeof window === "undefined") {
@@ -228,8 +545,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [providerModelInput, setProviderModelInput] = useState("");
   const [providerEnabled, setProviderEnabled] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
-  const [sandboxProfileInput, setSandboxProfileInput] = useState<SandboxPermissionProfile>("development");
-  const [sandboxNotice, setSandboxNotice] = useState<string | null>(null);
+  const [reasoningEffortInput, setReasoningEffortInput] = useState<ReasoningEffort>("medium");
+  const [reasoningNotice, setReasoningNotice] = useState<string | null>(null);
   const [mcpView, setMcpView] = useState<"marketplace" | "installed">("marketplace");
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
   const [composerDraft, setComposerDraft] = useState("");
@@ -238,7 +555,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [composerReserveSpace, setComposerReserveSpace] = useState(192);
   const [queuedAttachments, setQueuedAttachments] = useState<Attachment[]>([]);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
-  const [permissionDropdownOpen, setPermissionDropdownOpen] = useState(false);
+  const [reasoningDropdownOpen, setReasoningDropdownOpen] = useState(false);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
@@ -404,8 +721,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   }, [activeProvider]);
 
   useEffect(() => {
-    setSandboxProfileInput(runtimeSettings.settings.sandboxProfile);
-  }, [runtimeSettings.settings.sandboxProfile]);
+    setReasoningEffortInput(runtimeSettings.settings.reasoningEffort);
+  }, [runtimeSettings.settings.reasoningEffort]);
 
   useEffect(() => {
     if (providers.length === 0) {
@@ -619,22 +936,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存。后续真实消息会通过当前启用的模型网关发出。`);
   }
 
-  async function saveSandboxSettings() {
-    setSandboxNotice(null);
+  async function saveRuntimePreferences() {
+    setReasoningNotice(null);
     const result = await runtimeSettings.save({
-      sandboxProfile: sandboxProfileInput,
+      reasoningEffort: reasoningEffortInput,
     });
 
     if (!result.ok) {
-      setSandboxNotice(result.error ?? "保存沙箱策略失败");
+      const message = result.error ?? "保存运行时设置失败";
+      setReasoningNotice(message);
       return;
     }
 
-    setSandboxNotice(
-      sandboxProfileInput === "full-access"
-        ? "完全访问权限已启用。AI Agent 现在会直接按宿主用户权限执行，不再附加路径、命令或逐条 bash 审批限制。"
-        : "开发模式沙箱已启用。默认开放项目目录、数据目录和上传目录，上传的文件夹也会自动加入授权范围。",
-    );
+    setReasoningNotice(`推理强度已切换为「${formatReasoningEffortLabel(reasoningEffortInput)}」。`);
   }
 
   async function submitComposerDraft() {
@@ -1010,7 +1324,36 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           <section ref={messagesViewportRef} className="workspace">
             <div className={`workspace__thread${activeToolApproval ? " workspace__thread--approval-active" : ""}`}>
               <div ref={messagesContentRef} className="workspace__messages">
-                {buildTimeline(conversation.messages, conversation.resolvedToolApprovals).map((entry) => {
+                {buildTimeline(
+                  conversation.messages,
+                  conversation.resolvedToolApprovals,
+                  conversation.toolWorkflowEntries,
+                  conversation.sessionEvents,
+                ).map((entry) => {
+                  if (entry.kind === "tool-group") {
+                    return (
+                      <section
+                        key={`tool-group-${entry.groupKey}-${entry.tools[0]?.toolCallId ?? "empty"}`}
+                        className="workspace__tool-group"
+                        aria-label={entry.groupLabel}
+                      >
+                        <div className="workspace__tool-group-header">
+                          <strong className="workspace__tool-group-title">{entry.groupLabel}</strong>
+                          <span className="workspace__tool-group-count">{entry.tools.length} 步</span>
+                        </div>
+                        <div className="workspace__tool-group-items">
+                          {entry.tools.map((tool) => (
+                            <ToolWorkflowCard key={`tool-${tool.toolCallId}`} entry={tool} />
+                          ))}
+                        </div>
+                      </section>
+                    );
+                  }
+
+                  if (entry.kind === "tool") {
+                    return <ToolWorkflowCard key={`tool-${entry.tool.toolCallId}`} entry={entry.tool} />;
+                  }
+
                   if (entry.kind === "approval") {
                     const approval = entry.approval;
                     return (
@@ -1026,79 +1369,90 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   }
 
                   const message = entry.message;
-                  return (
-                  <article
-                    key={message.id}
-                    className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
-                  >
-                    <div className="workspace__message-body">
-                      <MessageContent
-                        content={message.content}
-                        renderMarkdown={message.role === "assistant" || message.role === "system"}
-                      />
-                    </div>
-                    {message.attachments.length > 0 ? (
-                      <>
-                        {message.attachments.some((attachment) => isImageMimeType(attachment.mimeType)) ? (
-                          <div className="workspace__message-images">
-                            {message.attachments
-                              .filter((attachment) => isImageMimeType(attachment.mimeType))
-                              .map((attachment) => {
-                                const imageUrl = getAttachmentContentUrl(conversation.daemonBaseUrl, conversation.sessionId, attachment);
-                                if (!imageUrl) {
-                                  return null;
-                                }
+                  const assistantSources = message.role === "assistant" && entry.sourceLinks.length > 0 ? entry.sourceLinks : null;
 
-                                return (
-                                  <button
-                                    key={attachment.id}
-                                    type="button"
-                                    className="workspace__message-image-button"
-                                    onClick={() => setPreviewImage({ src: imageUrl, alt: attachment.fileName })}
-                                    aria-label={`查看大图：${attachment.fileName}`}
-                                  >
-                                    <img
-                                      className="workspace__message-image"
-                                      src={imageUrl}
-                                      alt={attachment.fileName}
-                                      loading="lazy"
-                                    />
-                                  </button>
-                                );
-                              })}
-                          </div>
-                        ) : null}
-                        {message.attachments.some((attachment) => !isImageMimeType(attachment.mimeType)) ? (
-                          <div className="workspace__message-attachments">
-                            {message.attachments
-                              .filter((attachment) => !isImageMimeType(attachment.mimeType))
-                              .map((attachment) => (
-                                <span key={attachment.id} className="workspace__attachment-chip">
-                                  {attachment.fileName}
-                                </span>
-                              ))}
-                          </div>
-                        ) : null}
-                      </>
-                    ) : null}
-                    <button
-                      type="button"
-                      className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
-                      onClick={() => void handleCopyMessage(message.id, message.content)}
-                      aria-label="复制"
+                  return (
+                    <article
+                      key={message.id}
+                      className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
                     >
-                      {copiedMessageId === message.id ? (
-                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                          <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      ) : (
-                        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                          <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
-                          <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                        </svg>
-                      )}
-                    </button>
-                  </article>
+                      <div className="workspace__message-body">
+                        <MessageContent
+                          content={message.content}
+                          renderMarkdown={message.role === "assistant" || message.role === "system"}
+                        />
+                      </div>
+                      {message.attachments.length > 0 ? (
+                        <>
+                          {message.attachments.some((attachment) => isImageMimeType(attachment.mimeType)) ? (
+                            <div className="workspace__message-images">
+                              {message.attachments
+                                .filter((attachment) => isImageMimeType(attachment.mimeType))
+                                .map((attachment) => {
+                                  const imageUrl = getAttachmentContentUrl(conversation.daemonBaseUrl, conversation.sessionId, attachment);
+                                  if (!imageUrl) {
+                                    return null;
+                                  }
+
+                                  return (
+                                    <button
+                                      key={attachment.id}
+                                      type="button"
+                                      className="workspace__message-image-button"
+                                      onClick={() => setPreviewImage({ src: imageUrl, alt: attachment.fileName })}
+                                      aria-label={`查看大图：${attachment.fileName}`}
+                                    >
+                                      <img
+                                        className="workspace__message-image"
+                                        src={imageUrl}
+                                        alt={attachment.fileName}
+                                        loading="lazy"
+                                      />
+                                    </button>
+                                  );
+                                })}
+                            </div>
+                          ) : null}
+                          {message.attachments.some((attachment) => !isImageMimeType(attachment.mimeType)) ? (
+                            <div className="workspace__message-attachments">
+                              {message.attachments
+                                .filter((attachment) => !isImageMimeType(attachment.mimeType))
+                                .map((attachment) => (
+                                  <span key={attachment.id} className="workspace__attachment-chip">
+                                    {attachment.fileName}
+                                  </span>
+                                ))}
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+                      {assistantSources ? (
+                        <SourceLinksSection
+                          links={assistantSources}
+                          detailsClassName="workspace__message-sources"
+                          summaryClassName="tool-workflow-card__sources-summary workspace__message-sources-summary"
+                          listClassName="tool-workflow-card__sources-list workspace__message-sources-list"
+                          linkClassName="tool-workflow-card__source-link workspace__message-source-link"
+                        />
+                      ) : null}
+                      <button
+                        type="button"
+                        className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
+                        onClick={() => void handleCopyMessage(message.id, message.content)}
+                        aria-label="复制"
+                      >
+                        {copiedMessageId === message.id ? (
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                            <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        ) : (
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                            <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                            <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                          </svg>
+                        )}
+                      </button>
+                    </article>
                   );
                 })}
 
@@ -1198,7 +1552,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <button
                   type="button"
                   className="composer__toolbar-btn"
-                  onClick={() => { setModelDropdownOpen((v) => !v); setPermissionDropdownOpen(false); }}
+                  onClick={() => { setModelDropdownOpen((v) => !v); setReasoningDropdownOpen(false); }}
                 >
                   <span className="composer__toolbar-btn-icon">⚡</span>
                   <span>{enabledProvider ? enabledProvider.label : "模型"}</span>
@@ -1229,28 +1583,33 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               <div className="composer__dropdown-wrapper">
                 <button
                   type="button"
-                  className={`composer__toolbar-btn${runtimeSettings.settings.sandboxProfile === "full-access" ? " composer__toolbar-btn--warn" : ""}`}
-                  onClick={() => { setPermissionDropdownOpen((v) => !v); setModelDropdownOpen(false); }}
+                  className="composer__toolbar-btn"
+                  onClick={() => { setReasoningDropdownOpen((v) => !v); setModelDropdownOpen(false); }}
                 >
-                  <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问权限" : "开发模式"}</span>
+                  <span>{`推理 · ${formatReasoningEffortLabel(runtimeSettings.settings.reasoningEffort)}`}</span>
                   <span className="composer__toolbar-btn-caret">▾</span>
                 </button>
-                {permissionDropdownOpen ? (
-                  <div className="composer__dropdown">
-                    <button
-                      type="button"
-                      className={`composer__dropdown-item${runtimeSettings.settings.sandboxProfile === "development" ? " composer__dropdown-item--active" : ""}`}
-                      onClick={() => { void runtimeSettings.save({ sandboxProfile: "development" }); setPermissionDropdownOpen(false); }}
-                    >
-                      开发模式
-                    </button>
-                    <button
-                      type="button"
-                      className={`composer__dropdown-item${runtimeSettings.settings.sandboxProfile === "full-access" ? " composer__dropdown-item--active" : ""}`}
-                      onClick={() => { void runtimeSettings.save({ sandboxProfile: "full-access" }); setPermissionDropdownOpen(false); }}
-                    >
-                      完全访问权限
-                    </button>
+                {reasoningDropdownOpen ? (
+                  <div className="composer__dropdown composer__reasoning-dropdown">
+                    {reasoningEffortDefinitions.map((definition) => (
+                      <button
+                        key={definition.id}
+                        type="button"
+                        className={`composer__reasoning-option${runtimeSettings.settings.reasoningEffort === definition.id ? " composer__reasoning-option--active" : ""}`}
+                        onClick={() => {
+                          void runtimeSettings.save({ reasoningEffort: definition.id });
+                          setReasoningDropdownOpen(false);
+                        }}
+                      >
+                        <span className="composer__reasoning-option-main">
+                          <ReasoningEffortIcon />
+                          <strong className="composer__reasoning-option-title">{definition.label}</strong>
+                        </span>
+                        {runtimeSettings.settings.reasoningEffort === definition.id ? (
+                          <span className="composer__reasoning-option-check" aria-hidden="true">✓</span>
+                        ) : null}
+                      </button>
+                    ))}
                   </div>
                 ) : null}
               </div>
@@ -1303,44 +1662,26 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               </header>
 
               <div className="settings-content__body">
-                {/* ── 沙箱设置 ── */}
-                <h3 className="settings-section-title">沙箱</h3>
+                <h3 className="settings-section-title">推理</h3>
                 <div className="settings-panel">
                   <div className="settings-panel__heading">
-                    <span>{runtimeSettings.settings.sandboxProfile === "full-access" ? "完全访问权限" : "开发模式"}</span>
+                    <span>{formatReasoningEffortLabel(runtimeSettings.settings.reasoningEffort)}</span>
                   </div>
                   <div className="provider-notice">
-                    {runtimeSettings.settings.sandboxProfile === "full-access"
-                      ? "完全访问权限下，AI Agent 会直接以宿主用户权限执行命令与文件操作，并保留审计日志。"
-                      : "现在每一次 `bash` 指令都会先进入人工确认，再由你点击是否执行。命令会用单独的命令行底板展示，避免和普通说明混在一起。"}
+                    这会把推理强度传给支持该参数的 OpenAI 兼容 reasoning 模型；普通模型会继续按默认方式回复。
                   </div>
-                  {sandboxNotice ? <div className="provider-notice">{sandboxNotice}</div> : null}
+                  {reasoningNotice ? <div className="provider-notice">{reasoningNotice}</div> : null}
                   {runtimeSettings.error ? <div className="provider-notice provider-notice--error">{runtimeSettings.error}</div> : null}
-                  <div className="sandbox-profile-list">
-                    <button
-                      className={`sandbox-profile-card${sandboxProfileInput === "development" ? " sandbox-profile-card--active" : ""}`}
-                      onClick={() => setSandboxProfileInput("development")}
-                    >
-                      <strong>开发模式</strong>
-                      <span>默认开放项目目录、数据目录、上传目录，并限制命令白名单和路径范围，适合日常开发。</span>
-                    </button>
-                    <button
-                      className={`sandbox-profile-card${sandboxProfileInput === "full-access" ? " sandbox-profile-card--active" : ""}`}
-                      onClick={() => setSandboxProfileInput("full-access")}
-                    >
-                      <strong>完全访问权限</strong>
-                      <span>AI Agent 直接按宿主用户完整权限执行，保留审计日志，但不再附加路径白名单、命令白名单或逐条 bash 审批。</span>
-                    </button>
-                  </div>
-                  <div className="settings-panel__list">
-                    <div className="settings-panel__item">
-                      <strong>当前默认根目录</strong>
-                      <span>项目目录、daemon 数据目录、uploads 目录。</span>
-                    </div>
-                    <div className="settings-panel__item">
-                      <strong>上传目录扩展</strong>
-                      <span>如果附件路径本身是一个文件夹，沙箱会自动拿到该文件夹的读写与 cwd 权限。</span>
-                    </div>
+                  <div className="sandbox-profile-list sandbox-profile-list--compact">
+                    {reasoningEffortDefinitions.map((definition) => (
+                      <button
+                        key={definition.id}
+                        className={`sandbox-profile-card sandbox-profile-card--compact${reasoningEffortInput === definition.id ? " sandbox-profile-card--active" : ""}`}
+                        onClick={() => setReasoningEffortInput(definition.id)}
+                      >
+                        <strong>{definition.label}</strong>
+                      </button>
+                    ))}
                   </div>
                 </div>
 
@@ -1499,7 +1840,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 </button>
                 <button
                   className="settings-actions__button settings-actions__button--primary"
-                  onClick={saveSandboxSettings}
+                  onClick={saveRuntimePreferences}
                   disabled={runtimeSettings.saving}
                 >
                   {runtimeSettings.saving ? "保存中..." : "保存"}

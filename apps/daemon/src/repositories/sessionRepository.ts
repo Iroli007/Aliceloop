@@ -345,6 +345,45 @@ function resolveAttachmentSandboxRoot(storagePath: string) {
   };
 }
 
+export interface SessionAttachmentSandboxRoots {
+  readRoots: string[];
+  writeRoots: string[];
+  cwdRoots: string[];
+  defaultCwd: string | null;
+}
+
+export function buildSessionAttachmentSandboxRoots(
+  project: SessionProjectBinding | null,
+  attachments: Attachment[],
+): SessionAttachmentSandboxRoots {
+  const readRoots: string[] = [];
+  const writeRoots: string[] = [];
+  const cwdRoots: string[] = [];
+
+  if (project?.projectPath) {
+    readRoots.push(project.projectPath);
+    writeRoots.push(project.projectPath);
+    cwdRoots.push(project.projectPath);
+  }
+
+  for (const attachment of attachments) {
+    const pathToUse = attachment.originalPath || attachment.storagePath;
+    const roots = resolveAttachmentSandboxRoot(pathToUse);
+    readRoots.push(roots.readRoot);
+    writeRoots.push(roots.writeRoot);
+    if (roots.cwdRoot) {
+      cwdRoots.push(roots.cwdRoot);
+    }
+  }
+
+  return {
+    readRoots: uniqueSandboxRoots(readRoots),
+    writeRoots: uniqueSandboxRoots(writeRoots),
+    cwdRoots: uniqueSandboxRoots(cwdRoots),
+    defaultCwd: project?.projectPath ?? null,
+  };
+}
+
 function listMessages(sessionId: string, attachments: Attachment[]): SessionMessage[] {
   const db = getDatabase();
   const rows = db
@@ -1324,33 +1363,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
 export function listSessionAttachmentSandboxRoots(sessionId: string) {
   const project = getSessionProjectBinding(sessionId);
   const attachments = listAttachments(sessionId);
-  const readRoots: string[] = [];
-  const writeRoots: string[] = [];
-  const cwdRoots: string[] = [];
-
-  if (project?.projectPath) {
-    readRoots.push(project.projectPath);
-    writeRoots.push(project.projectPath);
-    cwdRoots.push(project.projectPath);
-  }
-
-  for (const attachment of attachments) {
-    // Use originalPath if available, otherwise fall back to storagePath
-    const pathToUse = attachment.originalPath || attachment.storagePath;
-    const roots = resolveAttachmentSandboxRoot(pathToUse);
-    readRoots.push(roots.readRoot);
-    writeRoots.push(roots.writeRoot);
-    if (roots.cwdRoot) {
-      cwdRoots.push(roots.cwdRoot);
-    }
-  }
-
-  return {
-    readRoots: uniqueSandboxRoots(readRoots),
-    writeRoots: uniqueSandboxRoots(writeRoots),
-    cwdRoots: uniqueSandboxRoots(cwdRoots),
-    defaultCwd: project?.projectPath ?? null,
-  };
+  return buildSessionAttachmentSandboxRoots(project, attachments);
 }
 
 export function listSessionEventsSince(sessionId: string, sinceSeq: number): SessionEvent[] {

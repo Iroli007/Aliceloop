@@ -4,7 +4,7 @@ import { withDesktopRelayTab, navigateRelayTab, readRelaySearchResults } from ".
 import { logPerfTrace, nowMs, roundMs } from "../../runtime/perfTrace";
 
 const DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
-const SEARCH_TIMEOUT_MS = 15_000;
+const SEARCH_TIMEOUT_MS = 30_000;
 
 interface SearchResult {
   title: string;
@@ -14,6 +14,7 @@ interface SearchResult {
   sourceType: SearchSourceType;
   score: number;
   reasons: string[];
+  citationIndex?: number;
 }
 
 function createSearchResult(input: {
@@ -47,7 +48,35 @@ interface SearchQueryIntent {
   needsFreshness: boolean;
   needsHistoricalSnapshot: boolean;
   asksMetric: boolean;
+  asksFollowerMetric: boolean;
+  needsPrimaryPlatformSweep: boolean;
   mentionsBilibili: boolean;
+  mentionsDouyin: boolean;
+  mentionsTwitter: boolean;
+  asksBiography: boolean;
+}
+
+interface SearchQueryPlan {
+  anchorQuery: string;
+  splitTerms: string[];
+  searchQueries: string[];
+}
+
+interface SearchLaneResult {
+  query: string;
+  searchUrl: string;
+  backend: "desktop_chrome" | "http_fetch";
+  rawResults: SearchResult[];
+  error?: string;
+}
+
+interface SearchResultPayload {
+  title: string;
+  url: string;
+  snippet: string;
+  domain: string;
+  sourceType: SearchSourceType;
+  citationIndex?: number;
 }
 
 const ENCYCLOPEDIA_HOST_PATTERNS = [
@@ -87,6 +116,43 @@ function decodeHtmlEntities(text: string) {
 
 function stripHtml(html: string) {
   return decodeHtmlEntities(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function normalizeInlineText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function extractQuotedPhrases(query: string) {
+  const matches = [...query.matchAll(/"([^"]+)"|“([^”]+)”|'([^']+)'/g)];
+  return matches
+    .map((match) => (match[1] ?? match[2] ?? match[3] ?? "").trim())
+    .filter(Boolean);
+}
+
+function splitSearchQuery(query: string) {
+  const normalized = normalizeInlineText(query);
+  const unquoted = normalized.replace(/"([^"]+)"|“([^”]+)”|'([^']+)'/g, " $1$2$3 ");
+  const splitTerms = unquoted
+    .split(/\s+\bOR\b\s+|\s+\bAND\b\s+|[|｜]/i)
+    .map((part) => normalizeInlineText(part))
+    .filter(Boolean);
+  const anchorQuery = extractQuotedPhrases(normalized)[0] ?? splitTerms[0] ?? normalized;
+  const searchQueries = [
+    normalized,
+    ...splitTerms.map((term) => {
+      if (term.includes(anchorQuery)) {
+        return term;
+      }
+
+      return `${anchorQuery} ${term}`.trim();
+    }),
+  ];
+
+  return {
+    anchorQuery,
+    splitTerms,
+    searchQueries: [...new Set(searchQueries)].slice(0, 3),
+  };
 }
 
 function normalizeDuckDuckGoUrl(rawHref: string, endpoint: URL) {
@@ -134,7 +200,18 @@ function classifySourceType(domain: string): SearchSourceType {
     return "encyclopedia";
   }
 
-  if (domain === "bilibili.com" || domain.endsWith(".bilibili.com")) {
+  if (
+    domain === "bilibili.com"
+    || domain.endsWith(".bilibili.com")
+    || domain === "douyin.com"
+    || domain.endsWith(".douyin.com")
+    || domain === "iesdouyin.com"
+    || domain.endsWith(".iesdouyin.com")
+    || domain === "x.com"
+    || domain.endsWith(".x.com")
+    || domain === "twitter.com"
+    || domain.endsWith(".twitter.com")
+  ) {
     return "platform";
   }
 
@@ -167,6 +244,8 @@ function classifySourceType(domain: string): SearchSourceType {
 
 function analyzeQueryIntent(query: string): SearchQueryIntent {
   const normalized = query.trim().toLowerCase();
+  const asksFollowerMetric = /粉丝|粉絲|followers?|关注者|多少粉/u.test(normalized);
+  const asksPlatformActivity = /动态|活动|发了什么|发了啥|更新|投稿|视频|作品|直播|帖子|post|tweet|更新了什么/u.test(normalized);
   return {
     needsFreshness: /最新|实时|当前|现在|今日|今天|最近|截至|截止|latest|current|today|now|real[- ]?time/i.test(normalized),
     needsHistoricalSnapshot: /(?:\d{4}[年/-]\d{1,2}[月/-]\d{1,2}日?)|(?:\d{1,2}月\d{1,2}日)|(?:march|april|may|june|july|august|september|october|november|december|january|february)\s+\d{1,2}/i.test(
@@ -175,8 +254,196 @@ function analyzeQueryIntent(query: string): SearchQueryIntent {
     asksMetric: /粉丝|粉絲|followers?|播放|点赞|点赞量|订阅|订阅数|阅读量|销量|股价|市值|排名|score|price|rank/i.test(
       normalized,
     ),
+    asksFollowerMetric,
+    needsPrimaryPlatformSweep: asksFollowerMetric || asksPlatformActivity,
     mentionsBilibili: /b站|哔哩哔哩|bilibili|up主|up\s*主/i.test(normalized),
+    mentionsDouyin: /抖音|douyin|iesdouyin/i.test(normalized),
+    mentionsTwitter: /推特|twitter|x\.com|tweet|tweets/i.test(normalized),
+    asksBiography: /谁是|是谁|简介|介绍|百科|生平|人物|出生|哪里人|个人资料|背景/i.test(normalized),
   };
+}
+
+function buildEffectiveQuery(query: string, intent: SearchQueryIntent) {
+  if (
+    intent.needsPrimaryPlatformSweep
+    && !intent.mentionsBilibili
+    && !intent.mentionsDouyin
+    && !intent.mentionsTwitter
+    && !intent.asksBiography
+  ) {
+    return `${query} B站 抖音 推特 bilibili douyin twitter`;
+  }
+
+  return query;
+}
+
+function buildSearchQueryPlan(query: string, intent: SearchQueryIntent) {
+  const normalized = normalizeInlineText(query);
+  const split = splitSearchQuery(normalized);
+  const laneQueries = new Set<string>();
+  laneQueries.add(buildEffectiveQuery(normalized, intent));
+
+  for (const term of split.splitTerms) {
+    const expanded = term.includes(split.anchorQuery)
+      ? term
+      : `${split.anchorQuery} ${term}`.trim();
+    laneQueries.add(buildEffectiveQuery(expanded, intent));
+  }
+
+  return {
+    anchorQuery: split.anchorQuery,
+    splitTerms: split.splitTerms,
+    searchQueries: [...laneQueries].slice(0, 3),
+  } satisfies SearchQueryPlan;
+}
+
+function normalizeScopedDomains(domains: string[] | undefined, intent: SearchQueryIntent) {
+  const normalized = (domains ?? []).map((domain) => domain.trim().toLowerCase()).filter(Boolean);
+  if (intent.mentionsBilibili && (intent.asksMetric || intent.needsFreshness || intent.needsHistoricalSnapshot)) {
+    normalized.push("bilibili.com");
+  }
+  if (intent.mentionsDouyin && (intent.asksMetric || intent.needsFreshness || intent.needsHistoricalSnapshot)) {
+    normalized.push("douyin.com", "iesdouyin.com");
+  }
+  if (intent.mentionsTwitter && (intent.asksMetric || intent.needsFreshness || intent.needsHistoricalSnapshot)) {
+    normalized.push("x.com", "twitter.com");
+  }
+
+  return [...new Set(normalized)];
+}
+
+function dedupeSearchResults(results: SearchResult[]) {
+  const seen = new Map<string, SearchResult>();
+  for (const result of results) {
+    if (!seen.has(result.url)) {
+      seen.set(result.url, result);
+    }
+  }
+
+  return [...seen.values()];
+}
+
+function serializeSearchResult(result: SearchResult): SearchResultPayload {
+  const payload: SearchResultPayload = {
+    title: result.title,
+    url: result.url,
+    snippet: result.snippet,
+    domain: result.domain,
+    sourceType: result.sourceType,
+  };
+  if (result.citationIndex !== undefined) {
+    payload.citationIndex = result.citationIndex;
+  }
+
+  return payload;
+}
+
+async function searchLaneViaHttp(
+  query: string,
+  domains: string[],
+  maxResults: number,
+  signal: AbortSignal,
+): Promise<SearchLaneResult> {
+  const searchUrl = buildSearchUrl(query, domains);
+  try {
+    const response = await fetch(searchUrl, {
+      signal,
+      headers: {
+        "User-Agent": "Aliceloop/1.0 (web_search tool)",
+        Accept: "text/html, application/json, text/plain, */*",
+      },
+      redirect: "follow",
+    });
+
+    if (!response.ok) {
+      return {
+        query,
+        searchUrl,
+        backend: "http_fetch",
+        rawResults: [],
+        error: `HTTP ${response.status} ${response.statusText}`,
+      };
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    const rawBody = await response.text();
+    const endpoint = new URL(searchUrl);
+    const rawResults = contentType.includes("application/json")
+      ? normalizeJsonResults(JSON.parse(rawBody), maxResults)
+      : parseHtmlResults(rawBody, endpoint, maxResults);
+
+    return {
+      query,
+      searchUrl,
+      backend: "http_fetch",
+      rawResults,
+    };
+  } catch (error) {
+    return {
+      query,
+      searchUrl,
+      backend: "http_fetch",
+      rawResults: [],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function collectSearchLaneResults(
+  sessionId: string,
+  searchQueries: string[],
+  domains: string[],
+  maxResults: number,
+  signal: AbortSignal,
+): Promise<SearchLaneResult[]> {
+  const relayResults = await withDesktopRelayTab(sessionId, async (relay, tabId) => {
+    const runs: SearchLaneResult[] = [];
+
+    for (const query of searchQueries) {
+      const searchUrl = buildSearchUrl(query, domains);
+      try {
+        await navigateRelayTab(relay, tabId, searchUrl, "domcontentloaded");
+        const relaySearch = await readRelaySearchResults(relay, tabId, maxResults);
+        if (relaySearch.results.length > 0) {
+          runs.push({
+            query,
+            searchUrl: relaySearch.url,
+            backend: relaySearch.backend,
+            rawResults: relaySearch.results.map((result) => {
+              return createSearchResult({
+                title: result.title,
+                url: result.url,
+                snippet: result.snippet,
+                domain: result.domain,
+                sourceType: classifySourceType(result.domain),
+              });
+            }),
+          });
+          continue;
+        }
+      } catch {
+        // Fall back to the configured HTTP endpoint for this lane.
+      }
+
+      runs.push(await searchLaneViaHttp(query, domains, maxResults, signal));
+    }
+
+    return runs;
+  });
+
+  if (relayResults) {
+    return relayResults;
+  }
+
+  const httpResults: SearchLaneResult[] = [];
+  for (const query of searchQueries) {
+    httpResults.push(await searchLaneViaHttp(query, domains, maxResults, signal));
+  }
+  return httpResults;
+}
+
+function matchesScopedDomain(domain: string, scopedDomains: string[]) {
+  return scopedDomains.some((scopedDomain) => domain === scopedDomain || domain.endsWith(`.${scopedDomain}`));
 }
 
 function scoreResult(
@@ -188,7 +455,7 @@ function scoreResult(
   let score = Math.max(1, 12 - index);
   const reasons: string[] = [`search-rank:${index + 1}`];
 
-  if (scopedDomains.some((domain) => result.domain === domain || result.domain.endsWith(`.${domain}`))) {
+  if (matchesScopedDomain(result.domain, scopedDomains)) {
     score += 8;
     reasons.push("domain-scoped");
   }
@@ -197,15 +464,33 @@ function scoreResult(
     score += 8;
     reasons.push("platform-match:bilibili");
   }
+  if (intent.mentionsDouyin && (result.domain.endsWith("douyin.com") || result.domain.endsWith("iesdouyin.com"))) {
+    score += 8;
+    reasons.push("platform-match:douyin");
+  }
+  if (intent.mentionsTwitter && (result.domain === "x.com" || result.domain.endsWith(".x.com") || result.domain.endsWith("twitter.com"))) {
+    score += 8;
+    reasons.push("platform-match:twitter");
+  }
 
   if (intent.asksMetric && result.sourceType === "platform") {
     score += 6;
     reasons.push("metric-source:platform");
   }
 
+  if (intent.asksFollowerMetric && result.sourceType === "platform") {
+    score += 8;
+    reasons.push("follower-metric-source:platform");
+  }
+
   if (intent.asksMetric && result.sourceType === "analytics") {
     score += 4;
     reasons.push("metric-source:analytics");
+  }
+
+  if (intent.asksFollowerMetric && result.sourceType === "analytics") {
+    score += 3;
+    reasons.push("follower-metric-source:analytics");
   }
 
   if ((intent.needsFreshness || intent.needsHistoricalSnapshot) && result.sourceType === "news") {
@@ -223,6 +508,11 @@ function scoreResult(
     reasons.push("penalty:encyclopedia-for-time-sensitive-query");
   }
 
+  if (intent.asksFollowerMetric && result.sourceType === "encyclopedia") {
+    score -= 10;
+    reasons.push("penalty:encyclopedia-for-follower-query");
+  }
+
   if (intent.needsHistoricalSnapshot && /截至|截止|updated|published|发布|日期|time/i.test(`${result.title} ${result.snippet}`)) {
     score += 2;
     reasons.push("has-time-cue");
@@ -232,6 +522,56 @@ function scoreResult(
     score,
     reasons,
   };
+}
+
+function shouldSuppressEncyclopedia(result: SearchResult, intent: SearchQueryIntent, scopedDomains: string[]) {
+  if (result.sourceType !== "encyclopedia") {
+    return false;
+  }
+
+  return intent.needsFreshness
+    || intent.needsHistoricalSnapshot
+    || intent.asksMetric
+    || intent.asksFollowerMetric
+    || intent.needsPrimaryPlatformSweep
+    || intent.mentionsBilibili
+    || scopedDomains.length > 0
+    || !intent.asksBiography;
+}
+
+function rankAndFilterResults(
+  rawResults: SearchResult[],
+  intent: SearchQueryIntent,
+  scopedDomains: string[],
+  maxResults: number,
+) {
+  const ranked = rawResults
+    .map((result, index) => {
+      const { score, reasons } = scoreResult(result, index, intent, scopedDomains);
+      return {
+        ...result,
+        score,
+        reasons,
+      };
+    })
+    .sort((left, right) => right.score - left.score || left.url.localeCompare(right.url));
+
+  const hasScopedMatch = scopedDomains.length > 0 && ranked.some((result) => matchesScopedDomain(result.domain, scopedDomains));
+  const hasNonEncyclopediaAlternative = ranked.some((result) => result.sourceType !== "encyclopedia");
+
+  const filtered = ranked.filter((result) => {
+    if (hasScopedMatch && scopedDomains.length > 0 && !matchesScopedDomain(result.domain, scopedDomains) && result.sourceType === "encyclopedia") {
+      return false;
+    }
+
+    if (hasNonEncyclopediaAlternative && shouldSuppressEncyclopedia(result, intent, scopedDomains)) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return (filtered.length > 0 ? filtered : ranked).slice(0, maxResults);
 }
 
 function parseHtmlResults(html: string, endpoint: URL, limit: number) {
@@ -321,130 +661,90 @@ export function createWebSearchTool(sessionId = "web_search") {
     web_search: tool({
       description:
         "Search the public web for fresh information and source discovery. " +
-        "Returns a compact JSON payload of titles, URLs, and snippets. " +
+        "This tool only searches and ranks results; it does not fetch result pages. " +
+        "It splits the query into up to three keyword lanes, returns up to 10 ranked results, and appends source links for the agent to synthesize. " +
         "On Aliceloop Desktop this prefers a temporary visible Chrome relay tab before falling back to the configured HTTP search endpoint. " +
         "Use this before web_fetch when you need current or source-finding work.",
       inputSchema: z.object({
         query: z.string().min(1).describe("Search query"),
-        maxResults: z.number().int().min(1).max(10).optional().default(5),
-        domains: z.array(z.string().min(1)).max(5).optional().default([]).describe("Optional domains to scope with site:"),
+        max_results: z.number().int().min(1).max(10).optional().default(10).describe("Maximum results to return"),
+        maxResults: z.number().int().min(1).max(10).optional().describe("Compatibility alias for max_results"),
+        domains: z.array(z.string().min(1)).max(5).optional().describe("Optional domains to scope with site:"),
       }),
-      execute: async ({ query, maxResults, domains }) => {
+      execute: async ({ query, max_results, maxResults, domains }) => {
         const startedAt = nowMs();
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-        const searchUrl = buildSearchUrl(query, domains);
-        let relayFallbackReason: string | null = null;
+        const intent = analyzeQueryIntent(query);
+        const queryPlan = buildSearchQueryPlan(query, intent);
+        const normalizedDomains = normalizeScopedDomains(domains, intent);
+        const resolvedMaxResults = max_results ?? maxResults ?? 10;
+        const effectiveQuery = queryPlan.searchQueries[0] ?? query;
 
         try {
-          let relayResults = null;
-          try {
-            relayResults = await withDesktopRelayTab(async (relay, tabId) => {
-              await navigateRelayTab(relay, tabId, searchUrl, "load");
-              return readRelaySearchResults(relay, tabId, maxResults);
+          const laneRuns = await collectSearchLaneResults(
+            sessionId,
+            queryPlan.searchQueries,
+            normalizedDomains,
+            resolvedMaxResults,
+            controller.signal,
+          );
+
+          const laneSummaries = laneRuns.map((lane) => ({
+            query: lane.query,
+            searchUrl: lane.searchUrl,
+            backend: lane.backend,
+            resultCount: lane.rawResults.length,
+            error: lane.error,
+          }));
+
+          const mergedResults = dedupeSearchResults(laneRuns.flatMap((lane) => lane.rawResults));
+          const rankedResults = rankAndFilterResults(mergedResults, intent, normalizedDomains, resolvedMaxResults);
+          const results = rankedResults.map((result, index) => {
+            return serializeSearchResult({
+              ...result,
+              citationIndex: index + 1,
             });
-          } catch (error) {
-            relayFallbackReason = error instanceof Error ? error.message : String(error);
-          }
-
-          if (relayResults && relayResults.results.length > 0) {
-            const intent = analyzeQueryIntent(query);
-            const normalizedDomains = domains.map((domain) => domain.trim().toLowerCase()).filter(Boolean);
-            const results = relayResults.results
-              .map((result, index) => {
-                const hydrated = createSearchResult({
-                  title: result.title,
-                  url: result.url,
-                  snippet: result.snippet,
-                  domain: result.domain,
-                  sourceType: classifySourceType(result.domain),
-                });
-                const { score, reasons } = scoreResult(hydrated, index, intent, normalizedDomains);
-                return {
-                  ...hydrated,
-                  score,
-                  reasons,
-                };
-              })
-              .sort((left, right) => right.score - left.score || left.url.localeCompare(right.url))
-              .slice(0, maxResults);
-
-            logPerfTrace("web_search", {
-              sessionId,
-              query,
-              backend: relayResults.backend,
-              totalMs: roundMs(nowMs() - startedAt),
-              resultCount: results.length,
-            });
-
-            return JSON.stringify(
-              {
-                query,
-                searchUrl: relayResults.url,
-                backend: relayResults.backend,
-                queryAnalysis: intent,
-                results,
-              },
-              null,
-              2,
-            );
-          }
-
-          const response = await fetch(searchUrl, {
-            signal: controller.signal,
-            headers: {
-              "User-Agent": "Aliceloop/1.0 (web_search tool)",
-              Accept: "text/html, application/json, text/plain, */*",
-            },
-            redirect: "follow",
           });
-
-          if (!response.ok) {
-            return JSON.stringify({
-              error: `HTTP ${response.status} ${response.statusText}`,
-              query,
-              searchUrl,
-            });
-          }
-
-          const contentType = response.headers.get("content-type") ?? "";
-          const rawBody = await response.text();
-          const endpoint = new URL(searchUrl);
-
-          const rawResults = contentType.includes("application/json")
-            ? normalizeJsonResults(JSON.parse(rawBody), maxResults)
-            : parseHtmlResults(rawBody, endpoint, maxResults);
-
-          const intent = analyzeQueryIntent(query);
-          const normalizedDomains = domains.map((domain) => domain.trim().toLowerCase()).filter(Boolean);
-          const results = rawResults
-            .map((result, index) => {
-              const { score, reasons } = scoreResult(result, index, intent, normalizedDomains);
-              return {
-                ...result,
-                score,
-                reasons,
-              };
-            })
-            .sort((left, right) => right.score - left.score || left.url.localeCompare(right.url))
-            .slice(0, maxResults);
+          const sources = results.map((result) => ({
+            citationIndex: result.citationIndex,
+            title: result.title,
+            url: result.url,
+            domain: result.domain,
+            sourceType: result.sourceType,
+          }));
+          const backend = laneRuns.find((lane) => lane.backend === "desktop_chrome")?.backend
+            ?? laneRuns[0]?.backend
+            ?? "http_fetch";
 
           logPerfTrace("web_search", {
             sessionId,
             query,
-            backend: "http_fetch",
+            backend,
             totalMs: roundMs(nowMs() - startedAt),
             resultCount: results.length,
-            relayFallbackReason,
+            searchLaneCount: laneRuns.length,
           });
 
           return JSON.stringify(
             {
               query,
-              searchUrl,
-              backend: "http_fetch",
-              queryAnalysis: intent,
+              backend,
+              effectiveQuery,
+              effectiveDomains: normalizedDomains,
+              searchUrl: laneRuns[0]?.searchUrl ?? buildSearchUrl(queryPlan.searchQueries[0] ?? query, normalizedDomains),
+              searchUrls: laneRuns.map((lane) => lane.searchUrl),
+              queryAnalysis: {
+                ...intent,
+                anchorQuery: queryPlan.anchorQuery,
+                splitTerms: queryPlan.splitTerms,
+                searchQueries: queryPlan.searchQueries,
+                effectiveDomains: normalizedDomains,
+                effectiveQuery,
+              },
+              searches: laneSummaries,
               results,
+              sources,
             },
             null,
             2,
@@ -454,7 +754,13 @@ export function createWebSearchTool(sessionId = "web_search") {
             return JSON.stringify({
               error: `Request timed out after ${SEARCH_TIMEOUT_MS / 1000}s`,
               query,
-              searchUrl,
+              queryAnalysis: {
+                ...intent,
+                anchorQuery: queryPlan.anchorQuery,
+                splitTerms: queryPlan.splitTerms,
+                searchQueries: queryPlan.searchQueries,
+                effectiveDomains: normalizedDomains,
+              },
             });
           }
 
@@ -469,7 +775,13 @@ export function createWebSearchTool(sessionId = "web_search") {
           return JSON.stringify({
             error: message,
             query,
-            searchUrl,
+            queryAnalysis: {
+              ...intent,
+              anchorQuery: queryPlan.anchorQuery,
+              splitTerms: queryPlan.splitTerms,
+              searchQueries: queryPlan.searchQueries,
+              effectiveDomains: normalizedDomains,
+            },
           });
         } finally {
           clearTimeout(timeout);

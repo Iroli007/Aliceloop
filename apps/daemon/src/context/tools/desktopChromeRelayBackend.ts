@@ -1,5 +1,7 @@
 import type {
+  BrowserAudioCapturePayload,
   BrowserBackend,
+  BrowserMediaProbePayload,
   BrowserScreenshotPayload,
   BrowserSnapshotPayload,
   BrowserSessionRecord,
@@ -167,7 +169,7 @@ export const desktopChromeRelayBackend: BrowserBackend = {
     return snapshot;
   },
 
-  async screenshot(session, outputPath, fullPage) {
+  async screenshot(session, outputPath, fullPage, ref) {
     const tabId = await ensureDesktopTab(session);
     const result = await requestRelay<BrowserScreenshotPayload>(
       session,
@@ -177,6 +179,43 @@ export const desktopChromeRelayBackend: BrowserBackend = {
         body: JSON.stringify({
           outputPath,
           fullPage,
+          ref,
+        }),
+      },
+    );
+    session.tabId = result.tabId ?? tabId;
+    return result;
+  },
+
+  async mediaProbe(session, ref) {
+    const tabId = await ensureDesktopTab(session);
+    const searchParams = new URLSearchParams();
+    if (ref?.trim()) {
+      searchParams.set("ref", ref.trim());
+    }
+    const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+    const result = await requestRelay<BrowserMediaProbePayload>(
+      session,
+      `/tabs/${encodeURIComponent(tabId)}/media-probe${suffix}`,
+      {
+        method: "GET",
+      },
+    );
+    session.tabId = result.tabId ?? tabId;
+    return result;
+  },
+
+  async captureAudioClip(session, options) {
+    const tabId = await ensureDesktopTab(session);
+    const result = await requestRelay<BrowserAudioCapturePayload>(
+      session,
+      `/tabs/${encodeURIComponent(tabId)}/capture-audio`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          outputPath: options?.outputPath,
+          ref: options?.ref,
+          clipMs: options?.clipMs,
         }),
       },
     );

@@ -25,12 +25,6 @@ const navItems = [
     description: "这里预留给全局记忆条目、规则和长期上下文配置。",
   },
   {
-    id: "mcp",
-    label: "MCP",
-    title: "MCP",
-    description: "这里预留给 MCP 服务接入、安装状态和连接参数。",
-  },
-  {
     id: "skills",
     label: "SKILLS",
     title: "SKILLS",
@@ -174,17 +168,6 @@ function SectionIcon({
           </svg>
         </span>
       );
-    case "mcp":
-      return (
-        <span className={className} aria-hidden="true">
-          <svg viewBox="0 0 24 24">
-            <path d="M9 3.8v4.1" />
-            <path d="M15 3.8v4.1" />
-            <path d="M7.5 7.8h9v4.3a4.5 4.5 0 0 1-4.5 4.5h0a4.5 4.5 0 0 1-4.5-4.5z" />
-            <path d="M12 16.6v3.6" />
-          </svg>
-        </span>
-      );
     case "skills":
       return (
         <span className={className} aria-hidden="true">
@@ -217,11 +200,6 @@ function renderSectionCards(sectionId: SettingsSectionId) {
       return [
         ["长期记忆", "管理可以跨会话保留的规则、偏好和身份信息。"],
         ["注入策略", "预留记忆参与 prompt 拼装的方式和优先级。"],
-      ];
-    case "mcp":
-      return [
-        ["服务目录", "显示已连接的 MCP 服务、来源和 transport 类型。"],
-        ["连接参数", "预留启动命令、环境变量和权限范围。"],
       ];
     case "skills":
       return [

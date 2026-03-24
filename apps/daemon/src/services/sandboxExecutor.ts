@@ -28,11 +28,15 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
   const toolPolicy = buildSandboxToolPolicy(options);
   const runtimePolicy = buildSandboxRuntimePolicy(toolPolicy);
   const runtime = runtimeBroker.selectRuntime(runtimePolicy);
-  const seatbeltEnabled = !toolPolicy.fullAccess && isSeatbeltAvailable();
+  const hasFilesystemBoundary = toolPolicy.allowedReadRoots !== null
+    || toolPolicy.allowedWriteRoots !== null
+    || toolPolicy.allowedCwdRoots !== null;
+  const seatbeltEnabled = isSeatbeltAvailable() && (hasFilesystemBoundary || !toolPolicy.fullAccess);
   const context = {
     label: options.label,
     toolPolicy,
     runtimePolicy,
+    autoApproveToolRequests: options.autoApproveToolRequests ?? false,
     defaultCwd: options.defaultCwd ?? null,
     audit: createSandboxAuditLogger(options.label),
     defaultTimeoutMs: options.defaultTimeoutMs ?? 10_000,
@@ -73,18 +77,27 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
 
     describePolicy() {
       const warnings: string[] = [];
-      if (toolPolicy.fullAccess) {
+      if (context.autoApproveToolRequests) {
+        warnings.push("tool approval prompts are auto-approved in this context; delete actions still request a separate chat confirmation");
+      }
+      if (toolPolicy.fullAccess && !hasFilesystemBoundary) {
         warnings.push(
           "full-access mode skips all path, command, and argument restrictions",
           "all file system and bash operations run with the current host user's broad access",
         );
+      } else if (toolPolicy.fullAccess) {
+        warnings.push(
+          "commands run without an allowlist, but file access and bash cwd stay inside the configured workspace roots",
+        );
       }
-      if (toolPolicy.permissionProfile === "development" && !toolPolicy.requiresBashApproval) {
+      if (toolPolicy.permissionProfile === "development" && !toolPolicy.requiresBashApproval && !context.autoApproveToolRequests) {
         warnings.push("bash approval hook is not configured; all whitelisted commands run without confirmation");
       }
       if (toolPolicy.permissionProfile === "development") {
         warnings.push("development mode reads only project, data, uploads, and explicitly granted extra read roots");
-        if (toolPolicy.supportsElevatedActions && options.requestElevatedApproval) {
+        if (context.autoApproveToolRequests) {
+          warnings.push("out-of-policy write, edit, and bash actions continue without a confirmation prompt; delete actions still request a separate chat confirmation");
+        } else if (toolPolicy.supportsElevatedActions && options.requestElevatedApproval) {
           warnings.push("out-of-policy write, edit, and bash actions can request a single elevated approval");
         } else {
           warnings.push("elevated approval hook is not configured; out-of-policy actions will be blocked");

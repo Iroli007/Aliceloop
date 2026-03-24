@@ -71,7 +71,7 @@ async function main() {
         "第2章 Sandbox",
         "Sandbox 层只暴露 read、grep、glob、write、edit、bash 这六个最小执行 ABI，skills 通过它们做副作用操作。",
         "",
-        "第3章 Companion Sync",
+        "第3章 Session Sync",
         "把 snapshot、stream 和 heartbeat 的关系串起来，保持多端共享同一会话。",
       ].join("\n"),
       "utf8",
@@ -419,6 +419,14 @@ async function main() {
       sourcePath: string;
       allowedTools: string[];
     };
+    const webSearchSkillDetailResponse = await fetch(`${baseUrl}/api/skills/web-search`);
+    assert.equal(webSearchSkillDetailResponse.status, 200, "web-search skill detail endpoint should respond");
+    const webSearchSkillDetailPayload = (await webSearchSkillDetailResponse.json()) as {
+      id: string;
+      status: string;
+      sourcePath: string;
+      allowedTools: string[];
+    };
     const webFetchSkillDetailResponse = await fetch(`${baseUrl}/api/skills/web-fetch`);
     assert.equal(webFetchSkillDetailResponse.status, 200, "web-fetch skill detail endpoint should respond");
     const webFetchSkillDetailPayload = (await webFetchSkillDetailResponse.json()) as {
@@ -530,6 +538,7 @@ async function main() {
     assert(healthPayload.activeSkills.includes("self-reflection"), "health payload should expose active self-reflection skill");
     assert(healthPayload.activeSkills.includes("image-gen"), "health payload should expose active image-gen skill");
     assert(healthPayload.activeSkills.includes("reactions"), "health payload should expose active reactions skill");
+    assert(healthPayload.activeSkills.includes("system-info"), "health payload should expose active system-info skill");
     assert(healthPayload.activeSkills.includes("voice"), "health payload should expose active voice skill");
     assert(healthPayload.activeSkills.includes("web-fetch"), "health payload should expose active web-fetch skill");
     assert(healthPayload.activeSkills.includes("web-search"), "health payload should expose active web-search skill");
@@ -545,6 +554,7 @@ async function main() {
     assert(skillsPayload.some((skill) => skill.id === "self-reflection"), "skill catalog should include self-reflection");
     assert(skillsPayload.some((skill) => skill.id === "image-gen"), "skill catalog should include image-gen");
     assert(skillsPayload.some((skill) => skill.id === "reactions"), "skill catalog should include reactions");
+    assert(skillsPayload.some((skill) => skill.id === "system-info"), "skill catalog should include system-info");
     assert(skillsPayload.some((skill) => skill.id === "voice"), "skill catalog should include voice");
     assert(skillsPayload.some((skill) => skill.id === "web-fetch"), "skill catalog should include web-fetch");
     assert(skillsPayload.some((skill) => skill.id === "web-search"), "skill catalog should include web-search");
@@ -554,6 +564,11 @@ async function main() {
     assert.equal(skillDetailPayload.mode, "instructional", "coding-agent should be an instructional skill");
     assert(skillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/coding-agent/SKILL.md"));
     assert(skillDetailPayload.allowedTools.includes("bash"));
+    assert.equal(webSearchSkillDetailPayload.id, "web-search", "web-search detail endpoint should resolve the requested skill");
+    assert.equal(webSearchSkillDetailPayload.status, "available", "web-search should now be marked available");
+    assert(webSearchSkillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/web-search/SKILL.md"));
+    assert(webSearchSkillDetailPayload.allowedTools.includes("web_search"));
+    assert.equal(webSearchSkillDetailPayload.allowedTools.includes("web_fetch"), false);
     assert.equal(webFetchSkillDetailPayload.id, "web-fetch", "web-fetch detail endpoint should resolve the requested skill");
     assert.equal(webFetchSkillDetailPayload.status, "available", "web-fetch should now be marked available");
     assert(webFetchSkillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/web-fetch/SKILL.md"));

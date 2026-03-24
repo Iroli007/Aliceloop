@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800" viewBox="0 0 800 800">
+
+        <defs>
+          <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#111827" flood-opacity="0.18"/>
+          </filter>
+        </defs>
+        
+<rect width="100%" height="100%" fill="#f8fafc"/>
+<circle cx="400.0" cy="400.0" r="316" fill="#fff" filter="url(#shadow)"/>
+<path d="M 400.00 120.00 A 280 280 0 0 1 540.00 157.51 L 485.00 252.78 A 170 170 0 0 0 400.00 230.00 Z" fill="#e53935" stroke="#ffffff" stroke-width="4"/>
+<text x="485.41" y="81.24" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">红</text>
+<path d="M 540.00 157.51 A 280 280 0 0 1 642.49 260.00 L 547.22 315.00 A 170 170 0 0 0 485.00 252.78 Z" fill="#f4511e" stroke="#ffffff" stroke-width="4"/>
+<text x="633.35" y="166.65" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">红橙</text>
+<path d="M 642.49 260.00 A 280 280 0 0 1 680.00 400.00 L 570.00 400.00 A 170 170 0 0 0 547.22 315.00 Z" fill="#fb8c00" stroke="#ffffff" stroke-width="4"/>
+<text x="718.76" y="314.59" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">橙</text>
+<path d="M 680.00 400.00 A 280 280 0 0 1 642.49 540.00 L 547.22 485.00 A 170 170 0 0 0 570.00 400.00 Z" fill="#fbc02d" stroke="#ffffff" stroke-width="4"/>
+<text x="718.76" y="485.41" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">黄橙</text>
+<path d="M 642.49 540.00 A 280 280 0 0 1 540.00 642.49 L 485.00 547.22 A 170 170 0 0 0 547.22 485.00 Z" fill="#fdd835" stroke="#ffffff" stroke-width="4"/>
+<text x="633.35" y="633.35" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">黄</text>
+<path d="M 540.00 642.49 A 280 280 0 0 1 400.00 680.00 L 400.00 570.00 A 170 170 0 0 0 485.00 547.22 Z" fill="#c0ca33" stroke="#ffffff" stroke-width="4"/>
+<text x="485.41" y="718.76" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">黄绿</text>
+<path d="M 400.00 680.00 A 280 280 0 0 1 260.00 642.49 L 315.00 547.22 A 170 170 0 0 0 400.00 570.00 Z" fill="#43a047" stroke="#ffffff" stroke-width="4"/>
+<text x="314.59" y="718.76" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">绿</text>
+<path d="M 260.00 642.49 A 280 280 0 0 1 157.51 540.00 L 252.78 485.00 A 170 170 0 0 0 315.00 547.22 Z" fill="#26a69a" stroke="#ffffff" stroke-width="4"/>
+<text x="166.65" y="633.35" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">蓝绿</text>
+<path d="M 157.51 540.00 A 280 280 0 0 1 120.00 400.00 L 230.00 400.00 A 170 170 0 0 0 252.78 485.00 Z" fill="#1e88e5" stroke="#ffffff" stroke-width="4"/>
+<text x="81.24" y="485.41" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">蓝</text>
+<path d="M 120.00 400.00 A 280 280 0 0 1 157.51 260.00 L 252.78 315.00 A 170 170 0 0 0 230.00 400.00 Z" fill="#5e35b1" stroke="#ffffff" stroke-width="4"/>
+<text x="81.24" y="314.59" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">蓝紫</text>
+<path d="M 157.51 260.00 A 280 280 0 0 1 260.00 157.51 L 315.00 252.78 A 170 170 0 0 0 252.78 315.00 Z" fill="#8e24aa" stroke="#ffffff" stroke-width="4"/>
+<text x="166.65" y="166.65" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">紫</text>
+<path d="M 260.00 157.51 A 280 280 0 0 1 400.00 120.00 L 400.00 230.00 A 170 170 0 0 0 315.00 252.78 Z" fill="#d81b60" stroke="#ffffff" stroke-width="4"/>
+<text x="314.59" y="81.24" fill="#111827" font-size="20" font-family="Arial, Helvetica, sans-serif" text-anchor="middle" dominant-baseline="middle">红紫</text>
+<circle cx="400.0" cy="400.0" r="152" fill="#ffffff"/>
+<circle cx="400.0" cy="400.0" r="152" fill="none" stroke="#d1d5db" stroke-width="2"/>
+<text x="400.0" y="384.0" fill="#111827" font-size="34" font-weight="700" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">12色相环</text>
+<text x="400.0" y="424.0" fill="#4b5563" font-size="18" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">红 - 红橙 - 橙 - 黄橙 - 黄 - 黄绿</text>
+<text x="400.0" y="452.0" fill="#4b5563" font-size="18" font-family="Arial, Helvetica, sans-serif" text-anchor="middle">绿 - 蓝绿 - 蓝 - 蓝紫 - 紫 - 红紫</text>
+</svg>

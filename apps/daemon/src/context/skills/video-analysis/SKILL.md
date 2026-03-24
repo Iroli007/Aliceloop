@@ -1,59 +1,56 @@
 ---
 name: video-analysis
 label: video-analysis
-description: Analyze video files through metadata, frame sampling, and audio transcription. Use when a user shares a video and wants a summary, scene breakdown, or transcript.
+description: Understand common web video playback through media probing, short audio sampling, subtitle reading, and rolling summaries. Use when the user wants to know what a web video is saying or showing.
 status: available
 mode: instructional
 allowed-tools:
-  - bash
-  - read
+  - browser_media_probe
+  - browser_video_watch_start
+  - browser_video_watch_poll
+  - browser_video_watch_stop
 ---
 
 # Video Analysis
 
-Use this skill when a task depends on what appears in a video, what is said, or how the visual sequence changes over time.
+Use this skill when the user wants you to actually understand a video on a website, not just stare at the homepage card or title.
 
 Examples:
 
-- summarize a short clip or social post
-- transcribe spoken content from a recording
-- inspect scene changes, overlays, or visible objects
-- build a contact sheet for quick review
+- summarize what a video is talking about
+- answer "这段视频后面讲了什么"
+- keep watching and report the next section
+- explain what is on screen in the current playback segment
 
-## Workflow
+## Intended workflow
 
-1. Inspect the container and streams with `ffprobe`.
-2. Extract evenly spaced frames or a thumbnail grid with `ffmpeg`.
-3. Extract audio and run `whisper` when spoken content matters.
-4. Combine visual evidence and transcript into a concise report, noting uncertainty where needed.
-5. If the active environment exposes a direct multimodal video model, you may use it as an extra signal, but keep the file-based fallback available.
+1. First make sure you are on the real playback/detail page rather than the homepage, feed, or search results.
+2. Call `browser_media_probe` to confirm that the page has a visible `video` or `audio` element and to get the best player ref.
+3. Start a reusable watch session with `browser_video_watch_start`.
+4. On follow-up turns like “继续看” or “再听听这一段”, prefer reusing the existing watch session instead of starting over.
+5. Poll the session with `browser_video_watch_poll` whenever you need fresh evidence. If there is only one active watch in the conversation, you can omit `watchId`.
+6. Stop the session with `browser_video_watch_stop` when you have enough evidence for the current answer. If there is only one active watch in the conversation, you can omit `watchId`.
 
-## Commands
+## Guardrails
 
-```bash
-ffprobe -v error -show_entries format=duration:stream=codec_name,width,height -of json "$VIDEO_PATH"
+- Do not treat a feed card, poster frame, or recommendation tile as the video itself.
+- Do not pretend to hear audio when the tool says the page is paused, DRM-protected, or capture is unavailable.
+- Do not claim more visual detail than the sampled screenshot evidence supports.
+- If the current mode is subtitle-only or visual-only, say that explicitly.
 
-# Extract up to 12 evenly spaced frames
-OUTDIR=/tmp/aliceloop-video-$(date +%s)
-mkdir -p "$OUTDIR"
-DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO_PATH" | cut -d. -f1)
-FPS_RATE=$(echo "scale=2; 12 / $DURATION" | bc 2>/dev/null || echo "1")
-if (( $(echo "$FPS_RATE > 1" | bc -l 2>/dev/null || echo 0) )); then FPS_RATE=1; fi
-ffmpeg -hide_banner -loglevel error -i "$VIDEO_PATH" -vf "fps=$FPS_RATE,scale=720:-1" -frames:v 12 "$OUTDIR/frame_%02d.jpg"
+## Aliceloop status
 
-ffmpeg -hide_banner -loglevel error -i "$VIDEO_PATH" \
-  -vf "fps=1/$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO_PATH" | awk '{printf "%.1f", $1/9}'),scale=320:-1,tile=3x3" \
-  -frames:v 1 "$OUTDIR/grid.jpg"
+This skill is active.
 
-ffmpeg -hide_banner -loglevel error -i "$VIDEO_PATH" -vn -acodec pcm_s16le -ar 16000 -ac 1 "/tmp/aliceloop-video-audio.wav"
-whisper "/tmp/aliceloop-video-audio.wav" --model turbo --output_format txt --output_dir /tmp/aliceloop-video-whisper
-cat /tmp/aliceloop-video-whisper/*.txt
-rm -rf "$OUTDIR" /tmp/aliceloop-video-whisper /tmp/aliceloop-video-audio.wav
-```
+Available tools:
 
-## Reporting Guide
+- `browser_media_probe`
+- `browser_video_watch_start`
+- `browser_video_watch_poll`
+- `browser_video_watch_stop`
 
-- Distinguish direct observations from guesses.
-- Mention whether the summary comes from sampled frames, full transcription, or both.
-- If the clip is long, say which segment or sampling strategy you used.
-- Do not imply motion details that were not visible in the extracted evidence.
+Current limitations:
+
+- this is Desktop-first for live web video; it is optimized for Aliceloop Desktop browser sessions
+- it does not download the whole video, so understanding is based on incremental subtitle, audio-sample, and screenshot evidence
+- OCR is intentionally excluded from this workflow
