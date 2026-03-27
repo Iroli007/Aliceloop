@@ -193,7 +193,7 @@ async function main() {
 
     const skillsList = await capture(["skills", "list"]);
     assert.equal(skillsList.code, 0, "skills list should succeed");
-    assert(skillsList.stdout.includes("\"id\": \"coding-agent\""), "skills list should include coding-agent");
+    assert(skillsList.stdout.includes("\"id\": \"browser\""), "skills list should include browser");
 
     const skillsSearch = await capture(["skills", "search", "browser"]);
     assert.equal(skillsSearch.code, 0, "skills search should succeed");

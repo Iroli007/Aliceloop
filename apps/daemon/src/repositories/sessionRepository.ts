@@ -26,6 +26,11 @@ import { getShellOverview } from "./overviewRepository";
 import { syncTaskRunFromJob } from "./taskRunRepository";
 import { listPendingToolApprovals } from "../services/toolApprovalBroker";
 import { getDefaultProjectDirectory, getProjectDirectory } from "./projectRepository";
+import {
+  buildThreadTranscriptExportPaths,
+  clearSessionTranscriptExports,
+  pruneEmptyTranscriptParents,
+} from "../services/threadTranscriptPaths";
 
 const runtimeHeartbeatWindowMs = 25_000;
 
@@ -39,6 +44,8 @@ interface SessionRow {
 
 interface SessionProjectBindingRow {
   sessionId: string;
+  sessionTitle: string;
+  sessionCreatedAt: string;
   projectId: string | null;
   projectName: string | null;
   projectPath: string | null;
@@ -134,6 +141,7 @@ interface CreateMessageInput {
   role: SessionRole;
   content: string;
   attachmentIds: string[];
+  eventPayload?: Record<string, unknown>;
 }
 
 interface CreateAttachmentInput {
@@ -199,14 +207,6 @@ function summarizeSessionTitle(content: string) {
   return normalized.length > 24 ? `${normalized.slice(0, 24).trimEnd()}…` : normalized;
 }
 
-function buildSessionTranscriptExportPaths(sessionId: string, projectPath: string) {
-  const exportRoot = resolve(projectPath, ".aliceloop", "sessions", sessionId);
-  return {
-    transcriptMarkdownPath: resolve(exportRoot, "session.md"),
-    transcriptJsonPath: resolve(exportRoot, "session.json"),
-  };
-}
-
 function toMessage(row: SessionMessageRow, attachments: Attachment[]): SessionMessage {
   const attachmentMap = new Map(attachments.map((attachment) => [attachment.id, attachment]));
 
@@ -254,15 +254,18 @@ function toSessionProjectBinding(row: SessionProjectBindingRow | undefined): Ses
     return null;
   }
 
-  const transcriptPaths = buildSessionTranscriptExportPaths(row.sessionId, row.projectPath);
+  const transcriptPaths = buildThreadTranscriptExportPaths(row.projectPath, {
+    sessionId: row.sessionId,
+    sessionTitle: row.sessionTitle,
+    sessionCreatedAt: row.sessionCreatedAt,
+  });
   return {
     sessionId: row.sessionId,
     projectId: row.projectId,
     projectName: row.projectName,
     projectPath: row.projectPath,
     projectKind: row.projectKind,
-    transcriptMarkdownPath: transcriptPaths.transcriptMarkdownPath,
-    transcriptJsonPath: transcriptPaths.transcriptJsonPath,
+    transcriptMarkdownPath: transcriptPaths.markdownPath,
   };
 }
 
@@ -549,6 +552,8 @@ export function getSessionProjectBinding(sessionId: string): SessionProjectBindi
     `
       SELECT
         sessions.id AS sessionId,
+        sessions.title AS sessionTitle,
+        sessions.created_at AS sessionCreatedAt,
         projects.id AS projectId,
         projects.name AS projectName,
         projects.path AS projectPath,
@@ -863,6 +868,12 @@ export function deleteSession(sessionId: string) {
   const existing = getSessionRow(sessionId);
   if (!existing) {
     return null;
+  }
+
+  const binding = getSessionProjectBinding(sessionId);
+  if (binding?.projectPath) {
+    clearSessionTranscriptExports(binding.projectPath, sessionId);
+    pruneEmptyTranscriptParents(binding.projectPath);
   }
 
   const db = getDatabase();
@@ -1472,7 +1483,10 @@ export function createSessionMessage(input: CreateMessageInput): {
     }
 
     touchSession(input.sessionId, now);
-    const createdEvent = recordEvent(input.sessionId, "message.created", { message: createdMessage }, now);
+    const createdEvent = recordEvent(input.sessionId, "message.created", {
+      message: createdMessage,
+      ...(input.eventPayload ?? {}),
+    }, now);
 
     const ackedMessage: SessionMessage = {
       ...createdMessage,
@@ -1487,7 +1501,10 @@ export function createSessionMessage(input: CreateMessageInput): {
       `,
     ).run(ackedMessage.status, now, createdMessage.id);
 
-    const ackedEvent = recordEvent(input.sessionId, "message.acked", { message: ackedMessage }, now);
+    const ackedEvent = recordEvent(input.sessionId, "message.acked", {
+      message: ackedMessage,
+      ...(input.eventPayload ?? {}),
+    }, now);
 
     return {
       message: ackedMessage,
@@ -1509,6 +1526,7 @@ export function updateSessionMessage(input: {
   messageId: string;
   content: string;
   status?: SessionMessageStatus;
+  eventPayload?: Record<string, unknown>;
 }): {
   message: SessionMessage;
   event: SessionEvent;
@@ -1536,7 +1554,10 @@ export function updateSessionMessage(input: {
     ).run(nextMessage.content, nextMessage.status, now, input.messageId);
 
     touchSession(input.sessionId, now);
-    const event = recordEvent(input.sessionId, "message.updated", { message: nextMessage }, now);
+    const event = recordEvent(input.sessionId, "message.updated", {
+      message: nextMessage,
+      ...(input.eventPayload ?? {}),
+    }, now);
     return { message: nextMessage, event };
   })();
 

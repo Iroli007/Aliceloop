@@ -16,7 +16,16 @@ export type DeviceStatus = "online" | "offline";
 export type SessionRole = "user" | "assistant" | "system";
 export type SessionMessageStatus = "pending" | "acked" | "error";
 export type AttachmentStatus = "ready" | "failed";
-export type ProviderKind = "minimax" | "aihubmix" | "openai" | "anthropic" | "openrouter";
+export type ProviderKind =
+  | "minimax"
+  | "gemini"
+  | "moonshot"
+  | "deepseek"
+  | "zhipu"
+  | "aihubmix"
+  | "openai"
+  | "anthropic"
+  | "openrouter";
 export type ProviderTransportKind = "auto" | "openai-compatible" | "anthropic";
 export type SandboxPermissionProfile = "development" | "full-access";
 export type ReasoningEffort = "off" | "low" | "medium" | "high" | "xhigh";
@@ -40,7 +49,7 @@ export type McpServerStatus = "available" | "planned";
 export type McpInstallStatus = "not-installed" | "installed";
 export type McpServerSource = "marketplace" | "manual";
 export type RuntimeScriptStatus = "available" | "planned";
-export type ProjectDirectoryKind = "workspace" | "temporary";
+export type ProjectDirectoryKind = "workspace";
 export type SessionEventType =
   | "message.created"
   | "message.acked"
@@ -212,7 +221,6 @@ export interface SessionProjectBinding {
   projectPath: string | null;
   projectKind: ProjectDirectoryKind | null;
   transcriptMarkdownPath: string | null;
-  transcriptJsonPath: string | null;
 }
 
 export interface Attachment {
@@ -292,6 +300,8 @@ export interface RuntimeSettings {
   sandboxProfile: SandboxPermissionProfile;
   autoApproveToolRequests: boolean;
   reasoningEffort: ReasoningEffort;
+  toolProviderId: ProviderKind | null;
+  toolModel: string | null;
   updatedAt: string | null;
 }
 
@@ -337,6 +347,25 @@ export function normalizeReasoningEffort(
       return effort;
     default:
       return "medium";
+  }
+}
+
+export function normalizeProviderKind(
+  providerId: string | null | undefined,
+): ProviderKind | null {
+  switch (providerId) {
+    case "minimax":
+    case "gemini":
+    case "moonshot":
+    case "deepseek":
+    case "zhipu":
+    case "aihubmix":
+    case "openai":
+    case "anthropic":
+    case "openrouter":
+      return providerId;
+    default:
+      return null;
   }
 }
 
@@ -427,6 +456,8 @@ export const defaultRuntimeSettings: RuntimeSettings = {
   sandboxProfile: "full-access",
   autoApproveToolRequests: true,
   reasoningEffort: "medium",
+  toolProviderId: null,
+  toolModel: null,
   updatedAt: null,
 };
 
@@ -578,6 +609,8 @@ export const defaultUserProfile: UserProfile = {
 
 export type MemorySource = "auto" | "manual";
 export type MemoryDurability = "permanent" | "temporary";
+export type MemoryFactKind = "preference" | "constraint" | "decision" | "profile" | "account" | "workflow" | "other";
+export type MemoryFactState = "active" | "superseded" | "retracted";
 export type MemoryEmbeddingModel = "text-embedding-3-small" | "text-embedding-3-large";
 
 export interface Memory {
@@ -585,6 +618,9 @@ export interface Memory {
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
+  factKind: MemoryFactKind | null;
+  factKey: string | null;
+  factState: MemoryFactState;
   createdAt: string;
   updatedAt: string;
   accessCount: number;
@@ -640,12 +676,18 @@ export interface CreateMemoryInput {
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
+  factKind?: MemoryFactKind | null;
+  factKey?: string | null;
+  factState?: MemoryFactState;
   relatedTopics?: string[];
 }
 
 export interface UpdateMemoryInput {
   content?: string;
   durability?: MemoryDurability;
+  factKind?: MemoryFactKind | null;
+  factKey?: string | null;
+  factState?: MemoryFactState;
   relatedTopics?: string[];
 }
 

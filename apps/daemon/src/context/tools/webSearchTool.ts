@@ -53,6 +53,8 @@ interface SearchQueryIntent {
   mentionsBilibili: boolean;
   mentionsDouyin: boolean;
   mentionsTwitter: boolean;
+  mentionsNga: boolean;
+  mentionsMoegirl: boolean;
   asksBiography: boolean;
 }
 
@@ -259,6 +261,8 @@ function analyzeQueryIntent(query: string): SearchQueryIntent {
     mentionsBilibili: /b站|哔哩哔哩|bilibili|up主|up\s*主/i.test(normalized),
     mentionsDouyin: /抖音|douyin|iesdouyin/i.test(normalized),
     mentionsTwitter: /推特|twitter|x\.com|tweet|tweets/i.test(normalized),
+    mentionsNga: /(?:^|[\s\u4e00-\u9fa5])nga(?:$|[\s\u4e00-\u9fa5])|艾泽拉斯国家地理|nga论坛|nga帖子|nga贴子|nga讨论/u.test(normalized),
+    mentionsMoegirl: /萌娘百科|萌百|moegirl|moegirl\.org/i.test(normalized),
     asksBiography: /谁是|是谁|简介|介绍|百科|生平|人物|出生|哪里人|个人资料|背景/i.test(normalized),
   };
 }
@@ -307,6 +311,12 @@ function normalizeScopedDomains(domains: string[] | undefined, intent: SearchQue
   }
   if (intent.mentionsTwitter && (intent.asksMetric || intent.needsFreshness || intent.needsHistoricalSnapshot)) {
     normalized.push("x.com", "twitter.com");
+  }
+  if (intent.mentionsNga) {
+    normalized.push("nga.178.com", "bbs.nga.cn", "g.nga.cn");
+  }
+  if (intent.mentionsMoegirl) {
+    normalized.push("mzh.moegirl.org.cn", "zh.moegirl.org.cn", "moegirl.org.cn");
   }
 
   return [...new Set(normalized)];

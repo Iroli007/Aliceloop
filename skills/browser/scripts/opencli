@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v opencli >/dev/null 2>&1; then
+  exec opencli "$@"
+fi
+
+if command -v npx >/dev/null 2>&1; then
+  exec npx --yes @jackwener/opencli "$@"
+fi
+
+cat >&2 <<'EOF'
+opencli is not installed and npx is unavailable.
+
+Install it with one of:
+  npm install -g @jackwener/opencli
+EOF
+
+exit 127

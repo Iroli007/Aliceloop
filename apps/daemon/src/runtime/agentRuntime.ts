@@ -24,6 +24,7 @@ import {
   updateSessionMessage,
   upsertSessionJob,
 } from "../repositories/sessionRepository";
+import { createMemory } from "../context/memory/memoryRepository";
 import { maybeCreateArtifactFromReply } from "../services/artifactWriter";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
 import { enqueueSessionRun } from "../services/sessionRunQueue";
@@ -60,7 +61,7 @@ function publishRuntimeNotice(sessionId: string, content: string) {
   void syncSessionProjectHistory(sessionId).catch(() => {});
 }
 
-function publishAssistantReply(sessionId: string, content: string) {
+function publishAssistantReply(sessionId: string, content: string, skills: string[] = []) {
   const result = createSessionMessage({
     sessionId,
     clientMessageId: `assistant-reply-${randomUUID()}`,
@@ -68,6 +69,7 @@ function publishAssistantReply(sessionId: string, content: string) {
     role: "assistant",
     content,
     attachmentIds: [],
+    eventPayload: skills.length > 0 ? { skills } : undefined,
   });
 
   for (const event of result.events) {
@@ -444,14 +446,13 @@ interface AgentRun {
   startedAtMs: number;
 
   reportStarted(): void;
-  reportCompleted(text: string, streamTimings: Record<string, number | null>): void;
+  reportCompleted(text: string, streamTimings: Record<string, number | string | null>): void;
   reportFailed(error: unknown): void;
   dispose(): void;
 }
 
-async function createAgentRun(sessionId: string, queueWaitMs: number): Promise<AgentRun | null> {
+async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: string): Promise<AgentRun | null> {
   const activeProvider = getActiveProviderConfig();
-  const jobId = randomUUID();
 
   if (!activeProvider || !activeProvider.apiKey) {
     publishAssistantReply(sessionId, buildLocalFallbackReply(getLatestUserMessage(sessionId)));
@@ -504,7 +505,7 @@ async function createAgentRun(sessionId: string, queueWaitMs: number): Promise<A
       });
     },
 
-    reportCompleted(text: string, streamTimings: Record<string, number | null>) {
+    reportCompleted(text: string, streamTimings: Record<string, number | string | null>) {
       const providerRunMs = roundMs(nowMs() - startedAtMs);
       const endToEndMs = roundMs(queueWaitMs + contextLoadMs + providerRunMs);
       publishJob({
@@ -580,6 +581,10 @@ async function createAgentRun(sessionId: string, queueWaitMs: number): Promise<A
 interface StreamResult {
   text: string;
   timings: Record<string, number | null>;
+  diagnostics?: {
+    resolvedToolCallCount: number;
+    providerMetadataPreview: string | null;
+  };
 }
 
 async function executeStream(run: AgentRun): Promise<StreamResult> {
@@ -605,7 +610,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   const stream = streamText({
     model: createProviderModel(run.provider),
     system: run.context.systemPrompt,
-    messages: autoCompactMessages(run.context.messages, 4),
+    messages: autoCompactMessages(run.context.messages, 8),
     tools: run.context.tools,
     providerOptions: buildAgentProviderOptions(run.provider, runtimeSettings.reasoningEffort),
     stopWhen: stepCountIs(run.context.safetyConfig.maxIterations),
@@ -699,13 +704,14 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   });
   const streamSetupMs = roundMs(nowMs() - requestStartedAt);
 
-  const { text, timings } = await consumeTextStream(run, stream, requestStartedAt);
+  const { text, timings, diagnostics } = await consumeTextStream(run, stream, requestStartedAt);
   return {
     text,
     timings: {
       streamSetupMs,
       ...timings,
     },
+    diagnostics,
   };
 }
 
@@ -719,13 +725,15 @@ async function consumeTextStream(
   run: AgentRun,
   stream: Awaited<ReturnType<typeof streamText>>,
   requestStartedAt: number,
-): Promise<{ text: string; timings: Record<string, number | null> }> {
+): Promise<{ text: string; timings: Record<string, number | null>; diagnostics: StreamResult["diagnostics"] }> {
   let text = "";
   const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
+  const routedSkillIds = run.context.routedSkillIds;
   let assistantMessageId: string | null = null;
   let pendingFlush = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let firstTokenMs: number | null = null;
+  let resolvedToolCalls: Awaited<ReturnType<typeof stream.toolCalls>> = [];
 
   function flush() {
     if (!assistantMessageId || !pendingFlush) return;
@@ -734,6 +742,7 @@ async function consumeTextStream(
       sessionId: run.sessionId,
       messageId: assistantMessageId,
       content: sanitizeAssistantTextForChat(text),
+      eventPayload: routedSkillIds.length > 0 ? { skills: routedSkillIds } : undefined,
     });
     publishSessionEvent(updateResult.event);
   }
@@ -757,6 +766,7 @@ async function consumeTextStream(
         role: "assistant",
         content: sanitizeAssistantTextForChat(text),
         attachmentIds: [],
+        eventPayload: routedSkillIds.length > 0 ? { skills: routedSkillIds } : undefined,
       });
 
       assistantMessageId = messageResult.message.id;
@@ -785,7 +795,7 @@ async function consumeTextStream(
 
   // Handle tool-only replies with no text
   if (!text.trim()) {
-    const resolvedToolCalls = await stream.toolCalls;
+    resolvedToolCalls = await stream.toolCalls;
     if (resolvedToolCalls.length > 0) {
       text = `已完成 ${resolvedToolCalls.length} 次工具调用。`;
     }
@@ -800,6 +810,7 @@ async function consumeTextStream(
       role: "assistant",
       content: sanitizeAssistantTextForChat(text),
       attachmentIds: [],
+      eventPayload: routedSkillIds.length > 0 ? { skills: routedSkillIds } : undefined,
     });
     assistantMessageId = messageResult.message.id;
     for (const event of messageResult.events) {
@@ -836,6 +847,10 @@ async function consumeTextStream(
       cacheCreationInputTokens,
       cacheReadInputTokens,
     },
+    diagnostics: {
+      resolvedToolCallCount: Array.isArray(resolvedToolCalls) ? resolvedToolCalls.length : 0,
+      providerMetadataPreview: summarizeUnknown(metadata),
+    },
   };
 }
 
@@ -857,32 +872,33 @@ function schedulePostProcessing(run: AgentRun, text: string) {
     });
   }
 
-  void reflectOnTurn({
-    userMessages,
-    assistantResponse: text,
-  })
-    .catch(() => {
-      // Reflection failure should not fail the user-visible turn.
-    });
-
   if (!latestUserMessage) {
     return;
   }
 
   void (async () => {
-    const prefetchedRecallStartedAt = nowMs();
-    let prefetchedRecall = null;
+    const distilled = await reflectOnTurn({
+      userMessages,
+      assistantResponse: text,
+    });
 
-    try {
-      prefetchedRecall = await (run.context.asyncSemanticSearch?.result ?? Promise.resolve(null));
-    } catch {
-      prefetchedRecall = null;
+    for (const memory of distilled.permanent) {
+      try {
+        await createMemory({
+          content: memory.content,
+          source: "auto",
+          durability: "permanent",
+          factKind: memory.factKind,
+          factKey: memory.factKey,
+          relatedTopics: memory.relatedTopics,
+        });
+      } catch {
+        // A single fact write should not block the rest of the post-turn updates.
+      }
     }
 
     await refreshSummaryMemory(run.sessionId, latestUserMessage, text, {
-      prefetchedRecall,
-      prefetchedRecallWaitMs: roundMs(nowMs() - prefetchedRecallStartedAt),
-      allowSemanticFallback: run.context.memoryRoute.useAtomicMemory,
+      temporaryItems: distilled.temporary,
     });
   })().catch(() => {
     // Summary refresh failure should not fail the user-visible turn.
@@ -895,15 +911,39 @@ function schedulePostProcessing(run: AgentRun, text: string) {
 
 export async function runAgent(sessionId: string) {
   const enqueuedAt = nowMs();
+  const queuedJobId = randomUUID();
+  publishJob({
+    id: queuedJobId,
+    sessionId,
+    kind: "provider-completion",
+    status: "queued",
+    title: "Preparing response",
+    detail: "Loading context and tools before the model starts responding.",
+  });
   return enqueueSessionRun(sessionId, async () => {
     const queueWaitMs = roundMs(nowMs() - enqueuedAt);
-    const run = await createAgentRun(sessionId, queueWaitMs);
+    const run = await createAgentRun(sessionId, queueWaitMs, queuedJobId);
     if (!run) return;
 
     try {
       run.reportStarted();
-      const { text, timings } = await executeStream(run);
-      run.reportCompleted(text, timings);
+      const { text, timings, diagnostics } = await executeStream(run);
+      if (!text.trim()) {
+        const diagnosticLines = [
+          `provider=${run.provider.label}`,
+          `model=${run.provider.model}`,
+          `transport=${resolveProviderTransport(run.provider)}`,
+          `tools=${Object.keys(run.context.tools).join(",") || "(none)"}`,
+          `resolvedToolCalls=${diagnostics?.resolvedToolCallCount ?? 0}`,
+          `providerMetadata=${diagnostics?.providerMetadataPreview ?? "(none)"}`,
+          `latestUser=${JSON.stringify(getLatestUserMessage(run.sessionId) ?? "")}`,
+        ];
+        console.error(`[agent-empty-output] session=${run.sessionId} ${diagnosticLines.join(" | ")}`);
+      }
+      run.reportCompleted(text, {
+        ...timings,
+        resolvedToolCallCount: diagnostics?.resolvedToolCallCount ?? null,
+      });
       schedulePostProcessing(run, text);
     } catch (error) {
       run.reportFailed(error);

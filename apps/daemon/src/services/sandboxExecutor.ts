@@ -78,7 +78,7 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
     describePolicy() {
       const warnings: string[] = [];
       if (context.autoApproveToolRequests) {
-        warnings.push("tool approval prompts are auto-approved in this context; delete actions still request a separate chat confirmation");
+        warnings.push("tool approval prompts are auto-approved in this context; delete actions still request a separate chat reply confirmation");
       }
       if (toolPolicy.fullAccess && !hasFilesystemBoundary) {
         warnings.push(
@@ -96,7 +96,7 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
       if (toolPolicy.permissionProfile === "development") {
         warnings.push("development mode reads only project, data, uploads, and explicitly granted extra read roots");
         if (context.autoApproveToolRequests) {
-          warnings.push("out-of-policy write, edit, and bash actions continue without a confirmation prompt; delete actions still request a separate chat confirmation");
+          warnings.push("out-of-policy write, edit, and bash actions continue without a confirmation prompt; delete actions still request a separate chat reply confirmation");
         } else if (toolPolicy.supportsElevatedActions && options.requestElevatedApproval) {
           warnings.push("out-of-policy write, edit, and bash actions can request a single elevated approval");
         } else {

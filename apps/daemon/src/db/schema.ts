@@ -331,6 +331,9 @@ export const schemaStatements = [
       content TEXT NOT NULL,
       source TEXT NOT NULL CHECK(source IN ('auto', 'manual')),
       durability TEXT NOT NULL CHECK(durability IN ('permanent', 'temporary')),
+      fact_kind TEXT CHECK(fact_kind IN ('preference', 'constraint', 'decision', 'profile', 'account', 'workflow', 'other')),
+      fact_key TEXT,
+      fact_state TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       access_count INTEGER NOT NULL DEFAULT 0,
@@ -366,6 +369,14 @@ export const schemaStatements = [
   `
     CREATE INDEX IF NOT EXISTS memories_durability_idx
     ON memories (durability)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_fact_state_idx
+    ON memories (fact_state, updated_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_fact_lookup_idx
+    ON memories (fact_kind, fact_key, fact_state)
   `,
   `
     CREATE INDEX IF NOT EXISTS memories_created_idx
@@ -418,6 +429,8 @@ export const schemaStatements = [
       sandbox_profile TEXT NOT NULL,
       auto_approve_tool_requests INTEGER NOT NULL DEFAULT 1,
       reasoning_effort TEXT NOT NULL DEFAULT 'medium',
+      tool_provider_id TEXT,
+      tool_model TEXT,
       updated_at TEXT NOT NULL
     )
   `,

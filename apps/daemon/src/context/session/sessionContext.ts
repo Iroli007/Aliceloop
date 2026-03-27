@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 import type { ModelMessage } from "ai";
+import type { AttentionState, TaskRun } from "@aliceloop/runtime-core";
 import type { SessionEvent } from "@aliceloop/runtime-core";
 import type { SessionMessage } from "@aliceloop/runtime-core";
 import type { SessionSnapshot } from "@aliceloop/runtime-core";
@@ -10,7 +11,6 @@ import {
   inferStickySkillGroupIdsFromContext,
   inferStickySkillIdsFromContext,
   needsBrowserAutomation,
-  needsCodingAgent,
   needsWebFetch,
   needsWebResearch,
 } from "../skills/skillRouting";
@@ -20,12 +20,15 @@ import {
   getSessionSnapshot,
   listSessionEventsSince,
 } from "../../repositories/sessionRepository";
+import { getAttentionState } from "../../repositories/overviewRepository";
+import { listPlans, type PlanRecord } from "../../repositories/planRepository";
+import { listTaskRuns } from "../../repositories/taskRunRepository";
 import { nowMs, roundMs } from "../../runtime/perfTrace";
 
-const MAX_HISTORY_MESSAGES = 20;
-const MAX_FOCUS_MESSAGES = 8;
-const MAX_TOOL_ACTIVITY_EVENTS = 40;
-const MAX_TOOL_ACTIVITY_ITEMS = 6;
+const MAX_HISTORY_MESSAGES = 8;
+const MAX_FOCUS_MESSAGES = 6;
+const MAX_TOOL_ACTIVITY_EVENTS = 20;
+const MAX_TOOL_ACTIVITY_ITEMS = 4;
 const MAX_INLINE_ATTACHMENT_BYTES = 48 * 1024;
 const MAX_TOTAL_INLINE_ATTACHMENT_BYTES = 96 * 1024;
 const MAX_INLINE_ATTACHMENT_CHARS = 24_000;
@@ -206,6 +209,29 @@ function trimInline(value: string, maxChars: number) {
   return `${normalized.slice(0, maxChars).trimEnd()}…`;
 }
 
+function splitLatestMessageAnchorLines(content: string) {
+  const lines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return {
+      openingLines: [] as string[],
+      closingLines: [] as string[],
+    };
+  }
+
+  const openingLines = lines.slice(0, 2);
+  const closingStart = Math.max(lines.length - 2, openingLines.length);
+  const closingLines = lines.slice(closingStart);
+
+  return {
+    openingLines,
+    closingLines,
+  };
+}
+
 function isTrackedRecentToolName(toolName: string) {
   return toolName === "web_search"
     || toolName === "web_fetch"
@@ -218,15 +244,16 @@ function isContinuationLikeMessage(content: string) {
     return false;
   }
 
-  if (trimmed.length <= 6 && /[你这那它按查搜继续接着]/u.test(trimmed)) {
-    return true;
-  }
-
-  return /^(你查|你搜|继续|接着|按这个|按它|照这个|这个呢|那这个呢|然后呢|查一下|搜一下|再查|再搜|按这个平台|按这个时间|按这个口径)/u.test(trimmed);
+  return /^(?:你呢|你那边呢|你查|你搜|继续|接着|按这个|按它|照这个|这个呢|那这个呢|然后呢|查一下|搜一下|再查|再搜|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗|按这个平台|按这个时间|按这个口径)/u.test(trimmed);
 }
 
 function needsResearchContinuation(messageText: string) {
   return /查|搜|搜索|核对|验证|确认|平台|官网|B站|微博|粉丝|播放|数据|时间|日期|几月几日|最新|当前|\d{1,2}月\d{1,2}日/u.test(messageText);
+}
+
+function needsResearchDeepRead(messageText: string) {
+  const trimmed = messageText.trim();
+  return /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u.test(trimmed);
 }
 
 function needsImmediateTimeVerification(messageText: string) {
@@ -295,7 +322,6 @@ function buildResolvedCurrentRequest(input: {
   latestExplicitAnchor: string | null;
   originalTopicAnchor: string | null;
   carryForwardFacts: string | null;
-  latestAssistantMomentum: string | null;
 }) {
   if (!input.latestContent) {
     return null;
@@ -321,10 +347,6 @@ function buildResolvedCurrentRequest(input: {
 
   if (input.carryForwardFacts) {
     fragments.push(`Carry-forward workset: ${input.carryForwardFacts}`);
-  }
-
-  if (input.latestAssistantMomentum) {
-    fragments.push(`Most recent assistant momentum: ${input.latestAssistantMomentum}`);
   }
 
   fragments.push(`Latest user follow-up: ${input.latestContent}`);
@@ -364,6 +386,9 @@ function buildEffectiveUserQuery(input: {
 export interface RecentConversationFocus {
   content: string;
   latestContent: string;
+  latestUserHasImageAttachment: boolean;
+  latestOpeningLines: string[];
+  latestClosingLines: string[];
   continuationLike: boolean;
   researchContinuation: boolean;
   originalTopicAnchor: string | null;
@@ -422,6 +447,7 @@ interface SessionContextFragmentTimings {
   recentResearchMemoryMs: number;
   activeTurnMs: number;
   recentToolActivityMs: number;
+  taskWorkingMemoryMs: number;
   messagesMs: number;
   totalMs: number;
   snapshotReads: number;
@@ -435,6 +461,7 @@ export interface SessionContextFragments {
   recentResearchMemory: string;
   recentToolActivity: string;
   activeTurn: string;
+  taskWorkingMemory: string;
   messages: ModelMessage[];
   timings: SessionContextFragmentTimings;
 }
@@ -445,18 +472,15 @@ function buildSkillRouteHints(input: {
   researchContinuation: boolean;
   carryForwardFacts: string | null;
   worksetConstraints: string | null;
-  latestAssistantMomentum: string | null;
   recentToolNames: string[];
 }): SkillRouteHints {
   const stickySkillIds = new Set<string>();
   const stickyGroupIds = new Set<SkillRouteHints["stickyGroupIds"][number]>();
   const reasons: string[] = [];
-  const mergedContext = [
-    input.latestContent,
-    input.carryForwardFacts,
-    input.worksetConstraints,
-    input.latestAssistantMomentum,
-  ].filter(Boolean).join(" / ");
+  const currentQuery = input.latestContent;
+  const carriedForwardContext = [input.carryForwardFacts, input.worksetConstraints]
+    .filter((value): value is string => Boolean(value))
+    .join(" / ");
 
   const sawRecentWebTool = input.recentToolNames.some((toolName) => {
     return toolName === "web_search" || toolName === "web_fetch";
@@ -464,27 +488,36 @@ function buildSkillRouteHints(input: {
   const sawRecentWebFetchTool = input.recentToolNames.some((toolName) => {
     return toolName === "web_fetch";
   });
+  const needsDeepResearchFollowup = sawRecentWebTool && needsResearchDeepRead(currentQuery);
   const sawRecentBrowserTool = input.recentToolNames.some((toolName) => {
     return toolName.startsWith("browser_");
   });
-  const loginOrQrContinuation = looksLikeLoginOrQrContinuationContext(input.latestAssistantMomentum)
-    || looksLikeLoginOrQrContinuationContext(input.carryForwardFacts)
+  const loginOrQrContinuation = looksLikeLoginOrQrContinuationContext(input.carryForwardFacts)
     || looksLikeLoginOrQrContinuationContext(input.worksetConstraints);
 
-  for (const skillId of inferStickySkillIdsFromContext(mergedContext)) {
+  for (const skillId of inferStickySkillIdsFromContext(currentQuery)) {
     stickySkillIds.add(skillId);
   }
-  for (const groupId of inferStickySkillGroupIdsFromContext(mergedContext)) {
+  for (const groupId of inferStickySkillGroupIdsFromContext(currentQuery)) {
     stickyGroupIds.add(groupId);
   }
 
-  if (input.researchContinuation || (input.continuationLike && sawRecentWebTool) || needsWebResearch(mergedContext)) {
+  if (
+    input.researchContinuation
+    || (input.continuationLike && sawRecentWebTool)
+    || needsWebResearch(currentQuery)
+    || needsDeepResearchFollowup
+  ) {
     stickyGroupIds.add("research-core");
     stickySkillIds.add("web-search");
     reasons.push("carry forward live research/fact-check tools");
   }
 
-  if ((input.continuationLike && sawRecentWebFetchTool) || needsWebFetch(mergedContext)) {
+  if (
+    (input.continuationLike && sawRecentWebFetchTool)
+    || needsWebFetch(currentQuery)
+    || needsDeepResearchFollowup
+  ) {
     stickyGroupIds.add("research-core");
     stickySkillIds.add("web-fetch");
     reasons.push("carry forward explicit page-reading workflow");
@@ -492,7 +525,7 @@ function buildSkillRouteHints(input: {
 
   if (
     (input.continuationLike && sawRecentBrowserTool)
-    || (input.continuationLike && needsBrowserAutomation(mergedContext))
+    || (input.continuationLike && needsBrowserAutomation(currentQuery))
     || (input.continuationLike && loginOrQrContinuation)
   ) {
     stickyGroupIds.add("browser-interaction");
@@ -500,10 +533,27 @@ function buildSkillRouteHints(input: {
     reasons.push("carry forward browser workflow");
   }
 
-  if (input.continuationLike && needsCodingAgent(mergedContext)) {
-    stickyGroupIds.add("coding-workflow");
-    stickySkillIds.add("coding-agent");
-    reasons.push("carry forward coding workflow");
+  if (input.continuationLike && carriedForwardContext) {
+    if (/[xX]\.com|twitter|推特|tweet|推文/u.test(carriedForwardContext)) {
+      stickyGroupIds.add("social-platform");
+      stickySkillIds.add("twitter-media");
+      reasons.push("carry forward social platform workflow");
+    }
+    if (/小红书|xiaohongshu|rednote|xhs/u.test(carriedForwardContext)) {
+      stickyGroupIds.add("social-platform");
+      stickySkillIds.add("xiaohongshu");
+      reasons.push("carry forward social platform workflow");
+    }
+    if (/telegram|\btg\b|电报/u.test(carriedForwardContext)) {
+      stickyGroupIds.add("social-platform");
+      stickySkillIds.add("telegram");
+      reasons.push("carry forward social platform workflow");
+    }
+    if (/discord|webhook/u.test(carriedForwardContext)) {
+      stickyGroupIds.add("social-platform");
+      stickySkillIds.add("discord");
+      reasons.push("carry forward social platform workflow");
+    }
   }
 
   return {
@@ -606,10 +656,30 @@ function buildActiveTurnBlockFromFocus(recentConversationFocus: RecentConversati
   return [
     "## Active Turn",
     "- The final user message in the conversation history is the only current request for this turn.",
+    "- Never treat text from any earlier user turn as if it appeared in the latest user message.",
     "- Treat older conversation as background context. Do not claim the user just said, repeated, or confirmed something unless it appears in the latest user message below.",
+    "- When counting how many times the user said, confirmed, or requested something, count only explicit user turns from the conversation history. Do not count summaries, carry-forward notes, anchors, or repeated context blocks as extra mentions.",
     "- If a nickname, preference, or instruction appears only in older history, treat it as past context rather than a fresh instruction in this reply.",
     "- When the latest user message conflicts with, narrows, or replaces an older framing, follow the latest user message.",
     "- If the latest user message is brief, elliptical, or continuation-like, resolve what it refers to from the immediately preceding turns instead of pretending the context is missing.",
+    ...(recentConversationFocus.latestOpeningLines.length > 0
+      ? [
+          "- Anchor on the opening lines of the latest user message before interpreting older context.",
+          "",
+          "<latest_user_message_opening_lines>",
+          ...recentConversationFocus.latestOpeningLines,
+          "</latest_user_message_opening_lines>",
+        ]
+      : []),
+    ...(recentConversationFocus.latestClosingLines.length > 0
+      ? [
+          "- Also anchor on the closing lines of the latest user message so the final ask is not overwritten by older context.",
+          "",
+          "<latest_user_message_closing_lines>",
+          ...recentConversationFocus.latestClosingLines,
+          "</latest_user_message_closing_lines>",
+        ]
+      : []),
     ...(needsImmediateTimeVerification(latestContent)
       ? [
           "- The latest user message asks for the current local time or date.",
@@ -658,11 +728,18 @@ function buildRecentConversationFocusFromSnapshot(
     .slice(-MAX_FOCUS_MESSAGES);
   const latestUserMessage = getLatestUserSessionMessage(recentMessages);
   const latestContent = latestUserMessage ? serializeMessageContent(latestUserMessage).trim() : "";
+  const latestMessageAnchorLines = splitLatestMessageAnchorLines(latestContent);
+  const latestUserHasImageAttachment = latestUserMessage?.attachments.some((attachment) => {
+    return attachment.mimeType.startsWith("image/");
+  }) ?? false;
 
   if (recentMessages.length < 2) {
     return {
       content: "",
       latestContent,
+      latestUserHasImageAttachment,
+      latestOpeningLines: latestMessageAnchorLines.openingLines,
+      latestClosingLines: latestMessageAnchorLines.closingLines,
       continuationLike: false,
       researchContinuation: false,
       originalTopicAnchor: null,
@@ -680,10 +757,6 @@ function buildRecentConversationFocusFromSnapshot(
   }
 
   const continuationLike = isContinuationLikeMessage(latestContent);
-  const latestAssistantBeforeLastUser = getLatestAssistantBeforeLastUser(recentMessages);
-  const latestAssistantMomentum = latestAssistantBeforeLastUser
-    ? trimInline(serializeMessageContent(latestAssistantBeforeLastUser), 180)
-    : null;
   const anchors = listSubstantialUserAnchors(recentMessages);
   const latestExplicitAnchor = anchors.at(-1) ?? null;
   const originalTopicAnchor = anchors[0] && anchors[0] !== latestExplicitAnchor ? anchors[0] : null;
@@ -693,6 +766,10 @@ function buildRecentConversationFocusFromSnapshot(
   );
   const worksetConstraints = summarizeWorksetConstraints(anchors);
   const recentToolNames = recentToolTraces.map((trace) => trace.toolName);
+  const sawRecentWebTool = recentToolNames.some((toolName) => {
+    return toolName === "web_search" || toolName === "web_fetch";
+  });
+  const needsDeepResearchFollowup = sawRecentWebTool && needsResearchDeepRead(latestContent);
   const resolvedCurrentRequest = buildResolvedCurrentRequest({
     latestContent,
     continuationLike,
@@ -700,7 +777,6 @@ function buildRecentConversationFocusFromSnapshot(
     latestExplicitAnchor,
     originalTopicAnchor,
     carryForwardFacts,
-    latestAssistantMomentum,
   });
   const effectiveUserQuery = buildEffectiveUserQuery({
     latestContent,
@@ -716,7 +792,6 @@ function buildRecentConversationFocusFromSnapshot(
     researchContinuation,
     carryForwardFacts,
     worksetConstraints,
-    latestAssistantMomentum,
     recentToolNames,
   });
 
@@ -748,6 +823,15 @@ function buildRecentConversationFocusFromSnapshot(
       lines.push("- The research memory block below is the running evidence ledger for this investigation. Do not restart from scratch when the user only asks to continue; reuse the searched sources, fetched pages, and remaining evidence gaps to decide the next step.");
       lines.push("- Before drafting a report, identify the strongest unfetched candidate URL in the ledger. If one exists, fetch that page before starting a fresh broad search.");
     }
+    if (needsDeepResearchFollowup) {
+      lines.push("- The latest follow-up is asking for a deeper read, not another shallow search.");
+      lines.push("- Required action for this turn: inspect the research memory ledger, take the strongest unfetched candidate URL, and call `web_fetch` on that page before replying.");
+      lines.push("- Do not answer from snippets alone when the user is explicitly asking for deeper evidence or full-page reading.");
+    }
+  }
+
+  if (latestUserHasImageAttachment) {
+    lines.push("- The latest user message includes one or more image attachments. If the user is asking what is shown in the image, use the routed `view_image` tool on the attachment path instead of guessing.");
   }
 
   if (routeHints.stickySkillIds.length > 0) {
@@ -775,6 +859,9 @@ function buildRecentConversationFocusFromSnapshot(
   return {
     content: lines.join("\n"),
     latestContent,
+    latestUserHasImageAttachment,
+    latestOpeningLines: latestMessageAnchorLines.openingLines,
+    latestClosingLines: latestMessageAnchorLines.closingLines,
     continuationLike,
     researchContinuation: Boolean(researchContinuation),
     originalTopicAnchor,
@@ -911,6 +998,161 @@ function buildRecentToolActivityBlockFromTraces(traces: RecentToolTrace[]) {
 
   lines.push("</recent_tool_activity>");
   return lines.join("\n");
+}
+
+function buildWorkspaceBoundarySection(projectBinding: SessionProjectBinding | null) {
+  if (!projectBinding) {
+    return "";
+  }
+
+  const lines = ["### Workspace Boundary"];
+  if (projectBinding.projectName) {
+    lines.push(`- Project: ${projectBinding.projectName}`);
+  }
+  if (projectBinding.projectPath) {
+    lines.push(`- Path: ${projectBinding.projectPath}`);
+  }
+  return lines.join("\n");
+}
+
+function buildAttentionSection(attention: AttentionState) {
+  if (!attention.currentLibraryTitle && !attention.focusSummary && attention.concepts.length === 0) {
+    return "";
+  }
+
+  const lines = ["### Current Attention"];
+  if (attention.currentLibraryTitle) {
+    lines.push(`- Focused on: ${attention.currentLibraryTitle}`);
+  }
+  if (attention.currentSectionLabel) {
+    lines.push(`- Current section: ${attention.currentSectionLabel}`);
+  }
+  if (attention.focusSummary) {
+    lines.push(`- Summary: ${attention.focusSummary}`);
+  }
+  if (attention.concepts.length > 0) {
+    lines.push(`- Key concepts: ${attention.concepts.join(", ")}`);
+  }
+  return lines.join("\n");
+}
+
+function buildPlanStateSection(plans: PlanRecord[]) {
+  if (plans.length === 0) {
+    return "";
+  }
+
+  const lines = ["### Plan State"];
+  for (const plan of plans.slice(0, 2)) {
+    lines.push(`- ${plan.title} · ${plan.status}`);
+    if (plan.goal) {
+      lines.push(`  goal: ${trimInline(plan.goal, 180)}`);
+    }
+    if (plan.steps.length > 0) {
+      lines.push("  steps:");
+      for (const step of plan.steps.slice(0, 4)) {
+        lines.push(`    - ${trimInline(step, 120)}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function buildTaskRunSection(taskRuns: TaskRun[]) {
+  if (taskRuns.length === 0) {
+    return "";
+  }
+
+  const lines = ["### Session Tasks"];
+  for (const taskRun of taskRuns.slice(0, 4)) {
+    lines.push(`- ${taskRun.status} · ${taskRun.title}`);
+    if (taskRun.detail.trim()) {
+      lines.push(`  detail: ${trimInline(taskRun.detail, 180)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function buildTaskWorkingMemoryBlock(input: {
+  sessionId: string;
+  projectBinding: SessionProjectBinding | null;
+  recentConversationFocus: RecentConversationFocus;
+  activeTurn: string;
+  recentResearchMemory: string;
+  recentToolActivity: string;
+}) {
+  const sections: string[] = [];
+
+  const workspaceBoundary = buildWorkspaceBoundarySection(input.projectBinding);
+  if (workspaceBoundary) {
+    sections.push(workspaceBoundary);
+  }
+
+  const attention = buildAttentionSection(getAttentionState());
+  if (attention) {
+    sections.push(attention);
+  }
+
+  const requestLines = ["### Current Request"];
+  requestLines.push(`- Goal: ${trimInline(input.recentConversationFocus.resolvedCurrentRequest ?? input.recentConversationFocus.latestContent, 240)}`);
+  if (input.recentConversationFocus.latestOpeningLines.length > 0) {
+    requestLines.push(`- Latest opening lines: ${trimInline(input.recentConversationFocus.latestOpeningLines.join(" / "), 240)}`);
+  }
+  if (input.recentConversationFocus.latestClosingLines.length > 0) {
+    requestLines.push(`- Latest closing lines: ${trimInline(input.recentConversationFocus.latestClosingLines.join(" / "), 240)}`);
+  }
+  if (input.recentConversationFocus.effectiveUserQuery && input.recentConversationFocus.effectiveUserQuery !== input.recentConversationFocus.latestContent) {
+    requestLines.push(`- Effective query: ${trimInline(input.recentConversationFocus.effectiveUserQuery, 240)}`);
+  }
+  if (input.recentConversationFocus.carryForwardFacts) {
+    requestLines.push(`- Carry-forward facts: ${trimInline(input.recentConversationFocus.carryForwardFacts, 240)}`);
+  }
+  if (input.recentConversationFocus.worksetConstraints) {
+    requestLines.push(`- Temporary constraints: ${trimInline(input.recentConversationFocus.worksetConstraints, 240)}`);
+  }
+  if (input.recentConversationFocus.routeHints.reasons.length > 0) {
+    requestLines.push(`- Routing hints: ${input.recentConversationFocus.routeHints.reasons.join("; ")}`);
+  }
+  sections.push(requestLines.join("\n"));
+
+  if (input.activeTurn) {
+    sections.push([
+      "### Turn Directive",
+      input.activeTurn,
+    ].join("\n"));
+  }
+
+  if (input.recentToolActivity) {
+    sections.push(input.recentToolActivity);
+  }
+
+  if (input.recentResearchMemory) {
+    sections.push(input.recentResearchMemory);
+  }
+
+  const plans = listPlans({ sessionId: input.sessionId, limit: 2 });
+  const planSection = buildPlanStateSection(plans);
+  if (planSection) {
+    sections.push(planSection);
+  }
+
+  const taskRuns = listTaskRuns({ sessionId: input.sessionId, limit: 4 });
+  const taskSection = buildTaskRunSection(taskRuns);
+  if (taskSection) {
+    sections.push(taskSection);
+  }
+
+  if (sections.length === 0) {
+    return "";
+  }
+
+  return [
+    "## Task Working Memory",
+    "- Treat this as the current task brain, not as long-term memory.",
+    "",
+    ...sections,
+  ].join("\n\n");
 }
 
 function parseRecord(value: unknown) {
@@ -1177,6 +1419,17 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const recentResearchMemory = buildRecentResearchMemoryBlockFromTraces(recentToolTraces);
   const recentResearchMemoryMs = roundMs(nowMs() - recentResearchMemoryStartedAt);
 
+  const taskWorkingMemoryStartedAt = nowMs();
+  const taskWorkingMemory = buildTaskWorkingMemoryBlock({
+    sessionId,
+    projectBinding,
+    recentConversationFocus,
+    activeTurn,
+    recentResearchMemory,
+    recentToolActivity,
+  });
+  const taskWorkingMemoryMs = roundMs(nowMs() - taskWorkingMemoryStartedAt);
+
   const messagesStartedAt = nowMs();
   const messages = buildSessionMessagesFromSnapshot(snapshot);
   const messagesMs = roundMs(nowMs() - messagesStartedAt);
@@ -1189,6 +1442,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
     recentResearchMemory,
     recentToolActivity,
     activeTurn,
+    taskWorkingMemory,
     messages,
     timings: {
       snapshotMs,
@@ -1200,6 +1454,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
       recentResearchMemoryMs,
       activeTurnMs,
       recentToolActivityMs,
+      taskWorkingMemoryMs,
       messagesMs,
       totalMs: roundMs(nowMs() - startedAt),
       snapshotReads: 1,

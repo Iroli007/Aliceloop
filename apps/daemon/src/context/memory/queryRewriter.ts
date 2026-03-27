@@ -1,6 +1,6 @@
 import { generateText } from "ai";
 import { createProviderModel } from "../../providers/providerModelFactory";
-import { getActiveProviderConfig } from "../../repositories/providerRepository";
+import { getToolModelConfig } from "../../providers/toolModelResolver";
 
 export async function rewriteQuery(
   originalQuery: string,
@@ -11,7 +11,7 @@ export async function rewriteQuery(
     return originalQuery;
   }
 
-  const provider = getActiveProviderConfig();
+  const provider = getToolModelConfig();
   if (!provider?.apiKey) {
     return originalQuery;
   }

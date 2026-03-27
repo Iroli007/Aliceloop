@@ -41,15 +41,8 @@ declare global {
                 mimeType: string;
                 contentBase64: string;
               }>;
-            }
+          }
         >;
-      }>;
-      openProjectDirectories(): Promise<{
-        canceled: boolean;
-        directories: Array<{
-          name: string;
-          path: string;
-        }>;
       }>;
       openPath(path: string): Promise<{
         ok: boolean;
@@ -59,6 +52,19 @@ declare global {
       minimizeWindow(): Promise<void>;
       toggleFullscreenWindow(): Promise<void>;
       openSettings(): Promise<void>;
+      openChromeRelay(): Promise<void>;
+      getChromeRelayState(): Promise<{
+        browserRelay: BrowserRelayCapability | null;
+        attachedTabs: number;
+      } | null>;
+      regenerateChromeRelayToken(): Promise<{
+        browserRelay: BrowserRelayCapability | null;
+        attachedTabs: number;
+      } | null>;
+      launchChromeRelay(): Promise<{
+        browserRelay: BrowserRelayCapability | null;
+        attachedTabs: number;
+      } | null>;
     };
   }
 

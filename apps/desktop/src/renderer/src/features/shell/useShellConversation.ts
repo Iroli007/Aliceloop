@@ -681,6 +681,7 @@ export function useShellConversation(): ShellConversationState {
   const initialSnapshot = createLocalDraftSnapshot(previewSessionSnapshot);
   const lastEventSeqRef = useRef(0);
   const deviceIdRef = useRef(getStableDesktopSessionDeviceId());
+  const activeSessionIdRef = useRef(getStoredActiveSessionId());
   const [snapshot, setSnapshot] = useState<SessionSnapshot>(initialSnapshot);
   const [threads, setThreads] = useState<SessionThreadSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState(getStoredActiveSessionId());
@@ -695,6 +696,7 @@ export function useShellConversation(): ShellConversationState {
   const [error, setError] = useState<string>();
 
   useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
     rememberActiveSessionId(activeSessionId);
   }, [activeSessionId]);
 
@@ -857,6 +859,9 @@ export function useShellConversation(): ShellConversationState {
       source.addEventListener("session", (event) => {
         const messageEvent = event as MessageEvent<string>;
         const sessionEvent = JSON.parse(messageEvent.data) as SessionEvent;
+        if (disposed || activeSessionIdRef.current !== currentSessionId || sessionEvent.sessionId !== currentSessionId) {
+          return;
+        }
         lastEventSeqRef.current = Math.max(lastEventSeqRef.current, sessionEvent.seq);
         setSessionEvents((current) => [...current, sessionEvent]);
 
@@ -920,6 +925,17 @@ export function useShellConversation(): ShellConversationState {
       return;
     }
 
+    console.log('[selectSession] Switching to:', sessionId, 'Clearing state');
+    setStatus("loading");
+    setSnapshot((current) => {
+      if (sessionId === localDraftSessionId) {
+        return createLocalDraftSnapshot(current);
+      }
+      return current;
+    });
+    setToolWorkflowEntries([]);
+    setSessionEvents([]);
+    lastEventSeqRef.current = 0;
     setActiveSessionId(sessionId);
   }
 

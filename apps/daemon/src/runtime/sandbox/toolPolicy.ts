@@ -1,4 +1,5 @@
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { normalizeSandboxPermissionProfile } from "@aliceloop/runtime-core";
@@ -17,7 +18,15 @@ const defaultAllowedReadRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedWriteRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedCwdRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedCommands = ["cat", "find", "git", "head", "ls", "node", "npm", "pwd", "rg", "rm", "rmdir", "screencapture", "sed", "sips", "tsx", "wc"];
-const safeAbsoluteCommandDirs = new Set(["/bin", "/usr/bin", "/usr/sbin"]);
+const safeAbsoluteCommandRoots = new Set([
+  "/bin",
+  "/usr/bin",
+  "/usr/sbin",
+  "/opt/homebrew",
+  "/usr/local",
+  resolve(homedir(), ".nvm/versions/node"),
+  resolve(homedir(), ".volta"),
+]);
 const developmentFindDisallowedArgs = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 const developmentNpmAllowedSubcommands = new Set([
   "help",
@@ -87,6 +96,13 @@ export function isPathWithinRoot(targetPath: string, root: string) {
 
 export function isPathAllowed(targetPath: string, allowedRoots: string[]) {
   return uniqueRoots(allowedRoots).some((root) => isPathWithinRoot(targetPath, root));
+}
+
+function isPathWithinCommandRoot(targetPath: string, root: string) {
+  const resolvedTarget = resolve(targetPath);
+  const resolvedRoot = resolve(root);
+  const relativePath = relative(resolvedRoot, resolvedTarget);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 function isSedInPlace(args: string[]) {
@@ -236,7 +252,9 @@ export function assertCommand(policy: SandboxToolPolicy, command: string) {
   }
 
   const normalizedCommand = command.includes("/")
-    ? (safeAbsoluteCommandDirs.has(dirname(command)) ? basename(command) : command)
+    ? (uniqueRoots([...safeAbsoluteCommandRoots]).some((root) => isPathWithinCommandRoot(dirname(command), root))
+      ? basename(command)
+      : command)
     : command;
 
   if (normalizedCommand.includes("/") || !policy.allowedCommands.includes(normalizedCommand)) {

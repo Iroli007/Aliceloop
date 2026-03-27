@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -177,6 +177,62 @@ async function main() {
     assert(tsxResult.stdout.includes("tsx-sandbox-ok"), "sandbox should resolve tsx without relying on PATH");
   } finally {
     process.env.PATH = originalPath;
+  }
+
+  const homebrewNodePath = "/opt/homebrew/bin/node";
+  if (existsSync(homebrewNodePath)) {
+    const absoluteNodeResult = await sandbox.runBash({
+      command: homebrewNodePath,
+      args: ["-e", `console.log("absolute-node-ok")`],
+      cwd: tempDataDir,
+    });
+    assert.equal(absoluteNodeResult.stdout.trim(), "absolute-node-ok");
+  }
+
+  const homebrewNpmPath = "/opt/homebrew/bin/npm";
+  if (existsSync(homebrewNpmPath)) {
+    const absoluteNpmResult = await sandbox.runBash({
+      command: homebrewNpmPath,
+      args: ["-v"],
+      cwd: tempDataDir,
+    });
+    assert.equal(absoluteNpmResult.stdout.trim().length > 0, true);
+  }
+
+  if (existsSync(process.execPath)) {
+    const execPathResult = await sandbox.runBash({
+      command: process.execPath,
+      args: ["-e", `console.log("process-exec-ok")`],
+      cwd: tempDataDir,
+    });
+    assert.equal(execPathResult.stdout.trim(), "process-exec-ok");
+  }
+
+  const voltaNodePath = join(homedir(), ".volta/bin/node");
+  if (existsSync(voltaNodePath)) {
+    const voltaNodeResult = await sandbox.runBash({
+      command: voltaNodePath,
+      args: ["-e", `console.log("volta-node-ok")`],
+      cwd: tempDataDir,
+    });
+    assert.equal(voltaNodeResult.stdout.trim(), "volta-node-ok");
+  }
+
+  const nvmVersionsDir = join(homedir(), ".nvm/versions/node");
+  if (existsSync(nvmVersionsDir)) {
+    const nvmNodePath = readdirSync(nvmVersionsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(nvmVersionsDir, entry.name, "bin", "node"))
+      .find((candidate) => existsSync(candidate));
+
+    if (nvmNodePath) {
+      const nvmNodeResult = await sandbox.runBash({
+        command: nvmNodePath,
+        args: ["-e", `console.log("nvm-node-ok")`],
+        cwd: tempDataDir,
+      });
+      assert.equal(nvmNodeResult.stdout.trim(), "nvm-node-ok");
+    }
   }
 
   let blockedHostRead = false;

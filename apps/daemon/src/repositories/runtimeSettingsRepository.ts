@@ -1,8 +1,10 @@
 import {
   defaultRuntimeSettings,
   normalizeAutoApproveToolRequests,
+  normalizeProviderKind,
   normalizeReasoningEffort,
   normalizeSandboxPermissionProfile,
+  type ProviderKind,
   type ReasoningEffort,
   type RuntimeSettings,
   type SandboxPermissionProfile,
@@ -17,6 +19,8 @@ interface RuntimeSettingsRow {
   sandboxProfile: string;
   autoApproveToolRequests: string | number | boolean | null;
   reasoningEffort: string;
+  toolProviderId: string | null;
+  toolModel: string | null;
   updatedAt: string;
 }
 
@@ -31,9 +35,9 @@ function ensureRuntimeSettingsRow() {
   db.prepare(
     `
       INSERT OR IGNORE INTO runtime_settings (
-        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, updated_at
+        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?
       )
     `,
   ).run(
@@ -41,6 +45,8 @@ function ensureRuntimeSettingsRow() {
     defaultRuntimeSettings.sandboxProfile,
     defaultRuntimeSettings.autoApproveToolRequests ? 1 : 0,
     defaultRuntimeSettings.reasoningEffort,
+    defaultRuntimeSettings.toolProviderId,
+    defaultRuntimeSettings.toolModel,
     now,
   );
   runtimeSettingsEnsured = true;
@@ -60,6 +66,8 @@ export function getRuntimeSettings(): RuntimeSettings {
           sandbox_profile AS sandboxProfile,
           auto_approve_tool_requests AS autoApproveToolRequests,
           reasoning_effort AS reasoningEffort,
+          tool_provider_id AS toolProviderId,
+          tool_model AS toolModel,
           updated_at AS updatedAt
         FROM runtime_settings
         WHERE id = ?
@@ -76,6 +84,8 @@ export function getRuntimeSettings(): RuntimeSettings {
     sandboxProfile: normalizeSandboxPermissionProfile(row.sandboxProfile),
     autoApproveToolRequests: normalizeAutoApproveToolRequests(row.autoApproveToolRequests),
     reasoningEffort: normalizeReasoningEffort(row.reasoningEffort),
+    toolProviderId: normalizeProviderKind(row.toolProviderId),
+    toolModel: row.toolModel?.trim() || null,
     updatedAt: row.updatedAt,
   };
 
@@ -86,12 +96,16 @@ export function updateRuntimeSettings(input: {
   sandboxProfile?: SandboxPermissionProfile;
   autoApproveToolRequests?: boolean;
   reasoningEffort?: ReasoningEffort;
+  toolProviderId?: ProviderKind | null;
+  toolModel?: string | null;
 }): RuntimeSettings {
   const current = getRuntimeSettings();
   const next: RuntimeSettings = {
     sandboxProfile: normalizeSandboxPermissionProfile(input.sandboxProfile ?? current.sandboxProfile),
     autoApproveToolRequests: input.autoApproveToolRequests ?? current.autoApproveToolRequests,
     reasoningEffort: normalizeReasoningEffort(input.reasoningEffort ?? current.reasoningEffort),
+    toolProviderId: input.toolProviderId === undefined ? current.toolProviderId : normalizeProviderKind(input.toolProviderId),
+    toolModel: input.toolModel === undefined ? current.toolModel : input.toolModel?.trim() || null,
     updatedAt: new Date().toISOString(),
   };
   const db = getDatabase();
@@ -99,14 +113,16 @@ export function updateRuntimeSettings(input: {
   db.prepare(
     `
       INSERT INTO runtime_settings (
-        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, updated_at
+        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?
       )
       ON CONFLICT(id) DO UPDATE SET
         sandbox_profile = excluded.sandbox_profile,
         auto_approve_tool_requests = excluded.auto_approve_tool_requests,
         reasoning_effort = excluded.reasoning_effort,
+        tool_provider_id = excluded.tool_provider_id,
+        tool_model = excluded.tool_model,
         updated_at = excluded.updated_at
     `,
   ).run(
@@ -114,6 +130,8 @@ export function updateRuntimeSettings(input: {
     next.sandboxProfile,
     next.autoApproveToolRequests ? 1 : 0,
     next.reasoningEffort,
+    next.toolProviderId,
+    next.toolModel,
     next.updatedAt,
   );
 

@@ -53,7 +53,7 @@ function internalError(response: ServerResponse, error: unknown) {
 export class ChromeRelayHttpServer {
   private readonly service: ChromeRelayService;
 
-  private readonly token: string;
+  private token: string;
 
   private server: Server | null = null;
 
@@ -70,6 +70,23 @@ export class ChromeRelayHttpServer {
     }
 
     return this.service.getCapability(this.baseUrl, this.token);
+  }
+
+  getStatus() {
+    return {
+      browserRelay: this.getMeta()?.browserRelay ?? null,
+      attachedTabs: this.service.getAttachedTabCount(),
+    };
+  }
+
+  regenerateToken() {
+    this.token = randomUUID();
+    return this.getStatus();
+  }
+
+  async launchChrome() {
+    await this.service.launchChrome();
+    return this.getStatus();
   }
 
   private isAuthorized(request: IncomingMessage) {

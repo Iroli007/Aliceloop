@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
@@ -28,13 +28,6 @@ function getBuiltInProjectDefinitions() {
       path: join(workspacesRoot, "default"),
       kind: "workspace" as const,
       isDefault: 1,
-    },
-    {
-      id: "workspace-temp",
-      name: "Temp Session",
-      path: join(workspacesRoot, "temp"),
-      kind: "temporary" as const,
-      isDefault: 0,
     },
   ];
 }
@@ -142,6 +135,45 @@ function getProjectRowByPath(projectPath: string): ProjectRow | undefined {
   ).get(projectPath) as ProjectRow | undefined;
 }
 
+function purgeLegacyTemporaryProjects() {
+  const db = getDatabase();
+  const temporaryProjects = db.prepare(
+    `
+      SELECT id, path
+      FROM projects
+      WHERE kind = 'temporary'
+    `,
+  ).all() as Array<{ id: string; path: string }>;
+
+  if (temporaryProjects.length === 0) {
+    return;
+  }
+
+  db.transaction(() => {
+    db.prepare(
+      `
+        DELETE FROM sessions
+        WHERE project_id IN (
+          SELECT id
+          FROM projects
+          WHERE kind = 'temporary'
+        )
+      `,
+    ).run();
+
+    db.prepare(
+      `
+        DELETE FROM projects
+        WHERE kind = 'temporary'
+      `,
+    ).run();
+  })();
+
+  for (const project of temporaryProjects) {
+    rmSync(project.path, { recursive: true, force: true });
+  }
+}
+
 function getWorkspaceFallbackProjectId(excludingProjectId: string) {
   const db = getDatabase();
   const row = db.prepare(
@@ -180,6 +212,8 @@ function ensureProjectDirectoriesSeeded() {
   const db = getDatabase();
   const now = new Date().toISOString();
   const builtIns = getBuiltInProjectDefinitions();
+
+  purgeLegacyTemporaryProjects();
 
   db.transaction(() => {
     for (const project of builtIns) {
@@ -348,9 +382,6 @@ export function createProjectDirectory(input: {
   const kind = input.kind ?? "workspace";
   const normalizedPath = normalizeProjectDirectoryPath(input.path);
   const name = normalizeProjectDirectoryName(input.name, normalizedPath);
-  if (kind === "temporary" && input.isDefault) {
-    throw new ProjectDirectoryValidationError("temporary_project_cannot_be_default");
-  }
 
   const existingByPath = getProjectRowByPath(normalizedPath);
   if (existingByPath) {
@@ -406,10 +437,6 @@ export function updateProjectDirectory(input: {
   const existing = getProjectRow(input.id);
   if (!existing) {
     throw new ProjectDirectoryNotFoundError(input.id);
-  }
-
-  if (existing.kind === "temporary" && input.isDefault) {
-    throw new ProjectDirectoryValidationError("temporary_project_cannot_be_default");
   }
 
   const nextPath = input.path ? normalizeProjectDirectoryPath(input.path) : existing.path;

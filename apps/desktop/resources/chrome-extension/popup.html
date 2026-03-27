@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      color: #1a1a1a;
+      background: #ffffff;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid #e5e5e5;
+      background: #fafafa;
+    }
+
+    .header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      flex: 1;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .status-dot.connected {
+      background: #4CAF50;
+      box-shadow: 0 0 4px rgba(76, 175, 80, 0.5);
+    }
+
+    .status-dot.connecting {
+      background: #FFC107;
+      box-shadow: 0 0 4px rgba(255, 193, 7, 0.5);
+      animation: pulse 1.5s infinite;
+    }
+
+    .status-dot.disconnected {
+      background: #F44336;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .section {
+      padding: 12px 16px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+
+    .section-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+    }
+
+    .info-label {
+      color: #666;
+    }
+
+    .info-value {
+      font-weight: 500;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      font-size: 12px;
+    }
+
+    .status-text {
+      font-weight: 500;
+    }
+
+    .status-text.connected { color: #4CAF50; }
+    .status-text.connecting { color: #FFC107; }
+    .status-text.disconnected { color: #F44336; }
+
+    .tab-list {
+      list-style: none;
+      max-height: 160px;
+      overflow-y: auto;
+    }
+
+    .tab-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid #f5f5f5;
+    }
+
+    .tab-item:last-child {
+      border-bottom: none;
+    }
+
+    .tab-title {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+
+    .tab-id {
+      color: #aaa;
+      font-size: 11px;
+      font-family: monospace;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 5px 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 12px;
+      color: #333;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .btn:hover {
+      background: #f5f5f5;
+      border-color: #ccc;
+    }
+
+    .btn-sm {
+      padding: 2px 8px;
+      font-size: 11px;
+    }
+
+    .btn-primary {
+      background: #4A90D9;
+      color: #fff;
+      border-color: #3a7bc8;
+    }
+
+    .btn-primary:hover {
+      background: #3a7bc8;
+    }
+
+    .btn-danger {
+      color: #F44336;
+      border-color: #F44336;
+    }
+
+    .btn-danger:hover {
+      background: #FFF5F5;
+    }
+
+    .btn-full {
+      width: 100%;
+      margin-top: 8px;
+    }
+
+    .empty-state {
+      color: #999;
+      font-size: 12px;
+      font-style: italic;
+      padding: 4px 0;
+    }
+
+    .footer {
+      padding: 10px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .footer a {
+      color: #4A90D9;
+      text-decoration: none;
+      font-size: 12px;
+    }
+
+    .footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div id="statusDot" class="status-dot disconnected"></div>
+    <h1>Chrome Relay</h1>
+  </div>
+
+  <div class="section">
+    <div class="info-row">
+      <span class="info-label">Status</span>
+      <span id="statusText" class="status-text disconnected">Disconnected</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Server</span>
+      <span id="serverAddr" class="info-value">127.0.0.1:23001</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Attached Tabs</div>
+    <ul id="tabList" class="tab-list">
+      <li class="empty-state">No tabs attached</li>
+    </ul>
+    <button id="attachBtn" class="btn btn-primary btn-full">Attach Current Tab</button>
+  </div>
+
+  <div class="footer">
+    <a id="optionsLink" href="#">Settings</a>
+    <button id="reconnectBtn" class="btn btn-sm">Reconnect</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

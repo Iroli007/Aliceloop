@@ -71,6 +71,14 @@ export function SettingsPanel() {
             </div>
           </div>
           <h2 style={{ margin: 0, fontSize: "14px", fontWeight: 600 }}>全局设置</h2>
+          <button
+            className="settings-actions__button settings-actions__button--primary"
+            style={{ marginLeft: "auto" }}
+            type="button"
+            onClick={() => void desktopBridge.openChromeRelay()}
+          >
+            Chrome Relay
+          </button>
         </header>
 
         <div className="settings-content__body">

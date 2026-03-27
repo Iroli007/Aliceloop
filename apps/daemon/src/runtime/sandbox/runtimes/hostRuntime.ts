@@ -648,7 +648,7 @@ async function deletePath(context: SandboxRuntimeContext, input: DeletePathInput
   };
   const approval = {
     title: "等待确认删除文件",
-    detail: `即将删除 ${targetPath}。确认后只执行这一次删除。`,
+    detail: `即将删除 ${targetPath}。你可以直接在聊天里回复“可以删除”继续，或者回复“取消”拒绝。`,
     commandLine: targetPath,
     command: "delete",
     args: [targetPath],
@@ -696,7 +696,7 @@ async function runBashAsDelete(context: SandboxRuntimeContext, command: string, 
   const results: string[] = [];
   await requestDeleteApproval(context, {
     title: "等待确认删除命令",
-    detail: `即将通过 ${command} 删除以下路径：${pathArgs.join(", ")}。确认后只执行这一次删除。`,
+    detail: `即将通过 ${command} 删除以下路径：${pathArgs.join(", ")}。你可以直接在聊天里回复“可以删除”继续，或者回复“取消”拒绝。`,
     commandLine: summarizeCommandLine(command, args),
     command,
     args,

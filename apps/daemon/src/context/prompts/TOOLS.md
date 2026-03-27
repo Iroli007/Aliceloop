@@ -3,11 +3,13 @@
 ## Architecture Rule
 
 - The six sandbox primitives `bash`, `grep`, `glob`, `read`, `write`, and `edit` are the always-on native tools.
-- Everything outside those six should arrive through skill routing, not by silently expanding the primitive tool base.
+- Everything outside those six should arrive through the direct tool router or routed skill tools, not by silently expanding the primitive tool base.
 - If the agent needs better capability coverage for a turn, improve skill routing accuracy so the right skill tools are attached; do not keep adding one-off permanent tools to the base layer.
 - Treat routed skill tools as turn-scoped capabilities. The existence of a skill in the catalog does not mean every skill tool is attached in every turn.
 - High-availability routing rule: preserve the relevant capability group across short continuation turns so critical routed skills do not disappear mid-workflow.
 - Do this by carrying forward the right routed skill group and its core companion skills for the current turn, not by loading the entire skill catalog.
+- Deep memory stays skill-driven: profile/fact recall and episodic history should be reached through the routed memory skills, not auto-injected into the prompt as a separate memory load layer.
+- Binary image attachments are not readable with `read`; use the routed `view_image` tool to inspect a local image file when the user asks what is shown in it.
 
 - `glob`
   Strictly used to find files and directories in the current workspace by name or wildcard.
@@ -35,10 +37,17 @@
   Use case: Fixing bugs, adding a few lines of logic, or modifying specific functions.
   RULE: You must provide the exact original code block to be replaced and the new replacement code block. Do not output the entire file content.
 
+- Within the Aliceloop workspace, `node`, `npm`, `rm`, and `sed` are normal bash commands and should be used when they are the shortest path to the requested change, including common Homebrew, nvm, and Volta install paths.
+  `rm` and `rmdir` still route through the separate delete confirmation flow, and the user can answer it directly in chat.
+
 - Temporary helper files
   You may create temporary helper scripts or files with `write` or `edit`, execute them with `bash`, and delete them afterward when they are no longer needed.
   Treat them as disposable implementation details, not as new first-class tools.
   Do not invent or register a new tool when the existing tools plus a temporary helper file are enough.
+
+- When `bash` is available for the current turn, use it to execute the needed command instead of replying with the command text as plain assistant output.
+  If a routed skill shows command examples such as `aliceloop memory search ...`, `aliceloop thread info ...`, `ls`, or `pwd`, those examples are executable actions, not suggested prose.
+  Prefer running the command and answering from the result.
 
 ## Attachments
 
@@ -64,7 +73,7 @@ When a tool returns a JSON error with `error` and `hint`, treat that as a runtim
 
 ## Immediate Verification
 
-- When the user asks for the current local time, date, or weekday, verify it first with the routed `system-info` skill. In practice, it can use `bash` with an exact command such as `date` instead of guessing these values from memory.
+- When the user asks for the current local time, date, or weekday, or the wording is time-sensitive such as `最近` / `最新` / `当前`, use the routed `system-info` skill and run `date` instead of guessing these values from memory.
 - When the user asks about current or date-specific weather, verify it with the existing research path. In practice, use `web_search` to find a fresh source and `web_fetch` to confirm the details instead of improvising temperatures, forecasts, or calendar dates from memory.
 - After verifying a time/date or weather answer, respond from the verified output only. Do not tack on unrelated comparisons, stale remembered context, or decorative speculation.
 - More generally, if a question can be answered exactly by an existing tool or research skill, verify first instead of freehanding an answer.

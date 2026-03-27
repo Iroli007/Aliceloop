@@ -4,6 +4,8 @@ import type {
   CreateMemoryInput,
   Memory,
   MemoryConfig,
+  MemoryFactKind,
+  MemoryFactState,
   MemoryNote,
   MemoryStats,
   MemoryWithScore,
@@ -42,6 +44,9 @@ interface MemoryRow {
   content: string;
   source: Memory["source"];
   durability: Memory["durability"];
+  factKind: MemoryFactKind | null;
+  factKey: string | null;
+  factState: MemoryFactState;
   createdAt: string;
   updatedAt: string;
   accessCount: number;
@@ -157,6 +162,23 @@ function parseJsonArray(value: string | null | undefined) {
   }
 }
 
+function normalizeFactKey(value: string | null | undefined) {
+  const normalized = value?.trim().toLowerCase().replace(/\s+/g, "-") ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeFactKind(value: MemoryFactKind | null | undefined): MemoryFactKind | null {
+  return value ?? null;
+}
+
+function normalizeFactState(value: MemoryFactState | null | undefined): MemoryFactState {
+  return value ?? "active";
+}
+
+function hasFactIdentity(memory: Pick<Memory, "factKind" | "factKey">) {
+  return Boolean(memory.factKind && memory.factKey);
+}
+
 const lexicalStopWords = new Set([
   "a",
   "an",
@@ -212,6 +234,9 @@ function mapMemoryRow(row: MemoryRow): Memory {
     content: row.content,
     source: row.source,
     durability: row.durability,
+    factKind: row.factKind,
+    factKey: row.factKey,
+    factState: row.factState,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     accessCount: row.accessCount,
@@ -231,6 +256,9 @@ function getMemoryRowById(
           content,
           source,
           durability,
+          fact_kind AS factKind,
+          fact_key AS factKey,
+          fact_state AS factState,
           created_at AS createdAt,
           updated_at AS updatedAt,
           access_count AS accessCount,
@@ -259,7 +287,7 @@ function scoreTextMatch(queryText: string, memory: Memory) {
     return 0;
   }
 
-  const haystack = [memory.content, ...memory.relatedTopics].join(" ").toLowerCase();
+  const haystack = [memory.factKind ?? "", memory.factKey ?? "", memory.content, ...memory.relatedTopics].join(" ").toLowerCase();
   const matchedTerms = significantTerms.filter((term) => haystack.includes(term));
   if (matchedTerms.length === 0) {
     return 0;
@@ -269,12 +297,15 @@ function scoreTextMatch(queryText: string, memory: Memory) {
   const topicBonus = matchedTerms.some((term) => memory.relatedTopics.some((topic) => topic.toLowerCase().includes(term)))
     ? 0.15
     : 0;
+  const factKeyBonus = memory.factKey && queryText.trim().toLowerCase().includes(memory.factKey.toLowerCase())
+    ? 0.2
+    : 0;
   const exactPhraseBonus = haystack.includes(queryText.trim().toLowerCase()) ? 0.2 : 0;
 
-  return Math.min(1, coverage + topicBonus + exactPhraseBonus);
+  return Math.min(1, coverage + topicBonus + factKeyBonus + exactPhraseBonus);
 }
 
-async function clearMemoryEmbedding(memoryId: string, db: Database.Database = getDatabase()) {
+function clearMemoryEmbedding(memoryId: string, db: Database.Database = getDatabase()) {
   db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memoryId);
   db.prepare("DELETE FROM memory_metadata WHERE memory_id = ?").run(memoryId);
 }
@@ -340,8 +371,8 @@ function searchMemoriesByText(
   const clauses: string[] = [];
   const params: Array<string | number> = [];
   for (const term of lexicalTerms) {
-    clauses.push("(content LIKE ? OR related_topics LIKE ?)");
-    params.push(`%${term}%`, `%${term}%`);
+    clauses.push("(content LIKE ? OR related_topics LIKE ? OR fact_key LIKE ? OR fact_kind LIKE ?)");
+    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
   }
   params.push(Math.max(limit * 3, limit));
 
@@ -353,12 +384,16 @@ function searchMemoriesByText(
           content,
           source,
           durability,
+          fact_kind AS factKind,
+          fact_key AS factKey,
+          fact_state AS factState,
           created_at AS createdAt,
           updated_at AS updatedAt,
           access_count AS accessCount,
           related_topics AS relatedTopics
         FROM memories
-        WHERE ${clauses.join(" OR ")}
+        WHERE fact_state = 'active'
+          AND (${clauses.join(" OR ")})
         ORDER BY access_count DESC, updated_at DESC
         LIMIT ?
       `,
@@ -679,16 +714,60 @@ export async function createMemory(
   }
 
   const now = new Date().toISOString();
+  const factKind = normalizeFactKind(input.factKind);
+  const factKey = normalizeFactKey(input.factKey);
+  const factState = normalizeFactState(input.factState);
+  const relatedTopics = input.relatedTopics?.map((topic) => topic.trim()).filter(Boolean) ?? [];
   const memory: Memory = {
     id: randomUUID(),
     content,
     source: input.source,
     durability: input.durability,
+    factKind,
+    factKey,
+    factState,
     createdAt: now,
     updatedAt: now,
     accessCount: 0,
-    relatedTopics: input.relatedTopics?.map((topic) => topic.trim()).filter(Boolean) ?? [],
+    relatedTopics,
   };
+
+  if (hasFactIdentity(memory)) {
+    const existing = findActiveMemoryByFactIdentity(memory.factKind, memory.factKey, db);
+    if (existing) {
+      if (memory.factState !== "active") {
+        db.prepare(
+          `
+            UPDATE memories
+            SET fact_state = ?,
+                updated_at = ?
+            WHERE id = ?
+          `,
+        ).run(memory.factState, now, existing.id);
+        clearMemoryEmbedding(existing.id, db);
+        return getMemoryById(existing.id, db) ?? existing;
+      }
+
+      if (existing.content === memory.content) {
+        return existing;
+      }
+
+      db.prepare(
+        `
+          UPDATE memories
+          SET fact_state = 'superseded',
+              updated_at = ?
+          WHERE id = ?
+        `,
+      ).run(now, existing.id);
+      clearMemoryEmbedding(existing.id, db);
+    }
+  } else {
+    const duplicate = findMemoryByExactContent(content, db);
+    if (duplicate) {
+      return duplicate;
+    }
+  }
 
   db.prepare(
     `
@@ -697,28 +776,38 @@ export async function createMemory(
         content,
         source,
         durability,
+        fact_kind,
+        fact_key,
+        fact_state,
         created_at,
         updated_at,
         access_count,
         related_topics
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     memory.id,
     memory.content,
     memory.source,
     memory.durability,
+    memory.factKind,
+    memory.factKey,
+    memory.factState,
     memory.createdAt,
     memory.updatedAt,
     memory.accessCount,
     JSON.stringify(memory.relatedTopics),
   );
 
-  try {
-    const config = getMemoryConfig(db);
-    await upsertMemoryEmbedding(memory, config, db, abortSignal);
-  } catch (error) {
-    console.warn("[memory] Failed to generate embedding for memory creation", error);
+  if (memory.factState === "active") {
+    try {
+      const config = getMemoryConfig(db);
+      await upsertMemoryEmbedding(memory, config, db, abortSignal);
+    } catch (error) {
+      console.warn("[memory] Failed to generate embedding for memory creation", error);
+    }
+  } else {
+    clearMemoryEmbedding(memory.id, db);
   }
 
   return memory;
@@ -835,7 +924,9 @@ export async function searchMemories(
           metadata.embedding_dimension AS embeddingDimension
         FROM memory_embeddings embeddings
         JOIN memory_metadata metadata ON metadata.memory_id = embeddings.memory_id
+        JOIN memories m ON m.id = embeddings.memory_id
         WHERE metadata.embedding_dimension = ?
+          AND m.fact_state = 'active'
       `,
     )
     .all(config.embeddingDimension) as MemoryEmbeddingRow[];
@@ -990,17 +1081,54 @@ export function findMemoryByExactContent(content: string, db: Database.Database 
           content,
           source,
           durability,
+          fact_kind AS factKind,
+          fact_key AS factKey,
+          fact_state AS factState,
           created_at AS createdAt,
           updated_at AS updatedAt,
           access_count AS accessCount,
           related_topics AS relatedTopics
         FROM memories
         WHERE content = ?
+          AND fact_state = 'active'
         ORDER BY updated_at DESC
         LIMIT 1
       `,
     )
     .get(content.trim()) as MemoryRow | undefined;
+
+  return row ? mapMemoryRow(row) : null;
+}
+
+function findActiveMemoryByFactIdentity(
+  factKind: MemoryFactKind,
+  factKey: string,
+  db: Database.Database = getDatabase(),
+) {
+  const row = db
+    .prepare(
+      `
+        SELECT
+          id,
+          content,
+          source,
+          durability,
+          fact_kind AS factKind,
+          fact_key AS factKey,
+          fact_state AS factState,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          access_count AS accessCount,
+          related_topics AS relatedTopics
+        FROM memories
+        WHERE fact_kind = ?
+          AND fact_key = ?
+          AND fact_state = 'active'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `,
+    )
+    .get(factKind, factKey) as MemoryRow | undefined;
 
   return row ? mapMemoryRow(row) : null;
 }
@@ -1021,10 +1149,53 @@ export async function updateMemory(
     throw new Error("memory_content_required");
   }
 
+  const nextFactKind = updates.factKind !== undefined ? normalizeFactKind(updates.factKind) : current.factKind;
+  const nextFactKey = updates.factKey !== undefined ? normalizeFactKey(updates.factKey) : current.factKey;
+  const nextFactState = normalizeFactState(updates.factState ?? current.factState);
   const nextRelatedTopics = updates.relatedTopics
     ? updates.relatedTopics.map((topic) => topic.trim()).filter(Boolean)
     : current.relatedTopics;
   const nextUpdatedAt = new Date().toISOString();
+
+  if (nextFactState === "active" && nextFactKind && nextFactKey) {
+    const conflicting = db
+      .prepare(
+        `
+          SELECT
+            id,
+            content,
+            source,
+            durability,
+            fact_kind AS factKind,
+            fact_key AS factKey,
+            fact_state AS factState,
+            created_at AS createdAt,
+            updated_at AS updatedAt,
+            access_count AS accessCount,
+            related_topics AS relatedTopics
+          FROM memories
+          WHERE fact_kind = ?
+            AND fact_key = ?
+            AND fact_state = 'active'
+            AND id <> ?
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `,
+      )
+      .get(nextFactKind, nextFactKey, memoryId) as MemoryRow | undefined;
+
+    if (conflicting) {
+      db.prepare(
+        `
+          UPDATE memories
+          SET fact_state = 'superseded',
+              updated_at = ?
+          WHERE id = ?
+        `,
+      ).run(nextUpdatedAt, conflicting.id);
+      clearMemoryEmbedding(conflicting.id, db);
+    }
+  }
 
   db.prepare(
     `
@@ -1032,6 +1203,9 @@ export async function updateMemory(
       SET
         content = ?,
         durability = ?,
+        fact_kind = ?,
+        fact_key = ?,
+        fact_state = ?,
         related_topics = ?,
         updated_at = ?
       WHERE id = ?
@@ -1039,12 +1213,20 @@ export async function updateMemory(
   ).run(
     nextContent,
     updates.durability ?? current.durability,
+    nextFactKind,
+    nextFactKey,
+    nextFactState,
     JSON.stringify(nextRelatedTopics),
     nextUpdatedAt,
     memoryId,
   );
 
-  if (updates.content !== undefined) {
+  if (updates.content !== undefined || updates.factKind !== undefined || updates.factKey !== undefined || updates.factState !== undefined) {
+    if (nextFactState !== "active") {
+      clearMemoryEmbedding(memoryId, db);
+      return getMemoryById(memoryId, db);
+    }
+
     try {
       const config = getMemoryConfig(db);
       await upsertMemoryEmbedding({ id: memoryId, content: nextContent }, config, db, abortSignal);
@@ -1058,6 +1240,25 @@ export async function updateMemory(
 }
 
 export function deleteMemory(memoryId: string, db: Database.Database = getDatabase()) {
+  const current = getMemoryById(memoryId, db);
+  if (!current) {
+    return false;
+  }
+
+  if (current.factKind && current.factKey) {
+    const updatedAt = new Date().toISOString();
+    db.prepare(
+      `
+        UPDATE memories
+        SET fact_state = 'retracted',
+            updated_at = ?
+        WHERE id = ?
+      `,
+    ).run(updatedAt, memoryId);
+    clearMemoryEmbedding(memoryId, db);
+    return true;
+  }
+
   const result = db
     .prepare(
       `
@@ -1100,12 +1301,15 @@ export function listMemories(
       content,
       source,
       durability,
+      fact_kind AS factKind,
+      fact_key AS factKey,
+      fact_state AS factState,
       created_at AS createdAt,
       updated_at AS updatedAt,
       access_count AS accessCount,
       related_topics AS relatedTopics
     FROM memories
-    WHERE 1 = 1
+    WHERE fact_state = 'active'
   `;
 
   if (source) {
@@ -1145,6 +1349,7 @@ export async function rebuildAllEmbeddings(
           id,
           content
         FROM memories
+        WHERE fact_state = 'active'
         ORDER BY created_at ASC
       `,
     )

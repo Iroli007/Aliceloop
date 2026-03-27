@@ -1,9 +1,12 @@
-import { type ProjectDirectory } from "@aliceloop/runtime-core";
+import { type MemoryEmbeddingModel, type ProjectDirectory, type ProviderKind, type ProviderTransportKind } from "@aliceloop/runtime-core";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../src/styles/tokens.css";
 import "../src/styles/app.css";
 import { getDesktopBridge } from "../src/platform/desktopBridge";
+import { useMemoryConfig } from "../src/features/memory/useMemoryConfig";
+import { useProviderConfigs } from "../src/features/providers/useProviderConfigs";
+import { useRuntimeSettings } from "../src/features/shell/useRuntimeSettings";
 
 const navItems = [
   {
@@ -15,8 +18,14 @@ const navItems = [
   {
     id: "providers",
     label: "模型提供商",
-    title: "模型提供商",
-    description: "接下来这里可以放 provider 列表、启用状态和模型默认项。",
+    title: "全局模型提供商",
+    description: "这里是全局 provider 配置，会同步影响主入口和各会话的默认模型路由。",
+  },
+  {
+    id: "relay",
+    label: "网络机器人",
+    title: "网络机器人",
+    description: "把网络机器人和扩展配好，后面的浏览器任务就能复用真实登录态。",
   },
   {
     id: "memory",
@@ -33,7 +42,59 @@ const navItems = [
 ] as const;
 
 type SettingsSectionId = (typeof navItems)[number]["id"];
-type ProjectKind = "workspace" | "temporary";
+type ProjectKind = "workspace";
+
+const providerMonograms: Record<string, string> = {
+  minimax: "MM",
+  gemini: "GM",
+  moonshot: "K2",
+  deepseek: "DS",
+  zhipu: "GLM",
+  aihubmix: "AH",
+  openai: "OA",
+  anthropic: "CL",
+  openrouter: "OR",
+};
+
+const providerDescriptions: Record<string, string> = {
+  minimax: "MiniMax 默认走 Anthropic-compatible 接口，也可以接兼容该格式的第三方中转站。",
+  gemini: "Google Gemini 默认走 OpenAI-compatible 接口，官方兼容端点是 v1beta/openai。",
+  moonshot: "Kimi / Moonshot 默认走 OpenAI-compatible 接口。",
+  deepseek: "DeepSeek 默认走 OpenAI-compatible 接口。",
+  zhipu: "智谱 GLM 默认走 OpenAI-compatible 接口。",
+  aihubmix: "AIHubMix 适合做多模型聚合和第三方中转站入口。",
+  openai: "官方 OpenAI，也可以接任意 OpenAI-compatible 中转站。",
+  anthropic: "Claude 官方直连入口，也可以接任意 Anthropic-compatible 中转站。",
+  openrouter: "OpenRouter 聚合多家模型，默认走 OpenAI-compatible 接口。",
+};
+
+const embeddingModelDefinitions: Array<{
+  id: MemoryEmbeddingModel;
+  label: string;
+  dimension: number;
+}> = [
+  {
+    id: "text-embedding-3-small",
+    label: "text-embedding-3-small",
+    dimension: 1536,
+  },
+  {
+    id: "text-embedding-3-large",
+    label: "text-embedding-3-large",
+    dimension: 3072,
+  },
+];
+
+function formatProviderTransportLabel(transport: ProviderTransportKind) {
+  switch (transport) {
+    case "anthropic":
+      return "Anthropic-compatible";
+    case "openai-compatible":
+      return "OpenAI-compatible";
+    default:
+      return "Auto";
+  }
+}
 
 interface ProjectItem {
   id: string;
@@ -42,16 +103,6 @@ interface ProjectItem {
   kind: ProjectKind;
   isDefault: boolean;
   sessionCount: number;
-}
-
-const showTemporaryDirectoriesStorageKey = "aliceloop-settings-show-temporary";
-
-function readStoredShowTemporaryDirectories() {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  return window.localStorage.getItem(showTemporaryDirectoriesStorageKey) === "1";
 }
 
 function sortProjectItems(items: ProjectItem[]) {
@@ -92,8 +143,6 @@ function describeProjectApiError(errorCode?: string) {
       return "项目名称不能为空。";
     case "project_path_already_exists":
       return "这个目录已经在项目列表中了。";
-    case "temporary_project_cannot_be_default":
-      return "临时目录不能设为默认项目。";
     case "default_workspace_project_required":
       return "至少需要保留一个默认工作区项目。";
     case "project_not_found":
@@ -107,6 +156,10 @@ function describeProjectApiError(errorCode?: string) {
 
 function getErrorMessage(error: unknown, fallbackMessage: string) {
   return error instanceof Error ? error.message : fallbackMessage;
+}
+
+function formatSimilarityPercent(value: number) {
+  return `${Math.round(value * 100)}%`;
 }
 
 async function fetchProjectItems(baseUrl: string) {
@@ -156,6 +209,18 @@ function SectionIcon({
           </svg>
         </span>
       );
+    case "relay":
+      return (
+        <span className={className} aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="7.5" />
+            <path d="M12 4.5v15" />
+            <path d="M4.5 12h15" />
+            <path d="M6.5 7.5c1.6 1 3.5 1.6 5.5 1.6s3.9-.6 5.5-1.6" />
+            <path d="M6.5 16.5c1.6-1 3.5-1.6 5.5-1.6s3.9.6 5.5 1.6" />
+          </svg>
+        </span>
+      );
     case "memory":
       return (
         <span className={className} aria-hidden="true">
@@ -196,6 +261,12 @@ function renderSectionCards(sectionId: SettingsSectionId) {
         ["Provider 列表", "展示不同模型提供商、默认模型和启用状态。"],
         ["请求策略", "预留超时、重试和默认路由之类的配置。"],
       ];
+    case "relay":
+      return [
+        ["打开详细窗口", "这里先带你看一遍流程，真正的 token、状态和启动按钮在详细配置窗口里。"],
+        ["启动 Chrome", "桌面端会先起本地 Relay 服务，再用独立 profile 启动 Chrome。"],
+        ["启用扩展", "Chrome Relay 扩展会自动读取本机配置；如果没连上，就在扩展设置里手动粘贴。"],
+      ];
     case "memory":
       return [
         ["长期记忆", "管理可以跨会话保留的规则、偏好和身份信息。"],
@@ -213,28 +284,57 @@ function renderSectionCards(sectionId: SettingsSectionId) {
 
 function SettingsApp() {
   const desktopBridge = useMemo(() => getDesktopBridge(), []);
+  const providerState = useProviderConfigs();
+  const runtimeSettings = useRuntimeSettings();
+  const memoryConfig = useMemoryConfig();
   const [activeSectionId, setActiveSectionId] = useState<SettingsSectionId>("project");
   const [daemonBaseUrl, setDaemonBaseUrl] = useState<string | null>(null);
   const [projectItems, setProjectItems] = useState<ProjectItem[]>([]);
-  const [showTemporaryDirectories, setShowTemporaryDirectories] = useState(() => readStoredShowTemporaryDirectories());
   const [projectStatus, setProjectStatus] = useState<"loading" | "ready" | "error">("loading");
   const [projectPending, setProjectPending] = useState(false);
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
+  const [activeProviderId, setActiveProviderId] = useState("");
+  const [providerApiKeyInput, setProviderApiKeyInput] = useState("");
+  const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("");
+  const [providerModelInput, setProviderModelInput] = useState("");
+  const [providerEnabled, setProviderEnabled] = useState(false);
+  const [providerNotice, setProviderNotice] = useState<string | null>(null);
+  const [providerSearchQuery, setProviderSearchQuery] = useState("");
+  const [toolProviderIdInput, setToolProviderIdInput] = useState<ProviderKind | "">("");
+  const [toolModelInput, setToolModelInput] = useState("");
+  const [toolModelNotice, setToolModelNotice] = useState<string | null>(null);
+  const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
+  const [memoryEnabledInput, setMemoryEnabledInput] = useState(true);
+  const [memoryAutoRetrievalInput, setMemoryAutoRetrievalInput] = useState(true);
+  const [memoryQueryRewriteInput, setMemoryQueryRewriteInput] = useState(false);
+  const [memoryAutoSummarizeInput, setMemoryAutoSummarizeInput] = useState(true);
+  const [memoryMaxRetrievalInput, setMemoryMaxRetrievalInput] = useState(8);
+  const [memorySimilarityThresholdInput, setMemorySimilarityThresholdInput] = useState(0.7);
+  const [memoryEmbeddingModelInput, setMemoryEmbeddingModelInput] = useState<MemoryEmbeddingModel>("text-embedding-3-small");
 
   const activeSection = navItems.find((item) => item.id === activeSectionId) ?? navItems[0];
   const sectionCards = activeSection.id === "project" ? [] : renderSectionCards(activeSection.id);
-  const visibleProjectItems = sortProjectItems(
-    projectItems.filter((project) => showTemporaryDirectories || project.kind !== "temporary"),
-  );
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
+  const visibleProjectItems = sortProjectItems(projectItems);
+  const providers = providerState.providers;
+  const filteredProviders = providers.filter((provider) => {
+    const query = providerSearchQuery.trim().toLowerCase();
+    if (!query) {
+      return true;
     }
 
-    window.localStorage.setItem(showTemporaryDirectoriesStorageKey, showTemporaryDirectories ? "1" : "0");
-  }, [showTemporaryDirectories]);
+    return provider.label.toLowerCase().includes(query)
+      || provider.id.toLowerCase().includes(query)
+      || formatProviderTransportLabel(provider.transport).toLowerCase().includes(query);
+  });
+  const activeProvider = filteredProviders.find((provider) => provider.id === activeProviderId)
+    ?? providers.find((provider) => provider.id === activeProviderId)
+    ?? filteredProviders[0]
+    ?? providers[0]
+    ?? null;
+  const activeProviderModelCatalog = activeProvider
+    ? providerState.modelCatalogs[activeProvider.id]
+    : undefined;
 
   async function ensureDaemonBaseUrl() {
     if (daemonBaseUrl) {
@@ -291,76 +391,45 @@ function SettingsApp() {
     };
   }, [desktopBridge]);
 
-  async function handleAddProject() {
-    const selection = await desktopBridge.openProjectDirectories();
-    if (selection.canceled || selection.directories.length === 0) {
+  useEffect(() => {
+    if (providers.length === 0) {
       return;
     }
 
-    try {
-      const baseUrl = await ensureDaemonBaseUrl();
-      let addedCount = 0;
-      let duplicatesCount = 0;
-      let failureCount = 0;
-      let failureMessage: string | null = null;
-
-      setProjectPending(true);
-      setProjectNotice(null);
-      setProjectError(null);
-
-      for (const directory of selection.directories) {
-        const response = await fetch(`${baseUrl}/api/projects`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            name: directory.name,
-            path: directory.path,
-            kind: "workspace",
-          }),
-        });
-
-        if (response.ok) {
-          addedCount += 1;
-          continue;
-        }
-
-        const errorCode = await readApiErrorCode(response);
-        if (errorCode === "project_path_already_exists") {
-          duplicatesCount += 1;
-          continue;
-        }
-
-        failureCount += 1;
-        failureMessage ??= describeProjectApiError(errorCode);
-      }
-
-      await refreshProjectItems(baseUrl);
-
-      if (addedCount === 0 && duplicatesCount > 0 && failureCount === 0) {
-        setProjectNotice("所选目录已经在列表中了。");
-        return;
-      }
-
-      const messageParts = [
-        addedCount > 0 ? `已添加 ${addedCount} 个项目。` : null,
-        duplicatesCount > 0 ? `跳过 ${duplicatesCount} 个重复目录。` : null,
-        failureCount > 0 ? (failureMessage ?? `还有 ${failureCount} 个项目添加失败。`) : null,
-      ].filter(Boolean);
-
-      setProjectNotice(messageParts.join(" "));
-    } catch (error) {
-      setProjectError(getErrorMessage(error, "添加项目失败。"));
-    } finally {
-      setProjectPending(false);
+    if (!providers.some((provider) => provider.id === activeProviderId)) {
+      setActiveProviderId(providers[0].id);
     }
-  }
+  }, [activeProviderId, providers]);
 
-  async function handleOpenProject(project: ProjectItem) {
+  useEffect(() => {
+    if (!activeProvider) {
+      return;
+    }
+
+    setProviderBaseUrlInput(activeProvider.baseUrl);
+    setProviderModelInput(activeProvider.model);
+    setProviderEnabled(activeProvider.enabled);
+  }, [activeProvider]);
+
+  useEffect(() => {
+    setToolProviderIdInput(runtimeSettings.settings.toolProviderId ?? "");
+    setToolModelInput(runtimeSettings.settings.toolModel ?? "");
+  }, [runtimeSettings.settings.toolModel, runtimeSettings.settings.toolProviderId]);
+
+  useEffect(() => {
+    setMemoryEnabledInput(memoryConfig.config.enabled);
+    setMemoryAutoRetrievalInput(memoryConfig.config.autoRetrieval);
+    setMemoryQueryRewriteInput(memoryConfig.config.queryRewrite);
+    setMemoryAutoSummarizeInput(memoryConfig.config.autoSummarize);
+    setMemoryMaxRetrievalInput(memoryConfig.config.maxRetrievalCount);
+    setMemorySimilarityThresholdInput(memoryConfig.config.similarityThreshold);
+    setMemoryEmbeddingModelInput(memoryConfig.config.embeddingModel);
+  }, [memoryConfig.config]);
+
+  async function handleBrowseProject(project: ProjectItem) {
     const result = await desktopBridge.openPath(project.path);
     if (result.ok) {
-      setProjectNotice(`已打开 ${project.name}。`);
+      setProjectNotice(`已在访达中打开 ${project.name}。`);
       setProjectError(null);
       return;
     }
@@ -513,6 +582,130 @@ function SettingsApp() {
     }
   }
 
+  async function handleSaveProvider() {
+    if (!activeProvider) {
+      setProviderNotice("当前还没有可编辑的 provider。");
+      return;
+    }
+
+    setProviderNotice(null);
+    const result = await providerState.save({
+      providerId: activeProvider.id,
+      baseUrl: providerBaseUrlInput,
+      model: providerModelInput,
+      apiKey: providerApiKeyInput.trim() ? providerApiKeyInput.trim() : undefined,
+      enabled: providerEnabled,
+    });
+
+    if (!result.ok) {
+      setProviderNotice(result.error ?? `保存 ${activeProvider.label} 配置失败。`);
+      return;
+    }
+
+    if (providerEnabled) {
+      const otherEnabledProviders = providers.filter((provider) => provider.id !== activeProvider.id && provider.enabled);
+      const disableResults = await Promise.all(otherEnabledProviders.map((provider) => providerState.save({
+        providerId: provider.id,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        enabled: false,
+      })));
+      if (disableResults.some((item) => !item.ok)) {
+        setProviderApiKeyInput("");
+        setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存，但其他已启用 provider 没有全部关闭。`);
+        return;
+      }
+    }
+
+    setProviderApiKeyInput("");
+    setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存。`);
+  }
+
+  async function handleFetchProviderModels() {
+    if (!activeProvider) {
+      return;
+    }
+
+    const result = await providerState.fetchModels(activeProvider.id);
+    if (!result.ok) {
+      setProviderNotice(result.error ?? `抓取 ${activeProvider.label} 模型列表失败。`);
+      return;
+    }
+
+    setProviderNotice(`已抓取 ${activeProvider.label} 的 ${result.models?.length ?? 0} 个模型。`);
+  }
+
+  async function handleRecommendToolModel() {
+    if (!activeProvider) {
+      return;
+    }
+
+    const existingCatalog = providerState.modelCatalogs[activeProvider.id];
+    const catalog = existingCatalog ?? await (async () => {
+      const result = await providerState.fetchModels(activeProvider.id);
+      if (!result.ok) {
+        setProviderNotice(result.error ?? `抓取 ${activeProvider.label} 模型列表失败。`);
+        return null;
+      }
+
+      return {
+        models: result.models ?? [],
+        recommendedToolModel: result.recommendedToolModel ?? null,
+      };
+    })();
+
+    if (!catalog?.recommendedToolModel) {
+      setProviderNotice(`${activeProvider.label} 暂时没有可推荐的 Tool Model。`);
+      return;
+    }
+
+    setToolProviderIdInput(activeProvider.id);
+    setToolModelInput(catalog.recommendedToolModel);
+    setToolModelNotice(`已为 Tool Model 推荐 ${activeProvider.label} · ${catalog.recommendedToolModel}。记得点保存。`);
+  }
+
+  async function handleSaveToolModel() {
+    const result = await runtimeSettings.save({
+      toolProviderId: toolProviderIdInput || null,
+      toolModel: toolModelInput.trim() || null,
+    });
+
+    if (!result.ok) {
+      setToolModelNotice(result.error ?? "保存 Tool Model 失败。");
+      return;
+    }
+
+    setToolModelNotice(toolProviderIdInput && toolModelInput.trim()
+      ? `Tool Model 已保存为 ${toolProviderIdInput} · ${toolModelInput.trim()}。`
+      : "Tool Model 已恢复为自动跟随默认路由。");
+  }
+
+  async function handleSaveMemoryConfig() {
+    const selectedEmbeddingDefinition = embeddingModelDefinitions.find((item) => item.id === memoryEmbeddingModelInput);
+    const result = await memoryConfig.save({
+      enabled: memoryEnabledInput,
+      autoRetrieval: memoryAutoRetrievalInput,
+      queryRewrite: memoryQueryRewriteInput,
+      autoSummarize: memoryAutoSummarizeInput,
+      maxRetrievalCount: memoryMaxRetrievalInput,
+      similarityThreshold: memorySimilarityThresholdInput,
+      embeddingModel: memoryEmbeddingModelInput,
+      embeddingDimension: selectedEmbeddingDefinition?.dimension,
+    });
+
+    if (!result.ok) {
+      setMemoryNotice(result.error ?? "保存记忆配置失败。");
+      return;
+    }
+
+    setMemoryNotice("记忆配置已保存。");
+  }
+
+  async function handleRebuildEmbeddings() {
+    const result = await memoryConfig.rebuild();
+    setMemoryNotice(result.ok ? "向量索引重建已开始。" : (result.error ?? "重建向量索引失败。"));
+  }
+
   return (
     <div className="settings-window">
       <aside className="settings-window__sidebar">
@@ -548,178 +741,555 @@ function SettingsApp() {
         <section className="settings-window__canvas">
           {activeSection.id === "project" ? (
             <article className="settings-project">
-              <div className="settings-project__panel">
-                <div className="settings-project__header">
-                  <div className="settings-project__intro">
-                    <h3>项目</h3>
-                    <p>新对话将自动使用此目录，而不是创建临时目录</p>
+              {projectNotice ? <div className="settings-project__notice">{projectNotice}</div> : null}
+              {projectError && projectStatus !== "error" ? (
+                <div className="settings-project__notice settings-project__notice--error">{projectError}</div>
+              ) : null}
+
+              <div className="settings-project__list">
+                {projectStatus === "loading" ? (
+                  <div className="settings-project__empty">
+                    <strong>正在加载项目目录</strong>
+                    <p>项目列表会从 daemon 后端读取，稍等一下就好。</p>
                   </div>
-                  <div className="settings-project__controls">
-                    <div className="settings-project__toggle-row">
-                      <button
-                        type="button"
-                        className={`settings-project__toggle${showTemporaryDirectories ? " settings-project__toggle--on" : ""}`}
-                        aria-pressed={showTemporaryDirectories}
-                        aria-label="显示临时目录"
-                        onClick={() => setShowTemporaryDirectories((current) => !current)}
-                      />
-                      <span>显示临时目录</span>
-                    </div>
+                ) : projectStatus === "error" ? (
+                  <div className="settings-project__empty">
+                    <strong>项目列表加载失败</strong>
+                    <p>{projectError ?? "暂时还拿不到后端项目数据。"}</p>
                     <button
                       type="button"
-                      className="settings-project__add-button"
-                      disabled={projectPending || projectStatus === "loading"}
-                      onClick={() => void handleAddProject()}
+                      className="settings-project__empty-action"
+                      onClick={() => {
+                        void (async () => {
+                          try {
+                            setProjectStatus("loading");
+                            setProjectNotice(null);
+                            setProjectError(null);
+                            await refreshProjectItems();
+                          } catch (error) {
+                            setProjectStatus("error");
+                            setProjectError(getErrorMessage(error, "重新加载项目失败。"));
+                          }
+                        })();
+                      }}
                     >
-                      <span className="settings-project__add-icon" aria-hidden="true">
-                        <svg viewBox="0 0 24 24">
-                          <path d="M12 5v14" />
-                          <path d="M5 12h14" />
-                        </svg>
-                      </span>
-                      <span>添加项目</span>
+                      重新加载
                     </button>
                   </div>
+                ) : visibleProjectItems.length > 0 ? (
+                  visibleProjectItems.map((project) => (
+                    <article key={project.id} className="settings-project__item">
+                      <div className="settings-project__item-main">
+                        <span className="settings-project__item-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <path d="M3.75 7.75a2 2 0 0 1 2-2h4.17l1.72 2.08h6.61a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H5.75a2 2 0 0 1-2-2z" />
+                            <path d="M3.75 9.25h16.5" />
+                          </svg>
+                        </span>
+                        <div className="settings-project__item-copy">
+                          <div className="settings-project__item-title-row">
+                            <strong>{project.name}</strong>
+                            {project.isDefault ? <span className="settings-project__badge">默认</span> : null}
+                            {project.sessionCount > 0 ? (
+                              <span className="settings-project__badge settings-project__badge--muted">
+                                {project.sessionCount} 个会话
+                              </span>
+                            ) : null}
+                          </div>
+                          <span>{project.path}</span>
+                        </div>
+                      </div>
+                      <div className="settings-project__item-actions">
+                        <button
+                          type="button"
+                          className={`settings-project__icon-button${project.isDefault ? " settings-project__icon-button--active" : ""}`}
+                          aria-label={project.isDefault ? "默认项目" : "设为默认项目"}
+                          title={project.isDefault ? "默认项目" : "设为默认项目"}
+                          disabled={projectPending}
+                          onClick={() => void handleSetDefaultProject(project.id)}
+                        >
+                          <svg viewBox="0 0 24 24">
+                            <path d="m12 3.8 2.53 5.13 5.66.82-4.1 4 1 5.64L12 16.7l-5.09 2.69 1-5.64-4.1-4 5.66-.82Z" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-project__icon-button"
+                          aria-label="浏览目录"
+                          title="浏览目录"
+                          disabled={projectPending}
+                          onClick={() => void handleBrowseProject(project)}
+                        >
+                          <svg viewBox="0 0 24 24">
+                            <path d="M3.75 7.75a2 2 0 0 1 2-2h4.17l1.72 2.08h6.61a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H5.75a2 2 0 0 1-2-2z" />
+                            <path d="M3.75 9.25h16.5" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-project__icon-button"
+                          aria-label="编辑项目"
+                          title="编辑项目"
+                          disabled={projectPending}
+                          onClick={() => void handleRenameProject(project.id)}
+                        >
+                          <svg viewBox="0 0 24 24">
+                            <path d="m4.5 16.2 8.95-8.95a2.1 2.1 0 0 1 2.97 0l.33.33a2.1 2.1 0 0 1 0 2.97L7.8 19.5 4.5 20.2Z" />
+                            <path d="m12.9 7.8 3.3 3.3" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-project__icon-button settings-project__icon-button--danger"
+                          aria-label="删除项目"
+                          title="删除项目"
+                          disabled={projectPending}
+                          onClick={() => void handleRemoveProject(project.id)}
+                        >
+                          <svg viewBox="0 0 24 24">
+                            <path d="M9 4.8h6" />
+                            <path d="M5.8 7.5h12.4" />
+                            <path d="M8.2 7.5v10a1.7 1.7 0 0 0 1.7 1.7h4.2a1.7 1.7 0 0 0 1.7-1.7v-10" />
+                            <path d="M10.2 10.2v5.6" />
+                            <path d="M13.8 10.2v5.6" />
+                          </svg>
+                        </button>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <div className="settings-project__empty">
+                    <strong>还没有可显示的项目目录</strong>
+                    <p>暂时没有项目目录。</p>
+                  </div>
+                )}
+              </div>
+            </article>
+          ) : activeSection.id === "relay" ? (
+            <article className="settings-relay">
+              <div className="settings-relay__panel">
+                <div className="settings-relay__header">
+                  <div className="settings-relay__intro">
+                    <p>先把桌面 Relay 和 Chrome 扩展连起来，后面的浏览器任务就能直接复用你的真实登录态。这个流程只需要做一次。</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="settings-actions__button settings-actions__button--primary"
+                    onClick={() => void desktopBridge.openChromeRelay()}
+                  >
+                    打开详细配置窗口
+                  </button>
                 </div>
 
-                {projectNotice ? <div className="settings-project__notice">{projectNotice}</div> : null}
-                {projectError && projectStatus !== "error" ? (
-                  <div className="settings-project__notice settings-project__notice--error">{projectError}</div>
-                ) : null}
+                <div className="settings-relay__cards">
+                  {sectionCards.map(([title, body], index) => (
+                    <article key={title} className="settings-window__content-card settings-relay__card">
+                      <span className="settings-relay__step-index">{String(index + 1).padStart(2, "0")}</span>
+                      <strong>{title}</strong>
+                      <p>{body}</p>
+                    </article>
+                  ))}
+                </div>
 
-                <div className="settings-project__list">
-                  {projectStatus === "loading" ? (
-                    <div className="settings-project__empty">
-                      <strong>正在加载项目目录</strong>
-                      <p>项目列表会从 daemon 后端读取，稍等一下就好。</p>
+                <p className="settings-relay__footnote">如果扩展已经装好，通常只要打开详细窗口并启动 Chrome，几秒钟后就会自动连上。</p>
+              </div>
+            </article>
+          ) : activeSection.id === "providers" ? (
+            <article className="settings-providers settings-providers--window">
+              <div className="settings-providers__body settings-providers__body--window">
+                <aside className="settings-providers__sidebar">
+                  <div className="settings-providers__sidebar-top">
+                    <label className="settings-search settings-search--providers">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                        <path d="m16 16 4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                      </svg>
+                      <input
+                        className="settings-search__input"
+                        type="text"
+                        value={providerSearchQuery}
+                        onChange={(event) => setProviderSearchQuery(event.target.value)}
+                        placeholder="搜索 providers..."
+                      />
+                    </label>
+                    <div className="settings-providers__sidebar-copy">
+                      <strong>Providers</strong>
+                      <span>{filteredProviders.length} 个可配置入口</span>
                     </div>
-                  ) : projectStatus === "error" ? (
-                    <div className="settings-project__empty">
-                      <strong>项目列表加载失败</strong>
-                      <p>{projectError ?? "暂时还拿不到后端项目数据。"}</p>
+                  </div>
+
+                  <div className="provider-list provider-list--sidebar">
+                    {filteredProviders.length > 0 ? filteredProviders.map((provider) => (
                       <button
+                        key={provider.id}
                         type="button"
-                        className="settings-project__empty-action"
+                        className={`provider-list__item provider-list__item--sidebar${provider.id === activeProvider?.id ? " provider-list__item--active" : ""}`}
                         onClick={() => {
-                          void (async () => {
-                            try {
-                              setProjectStatus("loading");
-                              setProjectNotice(null);
-                              setProjectError(null);
-                              await refreshProjectItems();
-                            } catch (error) {
-                              setProjectStatus("error");
-                              setProjectError(getErrorMessage(error, "重新加载项目失败。"));
-                            }
-                          })();
+                          setActiveProviderId(provider.id);
+                          setProviderNotice(null);
                         }}
                       >
-                        重新加载
-                      </button>
-                    </div>
-                  ) : visibleProjectItems.length > 0 ? (
-                    visibleProjectItems.map((project) => (
-                      <article key={project.id} className="settings-project__item">
-                        <div className="settings-project__item-main">
-                          <span className="settings-project__item-icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24">
-                              <path d="M3.75 7.75a2 2 0 0 1 2-2h4.17l1.72 2.08h6.61a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H5.75a2 2 0 0 1-2-2z" />
-                              <path d="M3.75 9.25h16.5" />
-                            </svg>
+                        <div className="provider-list__identity">
+                          <span className="provider-list__logo" aria-hidden="true">
+                            {providerMonograms[provider.id] ?? provider.label.slice(0, 2).toUpperCase()}
                           </span>
-                          <div className="settings-project__item-copy">
-                            <div className="settings-project__item-title-row">
-                              <strong>{project.name}</strong>
-                              {project.isDefault ? <span className="settings-project__badge">默认</span> : null}
-                              {project.kind === "temporary" ? (
-                                <span className="settings-project__badge settings-project__badge--muted">临时</span>
-                              ) : null}
-                              {project.sessionCount > 0 ? (
-                                <span className="settings-project__badge settings-project__badge--muted">
-                                  {project.sessionCount} 个会话
-                                </span>
-                              ) : null}
+                          <div className="provider-list__copy">
+                            <div className="provider-list__title-row">
+                              <div className="provider-list__name">{provider.label}</div>
                             </div>
-                            <span>{project.path}</span>
+                            <div className="provider-list__subtitle">{formatProviderTransportLabel(provider.transport)}</div>
                           </div>
                         </div>
-                        <div className="settings-project__item-actions">
-                          <button
-                            type="button"
-                            className={`settings-project__icon-button${project.isDefault ? " settings-project__icon-button--active" : ""}`}
-                            aria-label={
-                              project.kind === "temporary"
-                                ? "临时目录不可设为默认"
-                                : project.isDefault
-                                  ? "默认项目"
-                                  : "设为默认项目"
-                            }
-                            title={
-                              project.kind === "temporary"
-                                ? "临时目录不可设为默认"
-                                : project.isDefault
-                                  ? "默认项目"
-                                  : "设为默认项目"
-                            }
-                            disabled={projectPending || project.kind === "temporary"}
-                            onClick={() => void handleSetDefaultProject(project.id)}
-                          >
-                            <svg viewBox="0 0 24 24">
-                              <path d="m12 3.8 2.53 5.13 5.66.82-4.1 4 1 5.64L12 16.7l-5.09 2.69 1-5.64-4.1-4 5.66-.82Z" />
-                            </svg>
-                          </button>
-                          <button
-                            type="button"
-                            className="settings-project__icon-button"
-                            aria-label="打开目录"
-                            title="打开目录"
-                            disabled={projectPending}
-                            onClick={() => void handleOpenProject(project)}
-                          >
-                            <svg viewBox="0 0 24 24">
-                              <path d="M3.75 7.75a2 2 0 0 1 2-2h4.17l1.72 2.08h6.61a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H5.75a2 2 0 0 1-2-2z" />
-                              <path d="M3.75 9.25h16.5" />
-                            </svg>
-                          </button>
-                          <button
-                            type="button"
-                            className="settings-project__icon-button"
-                            aria-label="编辑项目"
-                            title="编辑项目"
-                            disabled={projectPending}
-                            onClick={() => void handleRenameProject(project.id)}
-                          >
-                            <svg viewBox="0 0 24 24">
-                              <path d="m4.5 16.2 8.95-8.95a2.1 2.1 0 0 1 2.97 0l.33.33a2.1 2.1 0 0 1 0 2.97L7.8 19.5 4.5 20.2Z" />
-                              <path d="m12.9 7.8 3.3 3.3" />
-                            </svg>
-                          </button>
-                          <button
-                            type="button"
-                            className="settings-project__icon-button settings-project__icon-button--danger"
-                            aria-label="删除项目"
-                            title="删除项目"
-                            disabled={projectPending}
-                            onClick={() => void handleRemoveProject(project.id)}
-                          >
-                            <svg viewBox="0 0 24 24">
-                              <path d="M9 4.8h6" />
-                              <path d="M5.8 7.5h12.4" />
-                              <path d="M8.2 7.5v10a1.7 1.7 0 0 0 1.7 1.7h4.2a1.7 1.7 0 0 0 1.7-1.7v-10" />
-                              <path d="M10.2 10.2v5.6" />
-                              <path d="M13.8 10.2v5.6" />
-                            </svg>
-                          </button>
+                        <span className={`provider-list__status${provider.enabled ? " provider-list__status--active" : ""}`} />
+                      </button>
+                    )) : (
+                      <div className="provider-list__empty">
+                        <strong>没有匹配的 provider</strong>
+                        <span>换个关键词试试。</span>
+                      </div>
+                    )}
+                  </div>
+                </aside>
+
+                {activeProvider ? (
+                  <section className="provider-detail provider-detail--window">
+                    <header className="provider-detail__hero">
+                      <div className="provider-detail__hero-main">
+                        <div className="provider-detail__hero-top">
+                          <div className="provider-detail__icon provider-detail__icon--lg" aria-hidden="true">
+                            {providerMonograms[activeProvider.id] ?? activeProvider.label.slice(0, 2).toUpperCase()}
+                          </div>
+                          <div className="provider-detail__hero-copy">
+                            <div className="provider-detail__hero-heading">
+                              <h3>{activeProvider.label}</h3>
+                              <span className={`provider-detail__hero-badge${providerEnabled ? " provider-detail__hero-badge--active" : ""}`}>
+                                {providerEnabled ? "Active" : "Inactive"}
+                              </span>
+                            </div>
+                            <p>{providerDescriptions[activeProvider.id] ?? "支持自定义 Base URL、模型和 API Key。"}</p>
+                          </div>
                         </div>
-                      </article>
-                    ))
-                  ) : (
-                    <div className="settings-project__empty">
-                      <strong>还没有可显示的项目目录</strong>
-                      <p>先添加一个项目目录，或者打开“显示临时目录”查看临时工作区。</p>
+                        <div className="provider-detail__meta">
+                          <div className="provider-field">
+                            <label>当前协议</label>
+                            <div className="provider-field__box provider-field__box--input">{formatProviderTransportLabel(activeProvider.transport)}</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        className={`provider-detail__toggle${providerEnabled ? " provider-detail__toggle--on" : ""}`}
+                        aria-label={providerEnabled ? "停用当前 provider" : "启用当前 provider"}
+                        title={providerEnabled ? "停用当前 provider" : "启用当前 provider"}
+                        onClick={() => setProviderEnabled((current) => !current)}
+                      />
+                    </header>
+
+                    <div className="provider-detail__stack">
+                      {providerState.error ? <div className="provider-notice provider-notice--error">{providerState.error}</div> : null}
+                      {providerNotice ? <div className="provider-notice">{providerNotice}</div> : null}
+
+                      <div className="provider-field">
+                        <label>API Key</label>
+                        <input
+                          className="provider-field__input"
+                          type="password"
+                          value={providerApiKeyInput}
+                          placeholder={activeProvider.apiKeyMasked ? `已保存：${activeProvider.apiKeyMasked}` : `输入 ${activeProvider.label} API Key`}
+                          onChange={(event) => setProviderApiKeyInput(event.target.value)}
+                        />
+                      </div>
+
+                      <div className="provider-field">
+                        <label>Base URL</label>
+                        <input
+                          className="provider-field__input"
+                          type="text"
+                          value={providerBaseUrlInput}
+                          onChange={(event) => setProviderBaseUrlInput(event.target.value)}
+                        />
+                      </div>
+
+                      <div className="provider-field">
+                        <label>默认模型</label>
+                        <input
+                          className="provider-field__input"
+                          type="text"
+                          value={providerModelInput}
+                          onChange={(event) => setProviderModelInput(event.target.value)}
+                        />
+                      </div>
+
+                      <div className="provider-inline-actions">
+                        <button
+                          type="button"
+                          className="settings-actions__button"
+                          onClick={() => void handleFetchProviderModels()}
+                          disabled={providerState.loadingModelsProviderId !== null}
+                        >
+                          {providerState.loadingModelsProviderId === activeProvider.id ? "抓取中..." : "自动抓取模型"}
+                        </button>
+                        <button
+                          type="button"
+                          className="settings-actions__button"
+                          onClick={() => void handleRecommendToolModel()}
+                          disabled={providerState.loadingModelsProviderId !== null}
+                        >
+                          推荐 Tool Model
+                        </button>
+                      </div>
+
+                      {activeProviderModelCatalog?.models.length ? (
+                        <div className="provider-field">
+                          <label>已抓取模型</label>
+                          <select
+                            className="provider-field__input"
+                            value={providerModelInput}
+                            onChange={(event) => setProviderModelInput(event.target.value)}
+                          >
+                            <option value="">选择一个模型...</option>
+                            {activeProviderModelCatalog.models.map((modelId) => (
+                              <option key={modelId} value={modelId}>
+                                {modelId}
+                              </option>
+                            ))}
+                          </select>
+                          {activeProviderModelCatalog.recommendedToolModel ? (
+                            <div className="provider-field__hint">
+                              推荐 Tool Model：{activeProviderModelCatalog.recommendedToolModel}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
-                  )}
-                </div>
+
+                    <div className="provider-actions provider-actions--window">
+                      <button
+                        type="button"
+                        className="settings-actions__button"
+                        onClick={() => {
+                          if (!activeProvider) {
+                            return;
+                          }
+                          setProviderApiKeyInput("");
+                          setProviderBaseUrlInput(activeProvider.baseUrl);
+                          setProviderModelInput(activeProvider.model);
+                          setProviderEnabled(activeProvider.enabled);
+                          setProviderNotice(null);
+                        }}
+                        disabled={providerState.savingProviderId !== null}
+                      >
+                        重置
+                      </button>
+                      <button
+                        type="button"
+                        className="settings-actions__button settings-actions__button--primary"
+                        onClick={() => void handleSaveProvider()}
+                        disabled={providerState.savingProviderId !== null}
+                      >
+                        {providerState.savingProviderId === activeProvider.id ? "保存中..." : "保存 Provider"}
+                      </button>
+                    </div>
+                  </section>
+                ) : (
+                  <section className="provider-detail provider-detail--window">
+                    <div className="provider-list__empty">
+                      <strong>当前还没有可编辑的 provider</strong>
+                      <span>等 provider 列表加载完成后再试。</span>
+                    </div>
+                  </section>
+                )}
+              </div>
+            </article>
+          ) : activeSection.id === "memory" ? (
+            <article className="settings-memory">
+              <div className="settings-memory__stack">
+                <section className="settings-memory__card">
+                  <div className="settings-memory__card-header">
+                    <div>
+                      <h3>工具模型</h3>
+                      <p>给查询重写、技能路由和记忆提炼单独指定一个更快的小模型，不再默认复用主聊天模型。</p>
+                    </div>
+                  </div>
+
+                  {toolModelNotice ? <div className="provider-notice">{toolModelNotice}</div> : null}
+                  {runtimeSettings.error ? <div className="provider-notice provider-notice--error">{runtimeSettings.error}</div> : null}
+
+                  <div className="settings-memory__grid">
+                    <div className="provider-field">
+                      <label>Provider</label>
+                      <select
+                        className="provider-field__input"
+                        value={toolProviderIdInput}
+                        onChange={(event) => setToolProviderIdInput(event.target.value as ProviderKind | "")}
+                      >
+                        <option value="">自动选择</option>
+                        {providers.filter((provider) => provider.hasApiKey).map((provider) => (
+                          <option key={provider.id} value={provider.id}>
+                            {provider.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="provider-field">
+                      <label>Tool Model</label>
+                      <input
+                        className="provider-field__input"
+                        type="text"
+                        value={toolModelInput}
+                        placeholder="留空则按默认路由自动选择"
+                        onChange={(event) => setToolModelInput(event.target.value)}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="provider-actions">
+                    <button
+                      type="button"
+                      className="settings-actions__button"
+                      onClick={() => {
+                        setToolProviderIdInput(runtimeSettings.settings.toolProviderId ?? "");
+                        setToolModelInput(runtimeSettings.settings.toolModel ?? "");
+                        setToolModelNotice(null);
+                      }}
+                      disabled={runtimeSettings.saving}
+                    >
+                      重置
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-actions__button settings-actions__button--primary"
+                      onClick={() => void handleSaveToolModel()}
+                      disabled={runtimeSettings.saving}
+                    >
+                      {runtimeSettings.saving ? "保存中..." : "保存 Tool Model"}
+                    </button>
+                  </div>
+                </section>
+
+                <section className="settings-memory__card">
+                  <div className="settings-memory__card-header">
+                    <div>
+                      <h3>记忆检索</h3>
+                      <p>先把 embedding model 和检索参数接进来，后面再把这里扩成更完整的 Alma 风格配置面板。</p>
+                    </div>
+                  </div>
+
+                  {memoryNotice ? <div className="provider-notice">{memoryNotice}</div> : null}
+                  {memoryConfig.error ? <div className="provider-notice provider-notice--error">{memoryConfig.error}</div> : null}
+
+                  <label className="settings-memory__toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryEnabledInput}
+                      onChange={(event) => setMemoryEnabledInput(event.target.checked)}
+                    />
+                    <span>启用长期记忆</span>
+                  </label>
+
+                  <label className="settings-memory__toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAutoRetrievalInput}
+                      onChange={(event) => setMemoryAutoRetrievalInput(event.target.checked)}
+                    />
+                    <span>自动检索记忆</span>
+                  </label>
+
+                  <label className="settings-memory__toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryQueryRewriteInput}
+                      onChange={(event) => setMemoryQueryRewriteInput(event.target.checked)}
+                    />
+                    <span>查询重写</span>
+                  </label>
+
+                  <label className="settings-memory__toggle">
+                    <input
+                      type="checkbox"
+                      checked={memoryAutoSummarizeInput}
+                      onChange={(event) => setMemoryAutoSummarizeInput(event.target.checked)}
+                    />
+                    <span>自动总结对话</span>
+                  </label>
+
+                  <div className="settings-memory__grid">
+                    <div className="provider-field">
+                      <label>Embedding Model</label>
+                      <select
+                        className="provider-field__input"
+                        value={memoryEmbeddingModelInput}
+                        onChange={(event) => setMemoryEmbeddingModelInput(event.target.value as MemoryEmbeddingModel)}
+                      >
+                        {embeddingModelDefinitions.map((definition) => (
+                          <option key={definition.id} value={definition.id}>
+                            {definition.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="provider-field">
+                      <label>维度</label>
+                      <div className="provider-field__box provider-field__box--input">
+                        {embeddingModelDefinitions.find((definition) => definition.id === memoryEmbeddingModelInput)?.dimension ?? memoryConfig.config.embeddingDimension}
+                      </div>
+                    </div>
+
+                    <div className="provider-field">
+                      <label>最大检索记忆数</label>
+                      <input
+                        className="provider-field__input"
+                        type="number"
+                        min={1}
+                        max={50}
+                        value={memoryMaxRetrievalInput}
+                        onChange={(event) => setMemoryMaxRetrievalInput(Number.parseInt(event.target.value, 10) || 1)}
+                      />
+                    </div>
+
+                    <div className="provider-field">
+                      <label>相似度阈值</label>
+                      <input
+                        className="provider-field__input"
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={memorySimilarityThresholdInput}
+                        onChange={(event) => {
+                          const nextValue = Number.parseFloat(event.target.value);
+                          setMemorySimilarityThresholdInput(Number.isFinite(nextValue) ? Math.max(0, Math.min(1, nextValue)) : 0);
+                        }}
+                      />
+                      <div className="provider-field__hint">
+                        当前约等于 {formatSimilarityPercent(memorySimilarityThresholdInput)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="provider-actions">
+                    <button
+                      type="button"
+                      className="settings-actions__button"
+                      onClick={() => void handleRebuildEmbeddings()}
+                      disabled={memoryConfig.rebuilding}
+                    >
+                      {memoryConfig.rebuilding ? "重建中..." : "重建向量索引"}
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-actions__button settings-actions__button--primary"
+                      onClick={() => void handleSaveMemoryConfig()}
+                      disabled={memoryConfig.saving}
+                    >
+                      {memoryConfig.saving ? "保存中..." : "保存记忆配置"}
+                    </button>
+                  </div>
+                </section>
               </div>
             </article>
           ) : (

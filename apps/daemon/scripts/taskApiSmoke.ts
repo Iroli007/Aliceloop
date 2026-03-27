@@ -411,7 +411,7 @@ async function main() {
       sourcePath: string;
       allowedTools: string[];
     }>;
-    const skillDetailResponse = await fetch(`${baseUrl}/api/skills/coding-agent`);
+    const skillDetailResponse = await fetch(`${baseUrl}/api/skills/browser`);
     assert.equal(skillDetailResponse.status, 200, "skill detail endpoint should respond");
     const skillDetailPayload = (await skillDetailResponse.json()) as {
       id: string;
@@ -435,7 +435,7 @@ async function main() {
       sourcePath: string;
       allowedTools: string[];
     };
-    const skillRunResponse = await fetch(`${baseUrl}/api/skills/coding-agent/run`, {
+    const skillRunResponse = await fetch(`${baseUrl}/api/skills/browser/run`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -530,7 +530,6 @@ async function main() {
     assert.equal(memoryDetailPayload.source, "review-coach", "memory detail endpoint should resolve saved memory");
     assert.equal(healthPayload.ok, true, "health payload should mark daemon as healthy");
     assert.equal(healthPayload.service, "aliceloop-daemon", "health payload should include service id");
-    assert(healthPayload.activeSkills.includes("coding-agent"), "health payload should expose active coding-agent skill");
     assert(healthPayload.activeSkills.includes("plan-mode"), "health payload should expose active plan-mode skill");
     assert(healthPayload.activeSkills.includes("scheduler"), "health payload should expose active scheduler skill");
     assert(healthPayload.activeSkills.includes("skill-hub"), "health payload should expose active skill-hub skill");
@@ -543,10 +542,9 @@ async function main() {
     assert(healthPayload.activeSkills.includes("web-fetch"), "health payload should expose active web-fetch skill");
     assert(healthPayload.activeSkills.includes("web-search"), "health payload should expose active web-search skill");
     assert(healthPayload.activeSkills.includes("tasks"), "health payload should expose the activated tasks skill");
-    assert(healthPayload.activeSkillAdapters.includes("coding_agent_run"), "health payload should expose active coding adapter");
     assert(healthPayload.activeSkillAdapters.includes("web_fetch"), "health payload should expose active web-fetch adapter");
     assert(healthPayload.activeSkillAdapters.includes("web_search"), "health payload should expose active web-search adapter");
-    assert(skillsPayload.some((skill) => skill.id === "coding-agent"), "skill catalog should include coding-agent");
+    assert(skillsPayload.some((skill) => skill.id === "browser"), "skill catalog should include browser");
     assert(skillsPayload.some((skill) => skill.id === "plan-mode"), "skill catalog should include plan-mode");
     assert(skillsPayload.some((skill) => skill.id === "scheduler"), "skill catalog should include scheduler");
     assert(skillsPayload.some((skill) => skill.id === "skill-hub"), "skill catalog should include skill-hub");
@@ -560,10 +558,10 @@ async function main() {
     assert(skillsPayload.some((skill) => skill.id === "web-search"), "skill catalog should include web-search");
     assert(skillsPayload.some((skill) => skill.id === "browser"), "skill catalog should include browser");
     assert(skillsPayload.some((skill) => skill.id === "tasks"), "skill catalog should include tasks");
-    assert.equal(skillDetailPayload.id, "coding-agent", "skill detail endpoint should resolve the requested skill");
-    assert.equal(skillDetailPayload.mode, "instructional", "coding-agent should be an instructional skill");
-    assert(skillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/coding-agent/SKILL.md"));
-    assert(skillDetailPayload.allowedTools.includes("bash"));
+    assert.equal(skillDetailPayload.id, "browser", "skill detail endpoint should resolve the requested skill");
+    assert.equal(skillDetailPayload.mode, "instructional", "browser should be an instructional skill");
+    assert(skillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/browser/SKILL.md"));
+    assert(skillDetailPayload.allowedTools.includes("browser_navigate"));
     assert.equal(webSearchSkillDetailPayload.id, "web-search", "web-search detail endpoint should resolve the requested skill");
     assert.equal(webSearchSkillDetailPayload.status, "available", "web-search should now be marked available");
     assert(webSearchSkillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/web-search/SKILL.md"));
@@ -589,7 +587,7 @@ async function main() {
     assert(providersPayload.some((provider) => provider.id === "minimax"), "provider list should include minimax");
     assert(runtimeCatalogPayload.providers.some((provider) => provider.id === "aihubmix"), "runtime catalog should include providers");
     assert(runtimeCatalogPayload.providers.some((provider) => provider.id === "minimax"), "runtime catalog should include minimax");
-    assert(runtimeCatalogPayload.skills.some((skill) => skill.id === "coding-agent"), "runtime catalog should include skills");
+    assert(runtimeCatalogPayload.skills.some((skill) => skill.id === "browser"), "runtime catalog should include browser");
     assert(runtimeCatalogPayload.skills.some((skill) => skill.id === "web-fetch"), "runtime catalog should include web-fetch");
     assert(runtimeCatalogPayload.scripts.some((script) => script.id === "runtime-overview"), "runtime catalog should include runtime scripts");
     assert(runtimeCatalogPayload.mcpServers.some((server) => server.id === "filesystem-bridge"), "runtime catalog should include mcp servers");

@@ -23,6 +23,10 @@ function hasSkillMarkdown(candidate: string) {
 }
 
 const skillsRootDir = [
+  resolve(currentDir, "../../../../../skills"),
+  resolve(process.cwd(), "skills"),
+  resolve(process.cwd(), "../skills"),
+  resolve(process.cwd(), "../../skills"),
   currentDir,
   resolve(currentDir, "../src/context/skills"),
   resolve(process.cwd(), "src/context/skills"),
@@ -269,22 +273,28 @@ export function listActiveSkillDefinitions() {
   return getSkillCatalogCache().activeDefinitions;
 }
 
-export function selectRelevantSkillDefinitions(query: string | null | undefined, hints?: SkillRouteHints) {
+export function selectRelevantSkillIds(query: string | null | undefined, hints?: SkillRouteHints) {
   const normalizedQuery = query?.trim() ?? "";
   if (
     !normalizedQuery
     && (hints?.stickySkillIds.length ?? 0) === 0
     && (hints?.stickyGroupIds.length ?? 0) === 0
   ) {
-    return [] as SkillDefinition[];
+    return [] as string[];
   }
 
   const activeSkills = listActiveSkillDefinitions();
-  const directlyRelevantSkillIds = activeSkills
+  return activeSkills
     .filter((skill) => isRelevantSkillForTurn(skill, normalizedQuery, hints))
     .map((skill) => skill.id);
+}
+
+export function selectRelevantSkillDefinitions(query: string | null | undefined, hints?: SkillRouteHints) {
+  const normalizedQuery = query?.trim() ?? "";
+  const directlyRelevantSkillIds = selectRelevantSkillIds(normalizedQuery, hints);
   const expanded = expandRoutedSkillIds(directlyRelevantSkillIds, normalizedQuery, hints);
   const routedSkillIds = new Set(expanded.routedSkillIds);
+  const activeSkills = listActiveSkillDefinitions();
 
   return activeSkills.filter((skill) => routedSkillIds.has(skill.id));
 }
@@ -305,19 +315,22 @@ interface BuildSkillContextBlockOptions {
 export function buildSkillContextBlock(skills: SkillDefinition[], options?: BuildSkillContextBlockOptions) {
   if (skills.length === 0) {
     return [
-      "Skill routing rule: the six sandbox primitives (Bash/Read/Write/Edit/Glob/Grep) are the always-on native tools.",
-      "Bash can invoke unlimited scripts = unlimited capabilities. Skills封装这些能力。",
+      "Skill routing rule: skills are optional workflow instructions, not dynamic tool loaders.",
+      "Tool routing rule: no tool is always on by default; the runtime loads only the direct tool hits and the allowed-tools declared by the routed skills.",
       "Skill routing policy: preserve high availability by keeping relevant capability groups sticky across short follow-up turns, but never load the whole skill catalog by default.",
-      "No extra skill was routed for this turn, so do not assume any non-primitive tool should be present.",
+      "No extra skill was routed for this turn, so do not assume any specialized workflow guidance is present.",
     ].join("\n");
   }
 
   const sections = [
     "Project skills live in the local context catalog.",
     `Skill catalog root: ${skillsRootDir}`,
-    "Architecture rule: the six sandbox primitives (Bash/Read/Write/Edit/Glob/Grep) are the always-on native tools; skills are routed capabilities.",
+    "Architecture rule: skills are routed instruction blocks; they do not dynamically expand the tool set.",
+    "Tool routing is handled separately from the current turn intent and sticky capability hints, then merged with the allowed-tools declared by the routed skills.",
     "Bash can invoke unlimited scripts = unlimited capabilities. Skills封装这些能力。",
-    "If a turn needs better capability coverage, improve skill routing accuracy instead of expanding the primitive tool base.",
+    "Critical execution rule: when a routed skill shows shell commands or CLI examples, treat them as actions to run with the attached tools, not as text to paste into the assistant reply.",
+    "If `bash` is attached for the current turn, execute the relevant command and answer from its result. Do not reply with raw command suggestions like `ls`, `pwd`, or `aliceloop ...` unless the user explicitly asked for the command itself.",
+    "If a turn needs better workflow guidance, improve skill routing accuracy instead of expanding the default tool base.",
     "Routing policy: keep the current capability groups sticky across short continuation turns so the agent does not drop critical skills mid-workflow, but do not load the entire skill catalog.",
     "The skills below were routed as relevant for this turn. Read their SKILL.md files before acting when needed.",
     "",
@@ -337,12 +350,12 @@ export function buildSkillContextBlock(skills: SkillDefinition[], options?: Buil
     sections.push(`- Active capability groups for this turn: ${routedGroupIds.map((groupId) => getSkillGroupLabel(groupId)).join(", ")}.`);
   }
   if (routedSkillIds.has("web-search") || routedSkillIds.has("web-fetch")) {
-    sections.push("- Routing priority: when the user needs exact factual verification, current metrics, dates, or source-backed corrections, treat `web_search` as the default first step and only route `web_fetch` when a specific page still needs to be read.");
+    sections.push("- Routing priority: when the user needs exact factual verification, current metrics, dates, or source-backed corrections, treat web_search as the default first step and only route web_fetch when a specific page still needs to be read.");
     sections.push("- Source priority: primary platform pages and clearly dated sources come before encyclopedia overviews; 百度百科 is extremely low priority for live facts.");
     sections.push("- Research memory rule: keep a running evidence ledger. Search results are discovery only, and the next `web_fetch` should target the strongest unfetched candidate URL from the ledger instead of restarting the topic from scratch.");
   }
   if (routedSkillIds.has("system-info")) {
-    sections.push("- Routing priority: when the user needs the current local time, date, weekday, or host diagnostics, treat `system-info` as the first step. It can call `bash` commands such as `date`, `sw_vers`, `df -h`, or `uptime`.");
+    sections.push("- system-info: use it for current local time, date, weekday, or host diagnostics. It can call `bash` commands such as `date`, `sw_vers`, `df -h`, or `uptime`.");
   }
 
   if (routedSkillIds.has("browser")) {

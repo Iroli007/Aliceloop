@@ -1,25 +1,16 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { getProjectDirectory, listProjectDirectorySessionIds } from "../repositories/projectRepository";
+import { mkdir, writeFile } from "node:fs/promises";
+import { getProjectDirectory, listProjectDirectories, listProjectDirectorySessionIds } from "../repositories/projectRepository";
 import {
   getSessionProjectBinding,
   getSessionSnapshot,
   setSessionProjectBinding,
 } from "../repositories/sessionRepository";
-import { listSessionGeneratedFiles } from "../repositories/sessionGeneratedFileRepository";
-
-function buildTranscriptExportRoot(projectPath: string, sessionId: string) {
-  return resolve(projectPath, ".aliceloop", "sessions", sessionId);
-}
-
-function buildTranscriptExportPaths(projectPath: string, sessionId: string) {
-  const exportRoot = buildTranscriptExportRoot(projectPath, sessionId);
-  return {
-    exportRoot,
-    markdownPath: join(exportRoot, "session.md"),
-    jsonPath: join(exportRoot, "session.json"),
-  };
-}
+import {
+  buildThreadTranscriptExportPaths,
+  clearSessionTranscriptExports,
+  clearLegacyTranscriptRoot,
+  pruneEmptyTranscriptParents,
+} from "./threadTranscriptPaths";
 
 function formatMessageRole(role: string) {
   switch (role) {
@@ -48,10 +39,6 @@ function formatConversationTimestamp(timestamp: string) {
   return `${year}-${month}-${day} ${hours}:${minutes}`;
 }
 
-function quoteFrontmatterValue(value: string) {
-  return JSON.stringify(value);
-}
-
 function buildTranscriptMarkdown(snapshot: ReturnType<typeof getSessionSnapshot>) {
   const transcriptMessages = snapshot.messages.filter(
     (message) => message.role === "user" || message.role === "assistant",
@@ -59,7 +46,7 @@ function buildTranscriptMarkdown(snapshot: ReturnType<typeof getSessionSnapshot>
   const lines: string[] = [
     "---",
     `threadId: ${snapshot.session.id}`,
-    `title: ${quoteFrontmatterValue(snapshot.session.title)}`,
+    `title: ""`,
     `createdAt: ${snapshot.session.createdAt}`,
     `updatedAt: ${snapshot.session.updatedAt}`,
     "model: unknown",
@@ -88,40 +75,24 @@ export async function syncSessionProjectHistory(sessionId: string) {
     return {
       binding: null,
       markdownPath: null,
-      jsonPath: null,
     };
   }
 
   const snapshot = getSessionSnapshot(sessionId);
-  const generatedFiles = listSessionGeneratedFiles(sessionId);
-  const exportedAt = new Date().toISOString();
-  const exportPaths = buildTranscriptExportPaths(binding.projectPath, sessionId);
+  clearSessionTranscriptExports(binding.projectPath, sessionId);
+  const exportPaths = buildThreadTranscriptExportPaths(binding.projectPath, {
+    sessionId,
+    sessionTitle: snapshot.session.title,
+    sessionCreatedAt: snapshot.session.createdAt,
+  });
 
   await mkdir(exportPaths.exportRoot, { recursive: true });
-
-  const payload = {
-    exportedAt,
-    project: binding,
-    session: snapshot.session,
-    messages: snapshot.messages,
-    attachments: snapshot.attachments,
-    jobs: snapshot.jobs,
-    artifacts: snapshot.artifacts.map((artifact) => ({
-      id: artifact.id,
-      title: artifact.title,
-      kind: artifact.kind,
-      updatedAt: artifact.updatedAt,
-    })),
-    generatedFiles,
-  };
-
-  await writeFile(exportPaths.jsonPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   await writeFile(exportPaths.markdownPath, buildTranscriptMarkdown(snapshot), "utf8");
+  pruneEmptyTranscriptParents(binding.projectPath);
 
   return {
     binding,
     markdownPath: exportPaths.markdownPath,
-    jsonPath: exportPaths.jsonPath,
   };
 }
 
@@ -130,14 +101,14 @@ export async function assignSessionProjectAndSync(sessionId: string, projectId: 
   const nextBinding = setSessionProjectBinding(sessionId, projectId);
 
   if (previousBinding?.projectPath && previousBinding.projectPath !== nextBinding?.projectPath) {
-    await rm(buildTranscriptExportRoot(previousBinding.projectPath, sessionId), { recursive: true, force: true });
+    clearSessionTranscriptExports(previousBinding.projectPath, sessionId);
+    pruneEmptyTranscriptParents(previousBinding.projectPath);
   }
 
   if (!nextBinding?.projectPath) {
     return {
       binding: null,
       markdownPath: null,
-      jsonPath: null,
     };
   }
 
@@ -151,16 +122,38 @@ export async function resyncProjectSessionHistories(projectId: string, previousP
 
   for (const sessionId of sessionIds) {
     if (previousProjectPath && previousProjectPath !== project.path) {
-      await rm(buildTranscriptExportRoot(previousProjectPath, sessionId), { recursive: true, force: true });
+      clearSessionTranscriptExports(previousProjectPath, sessionId);
     }
 
     await syncSessionProjectHistory(sessionId);
     migratedSessionIds.push(sessionId);
   }
 
+  if (previousProjectPath && previousProjectPath !== project.path) {
+    pruneEmptyTranscriptParents(previousProjectPath);
+    clearLegacyTranscriptRoot(previousProjectPath);
+  }
+  pruneEmptyTranscriptParents(project.path);
+  clearLegacyTranscriptRoot(project.path);
+
   return {
     project,
     sessionCount: migratedSessionIds.length,
     migratedSessionIds,
+  };
+}
+
+export async function resyncAllProjectSessionHistories() {
+  const projects = listProjectDirectories();
+  let sessionCount = 0;
+
+  for (const project of projects) {
+    const result = await resyncProjectSessionHistories(project.id);
+    sessionCount += result.sessionCount;
+  }
+
+  return {
+    projectCount: projects.length,
+    sessionCount,
   };
 }

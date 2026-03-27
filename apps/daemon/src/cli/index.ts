@@ -34,6 +34,8 @@ interface RuntimeSettingsPayload {
   sandboxProfile: string;
   autoApproveToolRequests: boolean;
   reasoningEffort: string;
+  toolProviderId: string | null;
+  toolModel: string | null;
   updatedAt: string | null;
 }
 
@@ -551,6 +553,8 @@ function flattenConfigSnapshot(snapshot: ConfigSnapshot) {
     "runtime.sandboxProfile": snapshot.runtime.sandboxProfile,
     "runtime.autoApproveToolRequests": snapshot.runtime.autoApproveToolRequests,
     "runtime.reasoningEffort": snapshot.runtime.reasoningEffort,
+    "runtime.toolProviderId": snapshot.runtime.toolProviderId,
+    "runtime.toolModel": snapshot.runtime.toolModel,
     "runtime.updatedAt": snapshot.runtime.updatedAt,
     "user.displayName": snapshot.user.displayName,
     "user.preferredLanguage": snapshot.user.preferredLanguage,
@@ -666,6 +670,22 @@ async function setConfigValue(path: string, rawValue: string) {
       return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
         method: "PUT",
         body: JSON.stringify({ reasoningEffort }),
+      });
+    }
+
+    if (segments[1] === "toolProviderId") {
+      const toolProviderId = rawValue.trim() || null;
+      return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
+        method: "PUT",
+        body: JSON.stringify({ toolProviderId }),
+      });
+    }
+
+    if (segments[1] === "toolModel") {
+      const toolModel = rawValue.trim() || null;
+      return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
+        method: "PUT",
+        body: JSON.stringify({ toolModel }),
       });
     }
 

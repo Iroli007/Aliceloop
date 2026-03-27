@@ -12,6 +12,8 @@ import {
   type DocumentKind,
   type DocumentStructure,
   type MemoryKind,
+  type MemoryFactKind,
+  type MemoryFactState,
   type ProviderKind,
   type ReasoningEffort,
   type SandboxPermissionProfile,
@@ -57,6 +59,7 @@ import {
   shellOverviewRoute,
 } from "./repositories/overviewRepository";
 import { getProviderConfig, listProviderConfigs, updateProviderConfig } from "./repositories/providerRepository";
+import { fetchProviderModels } from "./providers/providerModelCatalogService";
 import {
   getRuntimeCatalogSnapshot,
   getSkillDefinition,
@@ -116,7 +119,7 @@ import { abortAgentForSession } from "./runtime/agentRuntime";
 import { runProviderReply } from "./services/providerRunner";
 import { createPermissionSandboxExecutor } from "./services/sandboxExecutor";
 import { generateImage } from "./services/imageGenerationService";
-import { assertResolvableSkillTools, listRequestedSkillToolNames } from "./context/tools/toolRegistry";
+import { listAvailableToolAdapterNames } from "./context/tools/toolRegistry";
 import {
   approveSessionToolApproval,
   rejectSessionToolApproval,
@@ -126,6 +129,7 @@ import { runManagedTask } from "./services/taskRunner";
 import { startSchedulerService } from "./services/schedulerService";
 import {
   assignSessionProjectAndSync,
+  resyncAllProjectSessionHistories,
   resyncProjectSessionHistories,
   syncSessionProjectHistory,
 } from "./services/sessionProjectService";
@@ -243,7 +247,6 @@ interface CreateSessionBody {
 interface CreateProjectBody {
   name?: string;
   path?: string;
-  kind?: "workspace" | "temporary";
   isDefault?: boolean;
 }
 
@@ -261,6 +264,8 @@ interface UpdateRuntimeSettingsBody {
   sandboxProfile?: SandboxPermissionProfile;
   autoApproveToolRequests?: boolean;
   reasoningEffort?: ReasoningEffort;
+  toolProviderId?: ProviderKind | null;
+  toolModel?: string | null;
 }
 
 interface TaskParams {
@@ -387,12 +392,18 @@ interface CreateSemanticMemoryBody {
   content?: string;
   source?: string;
   durability?: string;
+  factKind?: string;
+  factKey?: string;
+  factState?: string;
   relatedTopics?: string[];
 }
 
 interface UpdateSemanticMemoryBody {
   content?: string;
   durability?: string;
+  factKind?: string;
+  factKey?: string;
+  factState?: string;
   relatedTopics?: string[];
 }
 
@@ -520,6 +531,45 @@ function normalizeSemanticMemoryDurability(
   throw new Error("invalid_memory_durability");
 }
 
+function normalizeSemanticMemoryFactKind(value: string | undefined): MemoryFactKind | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "preference"
+    || normalized === "constraint"
+    || normalized === "decision"
+    || normalized === "profile"
+    || normalized === "account"
+    || normalized === "workflow"
+    || normalized === "other"
+  ) {
+    return normalized;
+  }
+
+  throw new Error("invalid_memory_fact_kind");
+}
+
+function normalizeSemanticMemoryFactState(value: string | undefined): MemoryFactState | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "active" || normalized === "superseded" || normalized === "retracted") {
+    return normalized;
+  }
+
+  throw new Error("invalid_memory_fact_state");
+}
+
+function normalizeSemanticMemoryFactKey(value: string | undefined): string | undefined {
+  const normalized = value?.trim().toLowerCase().replace(/\s+/g, "-");
+  return normalized ? normalized : undefined;
+}
+
 function normalizeSemanticMemoryOrderBy(value: string | undefined) {
   switch (value?.trim().toLowerCase()) {
     case "updated_at":
@@ -565,19 +615,6 @@ function parseThresholdValue(value: string | string[] | undefined, fallback = 0.
   }
 
   return Math.max(-1, Math.min(parsed, 1));
-}
-
-function summarizeMemoryTitle(content: string) {
-  const firstLine = content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-
-  if (!firstLine) {
-    return "CLI Memory";
-  }
-
-  return firstLine.length > 60 ? `${firstLine.slice(0, 60).trimEnd()}…` : firstLine;
 }
 
 function normalizeTrackedTaskStatus(value: string | undefined) {
@@ -653,8 +690,7 @@ function writeSseEvent(write: (chunk: string) => void, event: unknown, seq: numb
 
 export async function createServer() {
   const activeSkills = listActiveSkillDefinitions();
-  assertResolvableSkillTools(activeSkills);
-  const activeSkillToolNames = listRequestedSkillToolNames(activeSkills);
+  const availableToolAdapterNames = listAvailableToolAdapterNames();
 
   const server = Fastify({
     logger: true,
@@ -667,6 +703,7 @@ export async function createServer() {
   });
 
   backfillTaskRunsFromJobs();
+  await resyncAllProjectSessionHistories();
   const stopScheduler = startSchedulerService();
   server.addHook("onClose", async () => {
     stopScheduler();
@@ -677,7 +714,7 @@ export async function createServer() {
     service: "aliceloop-daemon",
     timestamp: new Date().toISOString(),
     activeSkills: activeSkills.map((skill) => skill.id),
-    activeSkillAdapters: activeSkillToolNames,
+    activeSkillAdapters: availableToolAdapterNames,
   }));
 
   server.get(shellOverviewRoute, async () => getShellOverview());
@@ -700,7 +737,7 @@ export async function createServer() {
     return createMemoryNote({
       id: randomUUID(),
       kind: normalizeMemoryKind(body.kind),
-      title: body.title?.trim() || summarizeMemoryTitle(content),
+      title: body.title?.trim() || "",
       content,
       source: body.source?.trim() || "cli",
       updatedAt: new Date().toISOString(),
@@ -795,6 +832,9 @@ export async function createServer() {
         content,
         source: normalizeSemanticMemorySource(body.source, "manual"),
         durability: normalizeSemanticMemoryDurability(body.durability, "permanent") ?? "permanent",
+        factKind: normalizeSemanticMemoryFactKind(body.factKind) ?? null,
+        factKey: normalizeSemanticMemoryFactKey(body.factKey) ?? null,
+        factState: normalizeSemanticMemoryFactState(body.factState) ?? "active",
         relatedTopics: Array.isArray(body.relatedTopics) ? body.relatedTopics : undefined,
       });
       return reply.code(201).send(memory);
@@ -837,6 +877,9 @@ export async function createServer() {
       const memory = await updateMemory(request.params.id, {
         content: request.body?.content,
         durability: normalizeSemanticMemoryDurability(request.body?.durability),
+        factKind: normalizeSemanticMemoryFactKind(request.body?.factKind),
+        factKey: normalizeSemanticMemoryFactKey(request.body?.factKey),
+        factState: normalizeSemanticMemoryFactState(request.body?.factState),
         relatedTopics: Array.isArray(request.body?.relatedTopics) ? request.body.relatedTopics : undefined,
       });
 
@@ -1180,7 +1223,6 @@ export async function createServer() {
       return createProjectDirectory({
         name: request.body?.name,
         path: request.body.path,
-        kind: request.body?.kind,
         isDefault: request.body?.isDefault,
       });
     } catch (error) {
@@ -1938,6 +1980,8 @@ export async function createServer() {
       sandboxProfile: request.body?.sandboxProfile,
       autoApproveToolRequests: request.body?.autoApproveToolRequests,
       reasoningEffort: request.body?.reasoningEffort,
+      toolProviderId: request.body?.toolProviderId,
+      toolModel: request.body?.toolModel,
     });
   });
 
@@ -1977,6 +2021,29 @@ export async function createServer() {
 
   server.get<{ Params: ProviderParams }>("/api/providers/:id", async (request) => {
     return getProviderConfig(request.params.id);
+  });
+
+  server.get<{ Params: ProviderParams }>("/api/providers/:id/models", async (request, reply) => {
+    try {
+      return await fetchProviderModels(request.params.id);
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === "provider_api_key_required") {
+          return reply.code(409).send({
+            error: "provider_api_key_required",
+          });
+        }
+
+        if (error.message.startsWith("provider_models_fetch_failed:")) {
+          return reply.code(502).send({
+            error: "provider_models_fetch_failed",
+            detail: error.message,
+          });
+        }
+      }
+
+      throw error;
+    }
   });
 
   server.put<{ Params: ProviderParams; Body: UpdateProviderBody }>("/api/providers/:id", async (request) => {

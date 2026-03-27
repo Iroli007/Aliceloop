@@ -9,6 +9,24 @@ build/
 coverage/
 .turbo/
 apps/**/.data/
+.data/
+
+# Database files
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Uploads and attachments
+uploads/
+**/uploads/
+
+# Claude memory
+.claude/
+
+# Generated skills
+alma-bundled-skills/
+alma-skills-by-category/
 
 venv/
 .venv/

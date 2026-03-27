@@ -17,15 +17,7 @@ function normalizeGatewayBaseUrl(baseUrl: string) {
     return "";
   }
 
-  if (trimmed.endsWith("/v1/messages")) {
-    return trimmed.slice(0, -"/messages".length);
-  }
-
-  if (trimmed.endsWith("/v1")) {
-    return trimmed;
-  }
-
-  return `${trimmed}/v1`;
+  return trimmed;
 }
 
 function resolveOpenAICompatibleSettings() {

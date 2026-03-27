@@ -556,11 +556,17 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "memories", "fact_kind", "TEXT CHECK(fact_kind IN ('preference', 'constraint', 'decision', 'profile', 'account', 'workflow', 'other'))");
+  ensureColumn(db, "memories", "fact_key", "TEXT");
+  ensureColumn(db, "memories", "fact_state", "TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted'))");
   ensureColumn(db, "runtime_settings", "reasoning_effort", "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn(db, "runtime_settings", "auto_approve_tool_requests", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "runtime_settings", "tool_provider_id", "TEXT");
+  ensureColumn(db, "runtime_settings", "tool_model", "TEXT");
   ensureColumn(db, "device_presence", "capabilities_json", "TEXT NOT NULL DEFAULT '{}'");
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
+  db.prepare("UPDATE memories SET fact_state = 'active' WHERE COALESCE(fact_state, '') = ''").run();
   db.prepare("UPDATE task_runs SET task_type = 'script-runner' WHERE task_type = 'local-script-runner'").run();
   db.prepare("UPDATE job_runs SET kind = 'script-runner' WHERE kind = 'local-script-runner'").run();
   db.prepare(
@@ -741,7 +747,15 @@ function bootstrap(db: Database.Database) {
       db.exec(statement);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (statement.includes("project_id") && message.includes("no such column: project_id")) {
+      if (
+        message.includes("no such column:")
+        && (
+          statement.includes("project_id")
+          || statement.includes("fact_state")
+          || statement.includes("fact_kind")
+          || statement.includes("fact_key")
+        )
+      ) {
         deferredStatements.push(statement);
         continue;
       }

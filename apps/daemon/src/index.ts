@@ -1,7 +1,7 @@
 import { reconcileRunningSandboxRuns } from "./repositories/sandboxRunRepository";
 import { reconcileInterruptedSessionState } from "./repositories/sessionRepository";
 import { listActiveSkillDefinitions } from "./context/skills/skillLoader";
-import { listRequestedSkillToolNames } from "./context/tools/toolRegistry";
+import { listAvailableToolAdapterNames } from "./context/tools/toolRegistry";
 import { getDataDir, getDatabasePath } from "./db/client";
 import { getActiveProviderConfig } from "./repositories/providerRepository";
 import { backfillFailurePostmortems } from "./services/taskRunner";
@@ -32,13 +32,13 @@ async function start() {
   }
 
   const activeSkills = listActiveSkillDefinitions();
-  const activeSkillToolNames = listRequestedSkillToolNames(activeSkills);
+  const availableToolAdapterNames = listAvailableToolAdapterNames();
   console.info(
     "[aliceloop-daemon] active skills ready",
     JSON.stringify({
       count: activeSkills.length,
       skills: activeSkills.map((skill) => skill.id),
-      adapters: activeSkillToolNames,
+      adapters: availableToolAdapterNames,
     }),
   );
 

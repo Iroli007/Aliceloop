@@ -1,5 +1,6 @@
 import {
   defaultRuntimeSettings,
+  type ProviderKind,
   type ReasoningEffort,
   type RuntimeSettings,
   type SandboxPermissionProfile,
@@ -11,6 +12,8 @@ interface SaveRuntimeSettingsInput {
   sandboxProfile?: SandboxPermissionProfile;
   autoApproveToolRequests?: boolean;
   reasoningEffort?: ReasoningEffort;
+  toolProviderId?: ProviderKind | null;
+  toolModel?: string | null;
 }
 
 export interface RuntimeSettingsState {
@@ -75,6 +78,8 @@ export function useRuntimeSettings(): RuntimeSettingsState {
           sandboxProfile: input.sandboxProfile,
           autoApproveToolRequests: input.autoApproveToolRequests,
           reasoningEffort: input.reasoningEffort,
+          toolProviderId: input.toolProviderId,
+          toolModel: input.toolModel,
         }),
       });
 

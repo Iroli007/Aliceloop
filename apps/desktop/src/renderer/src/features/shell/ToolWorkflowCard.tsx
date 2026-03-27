@@ -12,7 +12,6 @@ const toolLabelMap: Record<string, string> = {
   browser_snapshot: "Browser Snapshot",
   browser_screenshot: "Browser Screenshot",
   browser_type: "Browser Type",
-  coding_agent_run: "Coding Agent",
   edit: "Edit",
   glob: "Glob",
   grep: "Grep",
@@ -415,6 +414,10 @@ function formatResultBlock(entry: ToolWorkflowEntry) {
   return formatStructuredBlock(resolveEntryOutput(entry)) ?? entry.resultPreview;
 }
 
+function isBashLikeCommand(entry: ToolWorkflowEntry) {
+  return entry.toolName === "bash";
+}
+
 export function buildSummaryTitle(entry: ToolWorkflowEntry) {
   const resolvedInput = resolveEntryInput(entry);
 
@@ -431,7 +434,24 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
   }
 
   if (entry.toolName === "web_fetch") {
-    return "读取网页";
+    const resolvedOutput = resolveEntryOutput(entry);
+    const outputText = typeof resolvedOutput === "string" ? resolvedOutput : "";
+    const pageTitle = extractHeaderValue(outputText, "Page Title");
+    const resolvedInputUrl = isRecord(resolvedInput)
+      ? pickFirstString(resolvedInput, ["url"])
+      : typeof resolvedInput === "string"
+        ? resolvedInput.trim()
+        : null;
+
+    if (pageTitle) {
+      return `获取 ${compactInline(pageTitle, 32)}`;
+    }
+
+    if (resolvedInputUrl) {
+      return `获取 ${buildWebFetchFallbackLabel(resolvedInputUrl)}`;
+    }
+
+    return "获取网页";
   }
 
   if (entry.toolName === "browser") {
@@ -482,20 +502,15 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
     return "调用技能";
   }
 
-  if (entry.toolName === "coding_agent_run") {
-    return "分步处理";
-  }
-
   if (entry.toolName === "bash") {
-    if (isRecord(resolvedInput)) {
-      const bashCommand = buildBashCommand(resolvedInput);
-      if (bashCommand) {
-        return buildBashIntentSummary(bashCommand);
-      }
-    }
+    const bashCommand = isRecord(resolvedInput)
+      ? buildBashCommand(resolvedInput)
+      : typeof resolvedInput === "string"
+        ? resolvedInput.trim()
+        : null;
 
-    if (typeof resolvedInput === "string" && resolvedInput.trim()) {
-      return buildBashIntentSummary(resolvedInput.trim());
+    if (bashCommand) {
+      return compactInline(bashCommand, 48);
     }
   }
 
@@ -699,9 +714,15 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
   const primaryDetailLabel = getPrimaryDetailLabel(entry.toolName);
   const hasDetails = Boolean(argumentsBlock || resultBlock || entry.error || entry.backend || sourceLinks.length > 0);
   const isNetworkTool = entry.toolName === "web_search" || entry.toolName === "web_fetch";
+  const defaultOpen = isBashLikeCommand(entry);
+  const resultDetailLabel = isBashLikeCommand(entry) ? "RESULT" : "Result";
+  const commandDetailLabel = isBashLikeCommand(entry) ? "COMMAND" : primaryDetailLabel;
 
   return (
-    <details className={`tool-workflow-card tool-workflow-card--${status.tone}${isNetworkTool ? " tool-workflow-card--network" : ""}`}>
+    <details
+      className={`tool-workflow-card tool-workflow-card--${status.tone}${isNetworkTool ? " tool-workflow-card--network" : ""}${isBashLikeCommand(entry) ? " tool-workflow-card--bash" : ""}`}
+      open={defaultOpen}
+    >
       <summary className="tool-workflow-card__summary">
         <span className="tool-workflow-card__main">
           <span className="tool-workflow-card__icon">
@@ -727,13 +748,13 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
         <div className="tool-workflow-card__details">
           {argumentsBlock ? (
             <div className="tool-workflow-card__detail">
-              <span className="tool-workflow-card__detail-label">{primaryDetailLabel}</span>
+              <span className="tool-workflow-card__detail-label">{commandDetailLabel}</span>
               <pre className="tool-workflow-card__detail-value">{argumentsBlock}</pre>
             </div>
           ) : null}
           {resultBlock ? (
             <div className="tool-workflow-card__detail">
-              <span className="tool-workflow-card__detail-label">Result</span>
+              <span className="tool-workflow-card__detail-label">{resultDetailLabel}</span>
               <pre className="tool-workflow-card__detail-value">{resultBlock}</pre>
             </div>
           ) : null}

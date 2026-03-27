@@ -35,6 +35,7 @@ interface CreatePlanInput {
 }
 
 interface ListPlansInput {
+  sessionId?: string | null;
   status?: PlanStatus;
   limit?: number;
 }
@@ -108,32 +109,22 @@ export function getPlan(planId: string) {
 export function listPlans(input: ListPlansInput = {}) {
   const db = getDatabase();
   const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 50), 200));
+  const sessionId = input.sessionId?.trim() || null;
 
-  if (input.status) {
-    const rows = db
-      .prepare(
-        `
-          SELECT
-            id,
-            session_id AS sessionId,
-            title,
-            goal,
-            steps_json AS stepsJson,
-            status,
-            created_at AS createdAt,
-            updated_at AS updatedAt,
-            approved_at AS approvedAt
-          FROM plan_runs
-          WHERE status = ?
-          ORDER BY updated_at DESC, created_at DESC
-          LIMIT ?
-        `,
-      )
-      .all(input.status, limit) as PlanRow[];
+  const filters: string[] = [];
+  const params: Array<string | number> = [];
 
-    return rows.map(toPlanRecord);
+  if (sessionId) {
+    filters.push("session_id = ?");
+    params.push(sessionId);
   }
 
+  if (input.status) {
+    filters.push("status = ?");
+    params.push(input.status);
+  }
+
+  const whereClause = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
   const rows = db
     .prepare(
       `
@@ -148,6 +139,7 @@ export function listPlans(input: ListPlansInput = {}) {
           updated_at AS updatedAt,
           approved_at AS approvedAt
         FROM plan_runs
+        ${whereClause}
         ORDER BY
           CASE status
             WHEN 'draft' THEN 0
@@ -159,7 +151,7 @@ export function listPlans(input: ListPlansInput = {}) {
         LIMIT ?
       `,
     )
-    .all(limit) as PlanRow[];
+    .all(...params, limit) as PlanRow[];
 
   return rows.map(toPlanRecord);
 }

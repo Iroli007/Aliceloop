@@ -41,6 +41,10 @@ const defaultImageModels: Record<ProviderKind, string | null> = {
   openai: "gpt-image-1",
   openrouter: "openai/gpt-image-1",
   aihubmix: "gpt-image-1",
+  gemini: null,
+  moonshot: null,
+  deepseek: null,
+  zhipu: null,
   anthropic: null,
   minimax: null,
 };

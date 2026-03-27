@@ -16,8 +16,11 @@ export interface ProviderConfigsState {
   status: "loading" | "ready" | "error";
   providers: ProviderConfig[];
   savingProviderId: ProviderKind | null;
+  loadingModelsProviderId: ProviderKind | null;
+  modelCatalogs: Partial<Record<ProviderKind, { models: string[]; recommendedToolModel: string | null }>>;
   error?: string;
   save(input: SaveProviderInput): Promise<{ ok: boolean; config?: ProviderConfig; error?: string }>;
+  fetchModels(providerId: ProviderKind): Promise<{ ok: boolean; models?: string[]; recommendedToolModel?: string | null; error?: string }>;
 }
 
 export function useProviderConfigs(): ProviderConfigsState {
@@ -25,6 +28,8 @@ export function useProviderConfigs(): ProviderConfigsState {
   const [providers, setProviders] = useState<ProviderConfig[]>(previewProviderConfigs);
   const [status, setStatus] = useState<ProviderConfigsState["status"]>("loading");
   const [savingProviderId, setSavingProviderId] = useState<ProviderKind | null>(null);
+  const [loadingModelsProviderId, setLoadingModelsProviderId] = useState<ProviderKind | null>(null);
+  const [modelCatalogs, setModelCatalogs] = useState<ProviderConfigsState["modelCatalogs"]>({});
   const [error, setError] = useState<string>();
 
   useEffect(() => {
@@ -108,11 +113,53 @@ export function useProviderConfigs(): ProviderConfigsState {
     }
   }
 
+  async function fetchModels(providerId: ProviderKind) {
+    setLoadingModelsProviderId(providerId);
+
+    try {
+      const { daemonBaseUrl } = await bridge.getAppMeta();
+      const response = await fetch(`${daemonBaseUrl}/api/providers/${providerId}/models`);
+      if (!response.ok) {
+        throw new Error(`Failed to load ${providerId} models (${response.status})`);
+      }
+
+      const payload = (await response.json()) as {
+        models: string[];
+        recommendedToolModel: string | null;
+      };
+      setModelCatalogs((current) => ({
+        ...current,
+        [providerId]: {
+          models: payload.models,
+          recommendedToolModel: payload.recommendedToolModel,
+        },
+      }));
+      setError(undefined);
+      return {
+        ok: true as const,
+        models: payload.models,
+        recommendedToolModel: payload.recommendedToolModel,
+      };
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "Failed to load provider models";
+      setError(message);
+      return {
+        ok: false as const,
+        error: message,
+      };
+    } finally {
+      setLoadingModelsProviderId(null);
+    }
+  }
+
   return {
     status,
     providers,
     savingProviderId,
+    loadingModelsProviderId,
+    modelCatalogs,
     error,
     save,
+    fetchModels,
   };
 }

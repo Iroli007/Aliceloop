@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, statSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SkillDefinition } from "@aliceloop/runtime-core";
 
 interface BrowserSnapshotPayload {
   url: string;
@@ -32,11 +31,12 @@ async function main() {
 
   const [
     { createPermissionSandboxExecutor },
-    { assertResolvableSkillTools, buildToolSet, listRequestedSkillToolNames },
+    { buildToolSet },
     { BASE_TOOL_NAMES, resetSkillToolCache, resolveSkillTools },
     { loadContext },
-    { appendSessionEvent, createSession, createSessionMessage },
+    { appendSessionEvent, createAttachment, createSession, createSessionMessage },
     { buildSessionContextFragments },
+    { createViewImageTool },
     {
       buildSkillContextBlock,
       getSkillDefinition,
@@ -45,7 +45,9 @@ async function main() {
       resetSkillCatalogCache,
       selectRelevantSkillDefinitions,
     },
+    { resolveRelevantSkillRouting },
     { advanceSessionSkillCacheTurn, clearSessionSkillCache, getSessionSkillCacheHints, rememberSessionSkillRoute },
+    { routeToolNamesForTurn },
   ] = await Promise.all([
     import("../src/services/sandboxExecutor.ts"),
     import("../src/context/tools/toolRegistry.ts"),
@@ -53,8 +55,11 @@ async function main() {
     import("../src/context/index.ts"),
     import("../src/repositories/sessionRepository.ts"),
     import("../src/context/session/sessionContext.ts"),
+    import("../src/context/tools/viewImageTool.ts"),
     import("../src/context/skills/skillLoader.ts"),
+    import("../src/context/skills/skillRouter.ts"),
     import("../src/context/skills/sessionSkillCache.ts"),
+    import("../src/context/tools/toolRouter.ts"),
   ]);
 
   resetSkillToolCache();
@@ -142,86 +147,124 @@ async function main() {
   assert(availableCatalogSkills.every((skill) => skill.id !== "video-reader"), "legacy video-reader should no longer be active");
   assert(plannedCatalogSkills.some((skill) => skill.id === "selfie"), "selfie should remain planned until image references are supported");
   assert(availableCatalogSkills.some((skill) => skill.id === "browser"), "browser should now be available");
-  assert(availableCatalogSkills.some((skill) => skill.id === "coding-agent"), "coding-agent should remain available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-fetch"), "web-fetch should remain available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-search"), "web-search should now be available");
-  assert.deepEqual(
-    listRequestedSkillToolNames(availableCatalogSkills),
-    [
-      "audio_understand",
-      "browser_click",
-      "browser_media_probe",
-      "browser_navigate",
-      "browser_screenshot",
-      "browser_snapshot",
-      "browser_type",
-      "browser_video_watch_poll",
-      "browser_video_watch_start",
-      "browser_video_watch_stop",
-      "coding_agent_run",
-      "document_ingest",
-      "review_coach",
-      "web_fetch",
-      "web_search",
-    ],
-    "requested active skill tool names should stay stable for the current catalog",
+  const ruleOnlyRouting = await resolveRelevantSkillRouting("继续");
+  assert.equal(ruleOnlyRouting.routeSource, "rules", "rule-only continuation turns should not need LLM fallback");
+  assert.equal(
+    ruleOnlyRouting.fallbackSkillIds.length,
+    0,
+    "rule-only continuation turns should not add fallback skills",
   );
-
-  const runtimeScriptSkill: SkillDefinition = {
-    id: "runtime-overview",
-    label: "runtime-overview",
-    description: "Run the runtime overview script",
-    status: "available",
-    mode: "task",
-    sourcePath: "/tmp/runtime-overview/SKILL.md",
-    sourceUrl: null,
-    allowedTools: ["runtime_script_runtime_overview"],
-  };
-
+  assert(
+    ruleOnlyRouting.skills.some((skill) => skill.id === "continue"),
+    "rule-only continuation turns should still route the continue skill",
+  );
+  const smallTalkRouting = await resolveRelevantSkillRouting("你就是a姐");
+  assert.equal(
+    smallTalkRouting.routeSource,
+    "rules",
+    "plain chat should not trigger LLM fallback",
+  );
+  assert.equal(
+    smallTalkRouting.fallbackSkillIds.length,
+    0,
+    "plain chat should not add fallback skills",
+  );
+  let researchFallbackAttempted = false;
+  const researchRuleRouting = await resolveRelevantSkillRouting(
+    "帮我调查张雪峰",
+    undefined,
+    {
+      fallbackResolver: async () => {
+        researchFallbackAttempted = true;
+        return ["plan-mode"];
+      },
+    },
+  );
+  assert.equal(
+    researchRuleRouting.routeSource,
+    "rules",
+    "high-confidence research turns should stay on the rule path",
+  );
+  assert.equal(
+    researchFallbackAttempted,
+    false,
+    "high-confidence research turns should not invoke the LLM fallback",
+  );
+  assert(
+    researchRuleRouting.skills.some((skill) => skill.id === "web-search"),
+    "high-confidence research turns should still route web-search",
+  );
+  const historyRouting = await resolveRelevantSkillRouting("我昨天晚上跟你说啥呢来着");
+  assert.equal(
+    historyRouting.routeSource,
+    "rules",
+    "episodic history recall should route on rules alone",
+  );
+  assert(
+    historyRouting.skills.some((skill) => skill.id === "thread-management"),
+    "episodic history recall should route thread-management",
+  );
+  const memoryRouting = await resolveRelevantSkillRouting("记住我以后喜欢简洁回答");
+  assert.equal(
+    memoryRouting.routeSource,
+    "rules",
+    "profile/fact memory writes should route on rules alone",
+  );
+  assert(
+    memoryRouting.skills.some((skill) => skill.id === "memory-management"),
+    "profile/fact memory writes should route memory-management",
+  );
+  const fallbackRouting = await resolveRelevantSkillRouting(
+    "请把这件事处理得更稳妥一点。",
+    undefined,
+    {
+      fallbackResolver: async () => ["plan-mode", "tasks", "continue"],
+    },
+  );
+  assert.equal(
+    fallbackRouting.routeSource,
+    "rules+llm",
+    "ambiguous turns should be able to fall back to an LLM-selected skill set",
+  );
+  assert(
+    fallbackRouting.skills.some((skill) => skill.id === "plan-mode"),
+    "LLM fallback should be able to add plan-mode",
+  );
+  assert(
+    fallbackRouting.skills.some((skill) => skill.id === "tasks"),
+    "LLM fallback should be able to add tasks",
+  );
+  assert.deepEqual(
+    routeToolNamesForTurn("帮我查一下东莞今天天气，给我最新结果。"),
+    ["web_search"],
+    "tool router should attach research tools from query intent rather than from skill metadata",
+  );
+  assert(
+    routeToolNamesForTurn("帮我找一下峰哥亡命天涯这个人").includes("web_search"),
+    "tool router should route '帮我找一下' queries to web_search",
+  );
+  assert.deepEqual(
+    routeToolNamesForTurn("帮我看看这张图里写了什么"),
+    ["view_image"],
+    "tool router should attach the image understanding tool from visual-inspection intent",
+  );
+  assert(
+    routeToolNamesForTurn("打开浏览器访问这个页面，点击按钮并截图。").includes("browser_snapshot"),
+    "tool router should attach browser tools from browser intent",
+  );
   const baseAndSkillTools = buildToolSet(sandbox, []);
   assert.equal("time_now" in baseAndSkillTools, false, "time_now should not be part of the always-on base toolset");
   assert.equal("weather_now" in baseAndSkillTools, false, "weather_now should not be part of the always-on base toolset");
-  assert.equal(typeof baseAndSkillTools.grep, "object", "base grep tool should always be present");
-  assert.equal(typeof baseAndSkillTools.bash, "object", "base bash tool should always be present");
+  assert.equal("grep" in baseAndSkillTools, false, "base grep tool should not be injected when no skill or tool route requests it");
+  assert.equal("bash" in baseAndSkillTools, false, "base bash tool should not be injected when no skill or tool route requests it");
   assert.equal("browser_navigate" in baseAndSkillTools, false, "browser tools should not be injected into the default toolset");
-  assert.equal("coding_agent_run" in baseAndSkillTools, false, "coding sub-agent tools should not be injected into the default toolset");
   assert.equal("document_ingest" in baseAndSkillTools, false, "document_ingest should not be injected into the default toolset");
   assert.equal("review_coach" in baseAndSkillTools, false, "review_coach should not be injected into the default toolset");
   assert.equal("web_fetch" in baseAndSkillTools, false, "web_fetch should not be injected into the default toolset");
   assert.equal("web_search" in baseAndSkillTools, false, "web_search should not be injected into the default toolset");
-  assert.equal("runtime_script_runtime_overview" in baseAndSkillTools, false, "runtime scripts should not load unless requested");
-
-  const runtimeTools = buildToolSet(sandbox, [runtimeScriptSkill], {
-    query: "运行 runtime script 脚本任务",
-  });
-  assert.equal(
-    typeof runtimeTools.runtime_script_runtime_overview,
-    "object",
-    "runtime_script_* tools should resolve by prefix match when explicitly requested",
-  );
-
-  let unresolvedToolError: unknown = null;
-  try {
-    assertResolvableSkillTools([
-      {
-        id: "broken-skill",
-        label: "broken-skill",
-        description: "Broken smoke skill",
-        status: "available",
-        mode: "instructional",
-        sourcePath: "/tmp/broken-skill/SKILL.md",
-        sourceUrl: null,
-        allowedTools: ["missing_tool_adapter"],
-      },
-    ]);
-  } catch (error) {
-    unresolvedToolError = error;
-  }
-  assert(unresolvedToolError instanceof Error, "unknown available tool adapters should fail fast during tool assembly");
-  assert(
-    unresolvedToolError.message.includes("missing_tool_adapter"),
-    "fail-fast error should include the unresolved tool name",
-  );
+  assert.equal("view_image" in baseAndSkillTools, false, "view_image should not be injected into the default toolset");
 
   const directResolved = resolveSkillTools(
     new Set([
@@ -234,7 +277,7 @@ async function main() {
       "browser_video_watch_stop",
       "web_fetch",
       "web_search",
-      "runtime_script_runtime_overview",
+      "view_image",
     ]),
   );
   assert.equal(typeof directResolved.audio_understand, "object", "resolveSkillTools should return requested audio_understand");
@@ -246,11 +289,7 @@ async function main() {
   assert.equal(typeof directResolved.browser_video_watch_stop, "object", "resolveSkillTools should return requested browser_video_watch_stop");
   assert.equal(typeof directResolved.web_fetch, "object", "resolveSkillTools should return requested web_fetch");
   assert.equal(typeof directResolved.web_search, "object", "resolveSkillTools should return requested web_search");
-  assert.equal(
-    typeof directResolved.runtime_script_runtime_overview,
-    "object",
-    "resolveSkillTools should return requested runtime script tool",
-  );
+  assert.equal(typeof directResolved.view_image, "object", "resolveSkillTools should return requested view_image");
 
   const session = createSession("skill tools smoke");
   createSessionMessage({
@@ -300,22 +339,95 @@ async function main() {
   assert.equal(context.timings.attachmentRootsAggregated, 1, "loadContext should reuse attachment roots from the aggregated session context");
   assert.equal("time_now" in context.tools, false, "generic turns should not inject time_now");
   assert.equal("weather_now" in context.tools, false, "generic turns should not inject weather_now");
-  assert.equal(typeof context.tools.read, "object", "loadContext should keep base tools");
+  assert.equal("read" in context.tools, false, "generic turns should not inject base tools when nothing requests them");
   assert.equal("browser_navigate" in context.tools, false, "generic turns should not inject browser tools");
   assert.equal("web_fetch" in context.tools, false, "generic turns should not inject web tools");
   assert.equal("web_search" in context.tools, false, "generic turns should not inject web tools");
-  assert.equal("coding_agent_run" in context.tools, false, "generic turns should not inject coding sub-agent tools");
+  assert.equal("view_image" in context.tools, false, "generic turns should not inject image tools");
   assert.equal("document_ingest" in context.tools, false, "generic turns should not inject document_ingest");
+  assert.equal(context.firstStepToolChoice, undefined, "generic turns should not force an initial tool");
   assert.match(
     contextSystemPrompt,
-    /Skill routing rule: the six sandbox primitives(?:\s*\([^)]*\))?\s+are the always-on native tools\./i,
-    "system prompt should encode the architecture rule that skills are routed rather than always-on",
+    /Skill routing rule: skills are optional workflow instructions, not dynamic tool loaders\./i,
+    "system prompt should encode the architecture rule that skills are routed instructions rather than tool loaders",
   );
   assert.match(
     contextSystemPrompt,
-    /No extra skill was routed for this turn, so do not assume any non-primitive tool should be present\./i,
-    "system prompt should clarify when no routed skill is attached for the current turn",
+    /No extra skill was routed for this turn, so do not assume any specialized workflow guidance is present\./i,
+    "system prompt should clarify when no routed skill guidance is attached for the current turn",
   );
+
+  const imageSession = createSession("image attachment smoke");
+  const imagePath = join(tempDataDir, "view-image-smoke.png");
+  writeFileSync(
+    imagePath,
+    Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAGgwJ/l4r0WQAAAABJRU5ErkJggg==", "base64"),
+  );
+  const imageAttachment = createAttachment({
+    sessionId: imageSession.id,
+    fileName: "view-image-smoke.png",
+    mimeType: "image/png",
+    byteSize: statSync(imagePath).size,
+    storagePath: imagePath,
+    originalPath: imagePath,
+  }).attachment;
+  createSessionMessage({
+    sessionId: imageSession.id,
+    clientMessageId: "skill-tools-smoke-user-image-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "这四个字是？",
+    attachmentIds: [imageAttachment.id],
+  });
+
+  const imageToolResult = await (createViewImageTool(imageSession.id).view_image as unknown as {
+    execute: (input: { imagePath: string; prompt?: string }) => Promise<string>;
+  }).execute({
+    imagePath,
+    prompt: "识别这张图是否是有效图片，并简单说明能否读取。",
+  });
+  const parsedImageToolResult = JSON.parse(imageToolResult) as {
+    imagePath?: string;
+    prompt?: string;
+    summary?: string | null;
+    observations?: unknown[];
+    limitations?: unknown[];
+  };
+  assert.equal(
+    parsedImageToolResult.imagePath,
+    imagePath,
+    "view_image tool should return the resolved image path",
+  );
+  assert.equal(
+    parsedImageToolResult.prompt,
+    "识别这张图是否是有效图片，并简单说明能否读取。",
+    "view_image tool should echo the supplied prompt",
+  );
+  assert.equal(
+    Array.isArray(parsedImageToolResult.limitations),
+    true,
+    "view_image tool should return a limitations array",
+  );
+
+  const imageSessionContextFragments = buildSessionContextFragments(imageSession.id);
+  assert.equal(
+    imageSessionContextFragments.recentConversationFocus.latestUserHasImageAttachment,
+    true,
+    "session context aggregation should detect binary image attachments on the latest user message",
+  );
+
+  const imageContext = await loadContext(imageSession.id, controller.signal);
+  assert.equal(
+    "view_image" in imageContext.tools,
+    true,
+    "image attachment turns should surface the view_image tool in the live context",
+  );
+  assert.equal(
+    imageContext.firstStepToolChoice?.toolName,
+    "view_image",
+    "image attachment turns should prefer view_image as the initial tool",
+  );
+
   const plannedOnlyTools = new Set<string>();
   for (const skill of plannedCatalogSkills) {
     for (const toolName of skill.allowedTools) {
@@ -347,8 +459,19 @@ async function main() {
     },
   );
   assert.equal(typeof researchToolSet.web_search, "object", "research turns should inject web_search");
+  assert.equal("bash" in researchToolSet, false, "research turns should not inject bash unless a routed skill explicitly asks for it");
   assert.equal("web_fetch" in researchToolSet, false, "research turns should not inject web_fetch by default");
   assert.equal("browser_navigate" in researchToolSet, false, "research turns should not inject browser tools by default");
+
+  const imageToolSet = buildToolSet(
+    sandbox,
+    [],
+    {
+      hasImageAttachment: true,
+    },
+  );
+  assert.equal(typeof imageToolSet.view_image, "object", "image attachment turns should inject view_image");
+  assert.equal("web_search" in imageToolSet, false, "image attachment turns should not inject unrelated research tools");
 
   const browserToolSet = buildToolSet(
     sandbox,
@@ -366,7 +489,7 @@ async function main() {
   assert.equal(typeof browserToolSet.browser_video_watch_start, "object", "browser turns should inject browser_video_watch_start");
   assert.equal(typeof browserToolSet.browser_video_watch_poll, "object", "browser turns should inject browser_video_watch_poll");
   assert.equal(typeof browserToolSet.browser_video_watch_stop, "object", "browser turns should inject browser_video_watch_stop");
-  assert.equal("coding_agent_run" in browserToolSet, false, "browser turns should not inject coding sub-agent tools");
+  assert.equal(typeof browserToolSet.bash, "object", "browser turns should include bash when the routed browser skill declares it");
   const browserSkillBlock = buildSkillContextBlock(
     selectRelevantSkillDefinitions("打开浏览器访问这个页面，点击按钮并截图。"),
     { browserRelayAvailable: true },
@@ -381,11 +504,6 @@ async function main() {
     /Do not claim that browser automation is headless, stateless, or unable to retain login data/i,
     "browser skill block should explicitly prevent incorrect headless-browser claims when relay is healthy",
   );
-
-  const subagentToolSet = buildToolSet(sandbox, availableCatalogSkills, {
-    query: "请把这个复杂多文件重构交给 sub-agent 去做。",
-  });
-  assert.equal(typeof subagentToolSet.coding_agent_run, "object", "explicit sub-agent turns should inject coding_agent_run");
 
   const researchSkills = selectRelevantSkillDefinitions("帮我查一下东莞今天天气，给我最新结果。");
   assert.deepEqual(
@@ -405,7 +523,7 @@ async function main() {
     "research skill block should surface the web-search skill",
   );
   assert.equal(
-    researchSkillBlock.includes("coding-agent:"),
+    researchSkillBlock.includes("browser:"),
     false,
     "research skill block should not include unrelated skills",
   );
@@ -486,6 +604,60 @@ async function main() {
   assert.equal(typeof socialFeedToolSet.browser_video_watch_start, "object", "social feed turns should inject browser_video_watch_start");
   assert.equal(typeof socialFeedToolSet.browser_video_watch_poll, "object", "social feed turns should inject browser_video_watch_poll");
   assert.equal(typeof socialFeedToolSet.browser_video_watch_stop, "object", "social feed turns should inject browser_video_watch_stop");
+
+  const memorySkillTools = buildToolSet(
+    sandbox,
+    selectRelevantSkillDefinitions("记住我以后喜欢简洁回答"),
+    {
+      query: "记住我以后喜欢简洁回答",
+    },
+  );
+  assert.equal(typeof memorySkillTools.bash, "object", "memory turns should continue using bash for CLI-driven memory access");
+  assert.equal(typeof memorySkillTools.read, "object", "memory turns should include read when the routed skill declares it");
+  assert.equal(typeof memorySkillTools.write, "object", "memory turns should include write when the routed skill declares it");
+  assert.equal("memory_search" in memorySkillTools, false, "memory turns should not inject bespoke memory tools");
+  const memorySession = createSession("memory bash first-step smoke");
+  createSessionMessage({
+    sessionId: memorySession.id,
+    clientMessageId: "memory-bash-first-step-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "记住我以后喜欢简洁回答",
+    attachmentIds: [],
+  });
+  const memoryContext = await loadContext(memorySession.id, new AbortController().signal);
+  assert.deepEqual(
+    memoryContext.firstStepToolChoice,
+    { type: "tool", toolName: "bash" },
+    "memory turns should bias the first step toward bash when the routed skill is CLI-driven",
+  );
+
+  const threadSkillTools = buildToolSet(
+    sandbox,
+    selectRelevantSkillDefinitions("我昨天晚上跟你说啥呢来着"),
+    {
+      query: "我昨天晚上跟你说啥呢来着",
+    },
+  );
+  assert.equal(typeof threadSkillTools.bash, "object", "history turns should continue using bash for CLI-driven thread access");
+  assert.equal(typeof threadSkillTools.read, "object", "history turns should include read when the routed skill declares it");
+  assert.equal(typeof threadSkillTools.write, "object", "history turns should include write when the routed skill declares it");
+  assert.equal("thread_search" in threadSkillTools, false, "history turns should not inject bespoke thread tools");
+  const historySession = createSession("history bash first-step smoke");
+  createSessionMessage({
+    sessionId: historySession.id,
+    clientMessageId: "history-bash-first-step-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "我昨天晚上跟你说啥呢来着",
+    attachmentIds: [],
+  });
+  const historyContext = await loadContext(historySession.id, new AbortController().signal);
+  assert.deepEqual(
+    historyContext.firstStepToolChoice,
+    { type: "tool", toolName: "bash" },
+    "episodic history turns should bias the first step toward bash when the routed skill is CLI-driven",
+  );
 
   const videoWatchSkills = selectRelevantSkillDefinitions("继续看这个视频后面讲了什么，顺便听听他说了什么。");
   assert.equal(videoWatchSkills.some((skill) => skill.id === "browser"), true, "video watching should keep browser routed");
@@ -715,6 +887,197 @@ async function main() {
     "continuation focus block should include the short follow-up itself",
   );
 
+  const researchCarryoverGuardSession = createSession("research carryover guard smoke");
+  createSessionMessage({
+    sessionId: researchCarryoverGuardSession.id,
+    clientMessageId: "research-guard-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "帮我调查张雪峰。",
+    attachmentIds: [],
+  });
+  const researchCarryoverSeedContext = await loadContext(researchCarryoverGuardSession.id, controller.signal);
+  assert.equal(
+    typeof researchCarryoverSeedContext.tools.web_search,
+    "object",
+    "research seed turns should still route web_search",
+  );
+  createSessionMessage({
+    sessionId: researchCarryoverGuardSession.id,
+    clientMessageId: "research-guard-user-2",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "你变得我好卡",
+    attachmentIds: [],
+  });
+  const researchCarryoverGuardContext = await loadContext(researchCarryoverGuardSession.id, controller.signal);
+  const researchCarryoverGuardPrompt = Array.isArray(researchCarryoverGuardContext.systemPrompt)
+    ? researchCarryoverGuardContext.systemPrompt.map((message) => message.content).join("\n\n")
+    : researchCarryoverGuardContext.systemPrompt;
+  assert.equal(
+    "web_search" in researchCarryoverGuardContext.tools,
+    false,
+    "plain complaint follow-ups should not inherit research web_search routing",
+  );
+  assert.equal(
+    researchCarryoverGuardContext.routedSkillIds.includes("web-search"),
+    false,
+    "plain complaint follow-ups should not carry the research skill into the next turn",
+  );
+  assert.doesNotMatch(
+    researchCarryoverGuardPrompt,
+    /continuation-style follow-up/i,
+    "plain complaint follow-ups should not be labeled as continuation turns",
+  );
+
+  const researchDeepeningSession = createSession("research deepening fetch smoke");
+  createSessionMessage({
+    sessionId: researchDeepeningSession.id,
+    clientMessageId: "research-deepening-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "他们有过很经典的故事啊，这你都不会查吗",
+    attachmentIds: [],
+  });
+  appendSessionEvent(researchDeepeningSession.id, "tool.call.started", {
+    toolCallId: "research-deepening-search-1",
+    toolName: "web_search",
+    inputPreview: "{\"query\":\"火播君 小米粥 故事 经典\"}",
+    backend: "desktop_chrome",
+  });
+  appendSessionEvent(researchDeepeningSession.id, "tool.state.change", {
+    toolCallId: "research-deepening-search-1",
+    toolName: "web_search",
+    status: "done",
+    input: {
+      query: "火播君 小米粥 故事 经典",
+      max_results: 10,
+    },
+    output: JSON.stringify({
+      query: "火播君 小米粥 故事 经典",
+      effectiveQuery: "火播君 小米粥 故事 经典",
+      sources: [
+        {
+          citationIndex: 1,
+          title: "病院坂saki和火播君的故事 - 萌娘百科",
+          url: "https://zh.moegirl.org.cn/test",
+          domain: "zh.moegirl.org.cn",
+          sourceType: "wiki",
+        },
+      ],
+    }, null, 2),
+  });
+  appendSessionEvent(researchDeepeningSession.id, "tool.call.completed", {
+    toolCallId: "research-deepening-search-1",
+    toolName: "web_search",
+    success: true,
+    resultPreview: "{\"results\":[{\"url\":\"https://zh.moegirl.org.cn/test\"}]}",
+    durationMs: 96,
+    backend: "desktop_chrome",
+  });
+  createSessionMessage({
+    sessionId: researchDeepeningSession.id,
+    clientMessageId: "research-deepening-user-2",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "让你深度研究一下你都懒！！！",
+    attachmentIds: [],
+  });
+  const researchDeepeningContext = await loadContext(researchDeepeningSession.id, controller.signal);
+  assert.equal(
+    typeof researchDeepeningContext.tools.web_search,
+    "object",
+    "deepening a research follow-up should keep web_search available",
+  );
+  assert.equal(
+    typeof researchDeepeningContext.tools.web_fetch,
+    "object",
+    "deepening a research follow-up after search evidence should also attach web_fetch",
+  );
+  assert(
+    researchDeepeningContext.routedSkillIds.includes("web-fetch"),
+    "deepening a research follow-up after search evidence should route the web-fetch skill",
+  );
+  assert.deepEqual(
+    researchDeepeningContext.firstStepToolChoice,
+    { type: "tool", toolName: "web_fetch" },
+    "deepening a research follow-up after search evidence should bias the first step toward web_fetch",
+  );
+
+  const researchStatusUpdateSession = createSession("research status update smoke");
+  createSessionMessage({
+    sessionId: researchStatusUpdateSession.id,
+    clientMessageId: "research-status-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "帮我找一下峰哥亡命天涯这个人",
+    attachmentIds: [],
+  });
+  appendSessionEvent(researchStatusUpdateSession.id, "tool.call.started", {
+    toolCallId: "research-status-search-1",
+    toolName: "web_search",
+    inputPreview: "{\"query\":\"峰哥亡命天涯\"}",
+    backend: "desktop_chrome",
+  });
+  appendSessionEvent(researchStatusUpdateSession.id, "tool.state.change", {
+    toolCallId: "research-status-search-1",
+    toolName: "web_search",
+    status: "done",
+    input: {
+      query: "峰哥亡命天涯",
+      max_results: 10,
+    },
+    output: JSON.stringify({
+      query: "峰哥亡命天涯",
+      effectiveQuery: "峰哥亡命天涯",
+      sources: [
+        {
+          citationIndex: 1,
+          title: "刚刚，峰哥亡命天涯全平台又被禁止关注了，发生了什么？有回归的风险吗？",
+          url: "https://www.zhihu.com/question/1972731289636463313",
+          domain: "www.zhihu.com",
+          sourceType: "community",
+        },
+      ],
+    }, null, 2),
+  });
+  appendSessionEvent(researchStatusUpdateSession.id, "tool.call.completed", {
+    toolCallId: "research-status-search-1",
+    toolName: "web_search",
+    success: true,
+    resultPreview: "{\"results\":[{\"url\":\"https://www.zhihu.com/question/1972731289636463313\"}]}",
+    durationMs: 97,
+    backend: "desktop_chrome",
+  });
+  createSessionMessage({
+    sessionId: researchStatusUpdateSession.id,
+    clientMessageId: "research-status-user-2",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "现在什么情况",
+    attachmentIds: [],
+  });
+  const researchStatusUpdateContext = await loadContext(researchStatusUpdateSession.id, controller.signal);
+  assert.equal(
+    typeof researchStatusUpdateContext.tools.web_search,
+    "object",
+    "status-update follow-ups should keep web_search available",
+  );
+  assert.equal(
+    typeof researchStatusUpdateContext.tools.web_fetch,
+    "object",
+    "status-update follow-ups after evidence should also attach web_fetch",
+  );
+  assert(
+    researchStatusUpdateContext.routedSkillIds.includes("web-fetch"),
+    "status-update follow-ups after evidence should route the web-fetch skill",
+  );
+  assert.deepEqual(
+    researchStatusUpdateContext.firstStepToolChoice,
+    { type: "tool", toolName: "web_fetch" },
+    "status-update follow-ups after evidence should bias the first step toward web_fetch",
+  );
+
   const twitterContinuationSession = createSession("twitter continuation smoke");
   createSessionMessage({
     sessionId: twitterContinuationSession.id,
@@ -750,7 +1113,7 @@ async function main() {
     "twitter continuation turns should preserve research tools through the research group",
   );
   assert.equal(
-    typeof twitterContinuationContext.tools.web_fetch,
+    "web_fetch" in twitterContinuationContext.tools,
     false,
     "twitter continuation turns should not preserve fetch unless the follow-up still needs a page read",
   );
@@ -1105,7 +1468,14 @@ async function main() {
     }
 
     const baseUrl = `http://127.0.0.1:${address.port}`;
-    const webFetchTool = researchToolSet.web_fetch as any;
+    const webFetchToolSet = buildToolSet(
+      sandbox,
+      selectRelevantSkillDefinitions("读取这个网页的原文内容。"),
+      {
+        query: "读取这个网页的原文内容。",
+      },
+    );
+    const webFetchTool = webFetchToolSet.web_fetch as any;
     const webSearchTool = researchToolSet.web_search as any;
     process.env.ALICELOOP_WEB_SEARCH_ENDPOINT = `${baseUrl}/search`;
 
@@ -1202,6 +1572,48 @@ async function main() {
       multiPlatformSearchResult.results.some((result) => result.domain.includes("wikipedia.org")),
       false,
       "web_search should suppress wiki results for fresh multi-platform metric queries when primary platform results exist",
+    );
+
+    const ngaSearchResult = JSON.parse(
+      String(
+        await webSearchTool.execute({
+          query: "去 NGA 看这个角色的讨论帖子",
+          maxResults: 5,
+        }),
+      ),
+    ) as {
+      effectiveDomains?: string[];
+    };
+    assert.equal(
+      ngaSearchResult.effectiveDomains?.includes("nga.178.com"),
+      true,
+      "web_search should auto-scope NGA queries to nga.178.com",
+    );
+    assert.equal(
+      ngaSearchResult.effectiveDomains?.includes("bbs.nga.cn"),
+      true,
+      "web_search should auto-scope NGA queries to bbs.nga.cn",
+    );
+
+    const moegirlSearchResult = JSON.parse(
+      String(
+        await webSearchTool.execute({
+          query: "去萌娘百科看看这个词条",
+          maxResults: 5,
+        }),
+      ),
+    ) as {
+      effectiveDomains?: string[];
+    };
+    assert.equal(
+      moegirlSearchResult.effectiveDomains?.includes("mzh.moegirl.org.cn"),
+      true,
+      "web_search should auto-scope 萌娘百科 queries to mzh.moegirl.org.cn",
+    );
+    assert.equal(
+      moegirlSearchResult.effectiveDomains?.includes("zh.moegirl.org.cn"),
+      true,
+      "web_search should auto-scope 萌娘百科 queries to zh.moegirl.org.cn",
     );
 
     const creatorMetricSearchResult = JSON.parse(

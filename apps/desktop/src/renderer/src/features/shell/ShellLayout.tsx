@@ -1,6 +1,7 @@
 import {
   reasoningEffortDefinitions,
   type Attachment,
+  type ProviderTransportKind,
   type SessionEvent,
   type SessionMessage,
   type ReasoningEffort,
@@ -10,7 +11,8 @@ import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type Cl
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
 import { SourceLinksSection } from "./SourceLinks";
-import { ToolWorkflowCard, buildSummaryTitle, buildToolSourceLinks, type ToolSourceLink } from "./ToolWorkflowCard";
+import { TurnMetaBadge } from "./TurnMetaBadge";
+import { ToolWorkflowCard, buildToolSourceLinks, type ToolSourceLink } from "./ToolWorkflowCard";
 import { type ToolWorkflowEntry, useShellConversation } from "./useShellConversation";
 import { useRuntimeCatalogs } from "./useRuntimeCatalogs";
 import { useRuntimeSettings } from "./useRuntimeSettings";
@@ -41,6 +43,41 @@ const reasoningEffortLabels = new Map(reasoningEffortDefinitions.map((definition
 
 function formatReasoningEffortLabel(value: ReasoningEffort) {
   return reasoningEffortLabels.get(value) ?? value;
+}
+
+const providerMonograms: Record<string, string> = {
+  minimax: "MM",
+  gemini: "GM",
+  moonshot: "K2",
+  deepseek: "DS",
+  zhipu: "GLM",
+  aihubmix: "AH",
+  openai: "OA",
+  anthropic: "CL",
+  openrouter: "OR",
+};
+
+const providerDescriptions: Record<string, string> = {
+  minimax: "MiniMax 默认走 Anthropic 兼容接口，适合直接填官方 Key 开箱即用。",
+  gemini: "Google Gemini 走 OpenAI 兼容接口，官方端点是 v1beta/openai。",
+  moonshot: "Kimi / Moonshot 走 OpenAI 兼容接口，默认已填官方 v1 地址。",
+  deepseek: "DeepSeek 走 OpenAI 兼容接口，适合用官方直连或兼容中转站。",
+  zhipu: "GLM / 智谱默认走 OpenAI 兼容接口；如果你有专属套餐地址，也可以直接改 Base URL。",
+  aihubmix: "AIHubMix 适合做多家模型聚合和第三方中转站入口。",
+  openai: "官方 OpenAI，也可拿来填任何 OpenAI 兼容的第三方中转站地址。",
+  anthropic: "Claude 官方直连入口，走 Anthropic 兼容协议。",
+  openrouter: "OpenRouter 聚合多家模型，适合快速试不同模型路由。",
+};
+
+function formatProviderTransportLabel(transport: ProviderTransportKind) {
+  switch (transport) {
+    case "anthropic":
+      return "Anthropic-compatible";
+    case "openai-compatible":
+      return "OpenAI-compatible";
+    default:
+      return "Auto";
+  }
 }
 
 function ReasoningEffortIcon() {
@@ -119,6 +156,40 @@ function formatApprovalTime(isoString: string | null) {
   }).format(date);
 }
 
+function isDeleteToolApproval(approval: ToolApproval) {
+  return approval.toolName === "delete"
+    || approval.command === "rm"
+    || approval.command === "rmdir"
+    || approval.title.includes("删除");
+}
+
+function normalizeDeleteApprovalReply(content: string) {
+  return content.trim().toLowerCase().replace(/[\s，。！？、,.!?:;'"`~·]/g, "");
+}
+
+function interpretDeleteApprovalReply(content: string): "approve" | "reject" | null {
+  const normalized = normalizeDeleteApprovalReply(content);
+  if (!normalized) {
+    return null;
+  }
+
+  if (/(不行|不要|别删|别|取消|拒绝|不可以|不删|先别|no|n)/i.test(normalized)) {
+    return "reject";
+  }
+
+  if (/^(可以|行|好|同意|确认|允许|批准|继续|删吧|删掉吧|删除吧|可以删|可以删除|ok|okay|yes|y)$/i.test(normalized)) {
+    return "approve";
+  }
+
+  if (/(可以|行|好|同意|确认|允许|批准|继续|ok|okay|yes|y)/i.test(normalized)
+    && /(删|删除|rm|rmdir)/i.test(normalized)
+    && !/(不行|不要|别|取消|拒绝|不可以|不删|先别|no|n)/i.test(normalized)) {
+    return "approve";
+  }
+
+  return null;
+}
+
 function dedupeToolSourceLinks(links: ToolSourceLink[]) {
   const seen = new Set<string>();
   return links.filter((link) => {
@@ -135,6 +206,8 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
   const chunks: TimelineEntry[] = [];
   const currentTurnChunks: TimelineEntry[] = [];
   const currentTurnSourceLinks: ToolSourceLink[] = [];
+  const currentTurnTools = new Set<string>();
+  const currentTurnSkills = new Set<string>();
   const sourceLinksByToolCallId = new Map<string, ToolSourceLink[]>(
     toolWorkflowEntries.map((entry) => [entry.toolCallId, buildToolSourceLinks(entry)] as const),
   );
@@ -153,16 +226,21 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
       return;
     }
 
+    const emittedContent = currentContent.startsWith(lastEmittedContent)
+      ? currentContent.slice(lastEmittedContent.length)
+      : currentContent;
+
     currentTurnChunks.push({
       kind: "message",
       message: {
         ...activeMessage,
         id: `${activeMessage.id}::chunk-${chunkIndex++}`,
-        content: currentContent,
+        content: emittedContent,
       },
       sortSeq,
       sortTime,
       sourceLinks: [],
+      turnMeta: null,
     });
 
     lastEmittedContent = currentContent;
@@ -181,18 +259,36 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
         lastChunk.sourceLinks = sourceLinks;
       }
     }
-
+    const turnMeta = {
+      tools: [...currentTurnTools],
+      skills: [...currentTurnSkills],
+    };
+    for (const chunk of currentTurnChunks) {
+      if (chunk.kind === "message") {
+        chunk.turnMeta = turnMeta;
+      }
+    }
     chunks.push(...currentTurnChunks);
     currentTurnChunks.length = 0;
     currentTurnSourceLinks.length = 0;
+    currentTurnTools.clear();
+    currentTurnSkills.clear();
   }
 
   for (const event of sessionEvents) {
     if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
-      const payload = event.payload as { message?: SessionMessage };
+      const payload = event.payload as { message?: SessionMessage; skills?: unknown };
       const message = payload.message;
       if (!message) {
         continue;
+      }
+
+      if (message.role === "assistant" && Array.isArray(payload.skills)) {
+        for (const skill of payload.skills) {
+          if (typeof skill === "string" && skill.trim()) {
+            currentTurnSkills.add(skill.trim());
+          }
+        }
       }
 
       if (message.role !== "assistant") {
@@ -211,7 +307,10 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
 
     if (event.type.startsWith("tool.")) {
       flush(event.seq, event.createdAt);
-      const payload = event.payload as { toolCallId?: unknown };
+      const payload = event.payload as { toolCallId?: unknown; toolName?: unknown };
+      if (typeof payload.toolName === "string" && payload.toolName.trim()) {
+        currentTurnTools.add(payload.toolName.trim());
+      }
       if (typeof payload.toolCallId === "string" && !seenSourceToolCallIds.has(payload.toolCallId)) {
         seenSourceToolCallIds.add(payload.toolCallId);
         const sourceLinks = sourceLinksByToolCallId.get(payload.toolCallId);
@@ -238,6 +337,10 @@ type TimelineEntry =
       sortSeq: number | null;
       sortTime: string;
       sourceLinks: ToolSourceLink[];
+      turnMeta: {
+        tools: string[];
+        skills: string[];
+      } | null;
     }
   | {
       kind: "approval";
@@ -253,7 +356,33 @@ type TimelineEntry =
     };
 
 type TimelineBlock =
-  | { kind: "message"; message: import("@aliceloop/runtime-core").SessionMessage; sourceLinks: ToolSourceLink[] }
+  | {
+      kind: "message";
+      message: import("@aliceloop/runtime-core").SessionMessage;
+      sourceLinks: ToolSourceLink[];
+      turnMeta: {
+        tools: string[];
+        skills: string[];
+      } | null;
+    }
+  | {
+      kind: "assistant-turn";
+      turnMeta: {
+        tools: string[];
+        skills: string[];
+      };
+      items: Array<
+        | {
+            kind: "message";
+            message: import("@aliceloop/runtime-core").SessionMessage;
+            sourceLinks: ToolSourceLink[];
+          }
+        | {
+            kind: "tool";
+            tool: ToolWorkflowEntry;
+          }
+      >;
+    }
   | { kind: "approval"; approval: ToolApproval }
   | { kind: "tool"; tool: ToolWorkflowEntry }
   | {
@@ -262,20 +391,6 @@ type TimelineBlock =
       groupLabel: string;
       tools: ToolWorkflowEntry[];
     };
-
-const fileSearchSummaries = new Set(["查找文件", "搜索内容", "查看文件", "查看目录"]);
-
-function getToolWorkflowGroupMeta(entry: ToolWorkflowEntry) {
-  const summaryTitle = buildSummaryTitle(entry);
-  if (fileSearchSummaries.has(summaryTitle)) {
-    return {
-      groupKey: "file-search",
-      groupLabel: "搜索文件",
-    };
-  }
-
-  return null;
-}
 
 function buildTimeline(
   messages: import("@aliceloop/runtime-core").SessionMessage[],
@@ -315,6 +430,7 @@ function buildTimeline(
       sortSeq: messageSeqById.get(message.id) ?? null,
       sortTime: message.createdAt,
       sourceLinks: [],
+      turnMeta: null,
     });
   }
 
@@ -368,62 +484,79 @@ function buildTimeline(
   });
 
   const blocks: TimelineBlock[] = [];
-  let pendingToolGroup: {
-    groupKey: string;
-    groupLabel: string;
-    tools: ToolWorkflowEntry[];
+  let pendingAssistantTurn: {
+    turnMeta: {
+      tools: string[];
+      skills: string[];
+    } | null;
+    items: Array<
+      | {
+          kind: "message";
+          message: import("@aliceloop/runtime-core").SessionMessage;
+          sourceLinks: ToolSourceLink[];
+        }
+      | {
+          kind: "tool";
+          tool: ToolWorkflowEntry;
+        }
+    >;
   } | null = null;
 
-  function flushToolGroup() {
-    if (!pendingToolGroup) {
+  function flushAssistantTurn() {
+    if (!pendingAssistantTurn) {
       return;
     }
 
-    if (pendingToolGroup.tools.length > 1) {
+    if (pendingAssistantTurn.items.length > 0) {
       blocks.push({
-        kind: "tool-group",
-        groupKey: pendingToolGroup.groupKey,
-        groupLabel: pendingToolGroup.groupLabel,
-        tools: pendingToolGroup.tools,
-      });
-    } else {
-      blocks.push({
-        kind: "tool",
-        tool: pendingToolGroup.tools[0],
+        kind: "assistant-turn",
+        turnMeta: pendingAssistantTurn.turnMeta ?? { tools: [], skills: [] },
+        items: pendingAssistantTurn.items,
       });
     }
 
-    pendingToolGroup = null;
+    pendingAssistantTurn = null;
   }
 
   for (const entry of entries) {
-    if (entry.kind !== "tool") {
-      flushToolGroup();
-      blocks.push(entry);
+    if (entry.kind === "tool") {
+      if (!pendingAssistantTurn) {
+        pendingAssistantTurn = {
+          turnMeta: null,
+          items: [],
+        };
+      }
+
+      pendingAssistantTurn.items.push({
+        kind: "tool",
+        tool: entry.tool,
+      });
       continue;
     }
 
-    const groupMeta = getToolWorkflowGroupMeta(entry.tool);
-    if (!groupMeta) {
-      flushToolGroup();
-      blocks.push(entry);
+    if (entry.kind === "message" && entry.message.role === "assistant") {
+      if (!pendingAssistantTurn) {
+        pendingAssistantTurn = {
+          turnMeta: entry.turnMeta,
+          items: [],
+        };
+      } else if (!pendingAssistantTurn.turnMeta) {
+        pendingAssistantTurn.turnMeta = entry.turnMeta;
+      }
+
+      pendingAssistantTurn.items.push({
+        kind: "message",
+        message: entry.message,
+        sourceLinks: entry.sourceLinks,
+      });
       continue;
     }
 
-    if (pendingToolGroup && pendingToolGroup.groupKey === groupMeta.groupKey) {
-      pendingToolGroup.tools.push(entry.tool);
-      continue;
-    }
-
-    flushToolGroup();
-    pendingToolGroup = {
-      groupKey: groupMeta.groupKey,
-      groupLabel: groupMeta.groupLabel,
-      tools: [entry.tool],
-    };
+    flushAssistantTurn();
+    blocks.push(entry);
   }
 
-  flushToolGroup();
+  flushAssistantTurn();
   return blocks;
 }
 
@@ -553,6 +686,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(176);
   const [composerReserveSpace, setComposerReserveSpace] = useState(192);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const [queuedAttachments, setQueuedAttachments] = useState<Attachment[]>([]);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [reasoningDropdownOpen, setReasoningDropdownOpen] = useState(false);
@@ -575,9 +709,14 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const scrollSyncTimeoutRef = useRef<number | null>(null);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const providers = providerState.providers;
+  const configuredProviders = providers.filter((provider) => provider.hasApiKey);
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
-  const enabledProvider = providers.find((item) => item.enabled) ?? null;
+  const enabledProvider = configuredProviders.find((item) => item.enabled)
+    ?? providers.find((item) => item.enabled) ?? null;
   const activeToolApproval = conversation.pendingToolApprovals[0] ?? null;
+  const activeDeleteApproval = activeToolApproval ? isDeleteToolApproval(activeToolApproval) : false;
+  const composerHasText = composerDraft.trim().length > 0;
+  const composerHasSendableContent = composerHasText || queuedAttachments.length > 0;
   const isComposerBusy = conversation.isResponding || conversation.isAwaitingToolApproval;
   const installedMcpServers = runtimeCatalogs.mcpServers.filter((server) => server.installStatus === "installed");
   const visibleMcpServers = (mcpView === "installed" ? installedMcpServers : runtimeCatalogs.mcpServers)
@@ -682,6 +821,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       behavior: "auto",
     });
     shouldStickToBottomRef.current = true;
+    setIsAtBottom(true);
   };
 
   const scheduleViewportBottomSync = (force = false) => {
@@ -742,7 +882,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
     const updateStickiness = () => {
       const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      shouldStickToBottomRef.current = distanceFromBottom <= bottomStickThresholdPx;
+      const nextIsAtBottom = distanceFromBottom <= bottomStickThresholdPx;
+      shouldStickToBottomRef.current = nextIsAtBottom;
+      setIsAtBottom((current) => (current === nextIsAtBottom ? current : nextIsAtBottom));
     };
 
     updateStickiness();
@@ -932,6 +1074,21 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       return;
     }
 
+    if (providerEnabled) {
+      const otherEnabledProviders = providers.filter((provider) => provider.id !== activeProvider.id && provider.enabled);
+      const disableResults = await Promise.all(otherEnabledProviders.map((provider) => providerState.save({
+        providerId: provider.id,
+        baseUrl: provider.baseUrl,
+        model: provider.model,
+        enabled: false,
+      })));
+      if (disableResults.some((item) => !item.ok)) {
+        setProviderApiKeyInput("");
+        setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存，但其他已启用模型没有全部关闭。`);
+        return;
+      }
+    }
+
     setProviderApiKeyInput("");
     setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存。后续真实消息会通过当前启用的模型网关发出。`);
   }
@@ -957,6 +1114,27 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       return;
     }
 
+    if (activeDeleteApproval && activeToolApproval && queuedAttachments.length === 0) {
+      const approvalReply = interpretDeleteApprovalReply(content);
+      if (approvalReply) {
+        setComposerNotice(null);
+        const result =
+          approvalReply === "approve"
+            ? await conversation.approveToolApproval(activeToolApproval.id)
+            : await conversation.rejectToolApproval(activeToolApproval.id);
+
+        if (!result.ok) {
+          setComposerNotice(result.error ?? "命令审批失败");
+          return;
+        }
+
+        setComposerDraft("");
+        setQueuedAttachments([]);
+        setApprovalAttachments([]);
+        return;
+      }
+    }
+
     setComposerNotice(null);
     const result = await conversation.sendMessage(content, queuedAttachments.map((attachment) => attachment.id));
     if (!result.ok) {
@@ -973,6 +1151,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       return;
     }
 
+    if (conversation.isAwaitingToolApproval && activeDeleteApproval) {
+      if (composerHasText) {
+        await submitComposerDraft();
+      } else {
+        setComposerNotice("直接回复“可以删除”继续，或者回复“取消”拒绝。");
+      }
+      return;
+    }
+
     if (isComposerBusy) {
       setComposerNotice(null);
       const result = await conversation.stopResponse();
@@ -983,6 +1170,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }
 
     await submitComposerDraft();
+  }
+
+  function handleScrollToBottom() {
+    syncViewportToBottom(true);
   }
 
   async function submitComposer(event: FormEvent<HTMLFormElement>) {
@@ -1090,10 +1281,6 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
     if (uploaded.length > 0) {
       setQueuedAttachments((current) => mergeAttachments(current, uploaded));
-      const imageCount = uploaded.filter((attachment) => isImageMimeType(attachment.mimeType)).length;
-      if (imageCount > 0) {
-        setComposerNotice(`已添加 ${imageCount} 张图片，可以直接发送给 AI。`);
-      }
     }
   }
 
@@ -1162,9 +1349,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   }
 
   const composerPrimaryActionLabel = conversation.isAwaitingToolApproval
-    ? conversation.stoppingResponse
-      ? "正在停止等待中的命令审批"
-      : "等待命令确认，点击可停止"
+    ? activeDeleteApproval
+      ? composerHasText
+        ? "回复删除确认"
+        : "等待删除回复"
+      : conversation.stoppingResponse
+        ? "正在停止等待中的命令审批"
+        : "等待命令确认，点击可停止"
+    : conversation.pending
+      ? "发送消息"
     : conversation.isResponding
       ? conversation.stoppingResponse
         ? "正在停止输出"
@@ -1172,7 +1365,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       : "发送消息";
   const composerPrimaryActionDisabled = isComposerBusy
     ? conversation.stoppingResponse
-    : conversation.pending || !composerDraft.trim();
+    : conversation.pending || !composerHasSendableContent;
   const approvalCard = activeToolApproval ? (
     <div className="approval-card">
       <div className="approval-card__body">
@@ -1183,6 +1376,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           <pre className="approval-card__command"><code>{activeToolApproval.toolName === "bash" ? <><span className="approval-card__prompt">$</span> {activeToolApproval.commandLine}</> : activeToolApproval.commandLine}</code></pre>
           <span className="approval-card__cwd">{activeToolApproval.cwd}</span>
         </div>
+        <div className="approval-card__detail">{activeToolApproval.detail}</div>
         <div className="approval-card__actions">
           <button
             type="button"
@@ -1326,10 +1520,113 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               <div ref={messagesContentRef} className="workspace__messages">
                 {buildTimeline(
                   conversation.messages,
-                  conversation.resolvedToolApprovals,
+                conversation.resolvedToolApprovals,
                   conversation.toolWorkflowEntries,
                   conversation.sessionEvents,
                 ).map((entry) => {
+                  if (entry.kind === "assistant-turn") {
+                    return (
+                      <section
+                        key={`assistant-turn-${entry.items[0] && "message" in entry.items[0] ? entry.items[0].message.id : "empty"}`}
+                        className="workspace__assistant-turn"
+                      >
+                        <TurnMetaBadge tools={entry.turnMeta.tools} skills={entry.turnMeta.skills} />
+                        {entry.items.map((item, itemIndex) => {
+                          if (item.kind === "tool") {
+                            return <ToolWorkflowCard key={`tool-${item.tool.toolCallId}`} entry={item.tool} />;
+                          }
+
+                          const message = item.message;
+                          const assistantSources = message.role === "assistant" && item.sourceLinks.length > 0 ? item.sourceLinks : null;
+
+                          return (
+                            <article
+                              key={`${message.id}::${itemIndex}`}
+                              className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
+                            >
+                              <div className="workspace__message-body">
+                                <MessageContent
+                                  content={message.content}
+                                  renderMarkdown={message.role === "assistant" || message.role === "system"}
+                                />
+                              </div>
+                              {message.attachments.length > 0 ? (
+                                <>
+                                  {message.attachments.some((attachment) => isImageMimeType(attachment.mimeType)) ? (
+                                    <div className="workspace__message-images">
+                                      {message.attachments
+                                        .filter((attachment) => isImageMimeType(attachment.mimeType))
+                                        .map((attachment) => {
+                                          const imageUrl = getAttachmentContentUrl(conversation.daemonBaseUrl, conversation.sessionId, attachment);
+                                          if (!imageUrl) {
+                                            return null;
+                                          }
+
+                                          return (
+                                            <button
+                                              key={attachment.id}
+                                              type="button"
+                                              className="workspace__message-image-button"
+                                              onClick={() => setPreviewImage({ src: imageUrl, alt: attachment.fileName })}
+                                              aria-label={`查看大图：${attachment.fileName}`}
+                                            >
+                                              <img
+                                                className="workspace__message-image"
+                                                src={imageUrl}
+                                                alt={attachment.fileName}
+                                                loading="lazy"
+                                              />
+                                            </button>
+                                          );
+                                        })}
+                                    </div>
+                                  ) : null}
+                                  {message.attachments.some((attachment) => !isImageMimeType(attachment.mimeType)) ? (
+                                    <div className="workspace__message-attachments">
+                                      {message.attachments
+                                        .filter((attachment) => !isImageMimeType(attachment.mimeType))
+                                        .map((attachment) => (
+                                          <span key={attachment.id} className="workspace__attachment-chip">
+                                            {attachment.fileName}
+                                          </span>
+                                        ))}
+                                    </div>
+                                  ) : null}
+                                </>
+                              ) : null}
+                              <button
+                                type="button"
+                                className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
+                                onClick={() => void handleCopyMessage(message.id, message.content)}
+                                aria-label="复制"
+                              >
+                                {copiedMessageId === message.id ? (
+                                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                ) : (
+                                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                    <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                                    <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                                  </svg>
+                                )}
+                              </button>
+                              {assistantSources ? (
+                                <SourceLinksSection
+                                  links={assistantSources}
+                                  detailsClassName="workspace__message-sources"
+                                  summaryClassName="tool-workflow-card__sources-summary workspace__message-sources-summary"
+                                  listClassName="tool-workflow-card__sources-list workspace__message-sources-list"
+                                  linkClassName="tool-workflow-card__source-link workspace__message-source-link"
+                                />
+                              ) : null}
+                            </article>
+                          );
+                        })}
+                      </section>
+                    );
+                  }
+
                   if (entry.kind === "tool-group") {
                     return (
                       <section
@@ -1369,7 +1666,6 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   }
 
                   const message = entry.message;
-                  const assistantSources = message.role === "assistant" && entry.sourceLinks.length > 0 ? entry.sourceLinks : null;
 
                   return (
                     <article
@@ -1425,15 +1721,6 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             </div>
                           ) : null}
                         </>
-                      ) : null}
-                      {assistantSources ? (
-                        <SourceLinksSection
-                          links={assistantSources}
-                          detailsClassName="workspace__message-sources"
-                          summaryClassName="tool-workflow-card__sources-summary workspace__message-sources-summary"
-                          listClassName="tool-workflow-card__sources-list workspace__message-sources-list"
-                          linkClassName="tool-workflow-card__source-link workspace__message-source-link"
-                        />
                       ) : null}
                       <button
                         type="button"
@@ -1492,6 +1779,20 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           ) : null}
 
           <form ref={composerRef} className="composer" onSubmit={submitComposer}>
+            {!isAtBottom ? (
+              <button
+                type="button"
+                className="composer__jump-to-bottom"
+                onClick={handleScrollToBottom}
+                aria-label="回到底部"
+                title="回到底部"
+              >
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 5.5v11" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="m7.5 12.5 4.5 4.5 4.5-4.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            ) : null}
             {queuedAttachments.length > 0 ? (
               <div className="composer__attachment-queue">
                 {queuedAttachments.map((attachment) => (
@@ -1560,22 +1861,28 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 </button>
                 {modelDropdownOpen ? (
                   <div className="composer__dropdown">
-                    {providers.map((provider) => (
-                      <button
-                        key={provider.id}
-                        type="button"
-                        className={`composer__dropdown-item${provider.enabled ? " composer__dropdown-item--active" : ""}`}
-                        onClick={() => {
-                          void providerState.save({ providerId: provider.id, baseUrl: provider.baseUrl, model: provider.model, enabled: true });
-                          providers.filter((p) => p.id !== provider.id && p.enabled).forEach((p) => {
-                            void providerState.save({ providerId: p.id, baseUrl: p.baseUrl, model: p.model, enabled: false });
-                          });
-                          setModelDropdownOpen(false);
-                        }}
-                      >
-                        {provider.label} · {provider.model}
-                      </button>
-                    ))}
+                    {(configuredProviders.length > 0 ? configuredProviders : providers.filter((provider) => provider.enabled)).length > 0 ? (
+                      (configuredProviders.length > 0 ? configuredProviders : providers.filter((provider) => provider.enabled)).map((provider) => (
+                        <button
+                          key={provider.id}
+                          type="button"
+                          className={`composer__dropdown-item${provider.enabled ? " composer__dropdown-item--active" : ""}`}
+                          onClick={() => {
+                            void providerState.save({ providerId: provider.id, baseUrl: provider.baseUrl, model: provider.model, enabled: true });
+                            providers.filter((p) => p.id !== provider.id && p.enabled).forEach((p) => {
+                              void providerState.save({ providerId: p.id, baseUrl: p.baseUrl, model: p.model, enabled: false });
+                            });
+                            setModelDropdownOpen(false);
+                          }}
+                        >
+                          {provider.label} · {provider.model}
+                        </button>
+                      ))
+                    ) : (
+                      <div className="composer__dropdown-item composer__dropdown-item--empty">
+                        先去设置里配置 Chat API
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -1615,18 +1922,18 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               </div>
 
               {conversation.isAwaitingToolApproval ? (
-                <span className="composer__status-chip">等待命令确认</span>
+                <span className="composer__status-chip">{activeDeleteApproval ? "等待删除回复" : "等待命令确认"}</span>
               ) : null}
 
               <span className="composer__spacer" />
               <button
                 type="submit"
-                className={`composer__send${conversation.isAwaitingToolApproval ? " composer__send--waiting" : conversation.isResponding ? " composer__send--stop" : ""}`}
+                className={`composer__send${conversation.isAwaitingToolApproval && !activeDeleteApproval ? " composer__send--waiting" : conversation.isResponding ? " composer__send--stop" : ""}`}
                 disabled={composerPrimaryActionDisabled}
                 aria-label={composerPrimaryActionLabel}
                 title={composerPrimaryActionLabel}
               >
-                {isComposerBusy ? (
+                {conversation.isResponding || (conversation.isAwaitingToolApproval && !activeDeleteApproval) ? (
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <rect x="7.5" y="7.5" width="9" height="9" rx="2.4" fill="currentColor" stroke="none" />
                   </svg>
@@ -1662,6 +1969,127 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               </header>
 
               <div className="settings-content__body">
+                <h3 className="settings-section-title">模型提供商</h3>
+                <div className="settings-providers">
+                  <div className="provider-notice">
+                    Kimi、DeepSeek、GLM、MiniMax 这类官方接口都能直接在这里配置。
+                    {" "}
+                    OpenAI、AIHubMix、OpenRouter 这些入口也能拿来接第三方中转站，只要填兼容的 Base URL 即可。
+                    {" "}
+                    ACP provider 目前还没有接进 Aliceloop runtime，这一块现在不是漏 UI，而是底层还没实现。
+                  </div>
+                  {providerState.error ? <div className="provider-notice provider-notice--error">{providerState.error}</div> : null}
+                  <div className="settings-providers__body">
+                    <div className="provider-list">
+                      {providers.map((provider) => (
+                        <button
+                          key={provider.id}
+                          type="button"
+                          className={`provider-list__item${provider.id === activeProvider?.id ? " provider-list__item--active" : ""}`}
+                          onClick={() => {
+                            setActiveProviderId(provider.id);
+                            setProviderNotice(null);
+                          }}
+                        >
+                          <div className="provider-list__identity">
+                            <span className="provider-list__logo" aria-hidden="true">
+                              {providerMonograms[provider.id] ?? provider.label.slice(0, 2).toUpperCase()}
+                            </span>
+                            <div>
+                              <div className="provider-list__name">{provider.label}</div>
+                              <div className="provider-list__subtitle">{formatProviderTransportLabel(provider.transport)}</div>
+                            </div>
+                          </div>
+                          <span className={`provider-list__status${provider.enabled ? " provider-list__status--active" : ""}`} />
+                        </button>
+                      ))}
+                    </div>
+
+                    {activeProvider ? (
+                      <div className="provider-detail">
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "18px" }}>
+                          <div style={{ display: "grid", gap: "8px" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                              <div className="provider-detail__icon" aria-hidden="true" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>
+                                {providerMonograms[activeProvider.id] ?? activeProvider.label.slice(0, 2).toUpperCase()}
+                              </div>
+                              <div>
+                                <h3 style={{ margin: 0 }}>{activeProvider.label}</h3>
+                                <p style={{ margin: "6px 0 0" }}>{providerDescriptions[activeProvider.id] ?? "支持自定义 Base URL、模型和 API Key。"} </p>
+                              </div>
+                            </div>
+                            <div className="provider-field">
+                              <label>当前协议</label>
+                              <div className="provider-field__box provider-field__box--input">{formatProviderTransportLabel(activeProvider.transport)}</div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            className={`provider-detail__toggle${providerEnabled ? " provider-detail__toggle--on" : ""}`}
+                            aria-label={providerEnabled ? "停用当前 provider" : "启用当前 provider"}
+                            title={providerEnabled ? "停用当前 provider" : "启用当前 provider"}
+                            onClick={() => setProviderEnabled((current) => !current)}
+                          />
+                        </div>
+
+                        <div className="provider-notice">
+                          API Key 留空表示继续沿用已保存的 key，不会把旧 key 清掉。
+                          {" "}
+                          如果你用的是第三方中转站，通常只需要把 Base URL 改成中转地址，模型名填它支持的名字。
+                        </div>
+                        {providerNotice ? <div className="provider-notice">{providerNotice}</div> : null}
+
+                        <div className="provider-field">
+                          <label>API Key</label>
+                          <input
+                            className="provider-field__input"
+                            type="password"
+                            value={providerApiKeyInput}
+                            placeholder={activeProvider.apiKeyMasked ? `已保存：${activeProvider.apiKeyMasked}` : `输入 ${activeProvider.label} API Key`}
+                            onChange={(event) => setProviderApiKeyInput(event.target.value)}
+                          />
+                        </div>
+
+                        <div className="provider-field">
+                          <label>Base URL</label>
+                          <input
+                            className="provider-field__input"
+                            type="text"
+                            value={providerBaseUrlInput}
+                            onChange={(event) => setProviderBaseUrlInput(event.target.value)}
+                          />
+                        </div>
+
+                        <div className="provider-field">
+                          <label>默认模型</label>
+                          <input
+                            className="provider-field__input"
+                            type="text"
+                            value={providerModelInput}
+                            onChange={(event) => setProviderModelInput(event.target.value)}
+                          />
+                        </div>
+
+                        <div className="provider-actions">
+                          <button
+                            type="button"
+                            className="settings-actions__button settings-actions__button--primary"
+                            onClick={() => void saveActiveProvider()}
+                            disabled={providerState.savingProviderId !== null}
+                          >
+                            {providerState.savingProviderId === activeProvider.id ? "保存中..." : "保存 Provider"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="provider-detail">
+                        <div className="provider-notice">当前还没有可编辑的 provider。</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 <h3 className="settings-section-title">推理</h3>
                 <div className="settings-panel">
                   <div className="settings-panel__heading">

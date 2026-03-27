@@ -1,18 +1,34 @@
 import { generateText, Output } from "ai";
 import { z } from "zod";
+import type { MemoryFactKind } from "@aliceloop/runtime-core";
 import { createProviderModel } from "../../providers/providerModelFactory";
-import { getActiveProviderConfig } from "../../repositories/providerRepository";
+import { getToolModelConfig } from "../../providers/toolModelResolver";
 import { getMemoryConfig } from "./memoryConfig";
-import { createMemory, findMemoryByExactContent } from "./memoryRepository";
 
 interface DistillationInput {
   userMessages: string[];
   assistantResponse: string;
 }
 
+export interface DistilledMemory {
+  content: string;
+  durability: "permanent" | "temporary";
+  relatedTopics: string[];
+  factKind: MemoryFactKind | null;
+  factKey: string | null;
+}
+
+export interface DistilledMemoryBatch {
+  permanent: DistilledMemory[];
+  temporary: DistilledMemory[];
+}
+
+const memoryFactKindSchema = z.enum(["preference", "constraint", "decision", "profile", "account", "workflow", "other"]);
 const extractedMemorySchema = z.object({
   content: z.string().trim().min(1).max(500),
   durability: z.enum(["permanent", "temporary"]),
+  factKind: memoryFactKindSchema.nullable().default(null),
+  factKey: z.string().trim().min(1).max(120).nullable().default(null),
   relatedTopics: z.array(z.string().trim().min(1).max(80)).max(6).default([]),
 });
 
@@ -50,7 +66,7 @@ export async function extractMemoriesFromConversation(
     return [] as ExtractedMemory[];
   }
 
-  const provider = getActiveProviderConfig();
+  const provider = getToolModelConfig();
   if (!provider?.apiKey) {
     return [] as ExtractedMemory[];
   }
@@ -76,8 +92,11 @@ export async function extractMemoriesFromConversation(
         description: "High-value facts worth remembering from the conversation.",
       }),
       prompt: [
-        "Extract up to 3 useful long-term memories from this conversation.",
-        "Keep only durable user preferences, project constraints, stable decisions, workflow conventions, or reusable solutions that would help future work.",
+        "Extract up to 3 useful memory items from this conversation.",
+        "Return both temporary session notes and permanent long-term facts when they are present.",
+        "For temporary items, capture rolling session summary details such as temporary preferences, current conclusions, or topic summaries.",
+        "For permanent items, keep only durable user preferences, project constraints, stable decisions, workflow conventions, or reusable solutions that would help future work.",
+        "For permanent items, fill factKind and factKey. Use a short stable lowercase fact key such as preferred-language, reply-style, or repo-boundary.",
         "Do not store one-off research facts, biographies, web-search results, current events, or temporary file operations unless the user explicitly asked to remember them.",
         "Do not restate the entire conversation. Skip transient chit-chat. Return an empty array when nothing is worth storing.",
         "",
@@ -96,11 +115,14 @@ export async function extractMemoriesFromConversation(
   }
 }
 
-export async function reflectOnTurn(input: DistillationInput): Promise<void> {
+export async function reflectOnTurn(input: DistillationInput): Promise<DistilledMemoryBatch> {
   const latestUserMessage = input.userMessages.at(-1)?.trim();
   const assistantResponse = input.assistantResponse.trim();
   if (!latestUserMessage || !assistantResponse) {
-    return;
+    return {
+      permanent: [],
+      temporary: [],
+    };
   }
 
   const extractedMemories = await extractMemoriesFromConversation(
@@ -108,16 +130,16 @@ export async function reflectOnTurn(input: DistillationInput): Promise<void> {
     assistantResponse,
   );
 
-  for (const memory of extractedMemories) {
-    if (findMemoryByExactContent(memory.content)) {
-      continue;
-    }
+  const memories = extractedMemories.map((memory) => ({
+    content: memory.content,
+    durability: memory.durability,
+    relatedTopics: memory.relatedTopics,
+    factKind: memory.factKind,
+    factKey: memory.factKey,
+  }));
 
-    await createMemory({
-      content: memory.content,
-      source: "auto",
-      durability: memory.durability,
-      relatedTopics: memory.relatedTopics,
-    });
-  }
+  return {
+    permanent: memories.filter((memory) => memory.durability === "permanent"),
+    temporary: memories.filter((memory) => memory.durability === "temporary"),
+  };
 }

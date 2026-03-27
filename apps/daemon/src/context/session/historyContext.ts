@@ -481,7 +481,7 @@ export function buildHistoricalContextBlock(
 
   return {
     content: [
-      "## Relevant Session History",
+      "## Episodic History",
       "以下内容来自按会话路由命中的历史对话，仅作历史参考；如果和用户这一轮的新要求冲突，以这一轮为准。",
       "",
       ...sectionBlocks,

@@ -2,21 +2,25 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { StoredProviderConfig } from "../repositories/providerRepository";
 
-function normalizeGatewayBaseUrl(baseUrl: string) {
+function normalizeGatewayBaseUrl(baseUrl: string, useAnthropicTransport: boolean) {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (!trimmed) {
     return "";
   }
 
-  if (trimmed.endsWith("/v1/messages")) {
+  if (useAnthropicTransport && trimmed.endsWith("/v1/messages")) {
     return trimmed.slice(0, -"/messages".length);
   }
 
-  if (trimmed.endsWith("/v1")) {
+  if (useAnthropicTransport && trimmed.endsWith("/v1")) {
     return trimmed;
   }
 
-  return `${trimmed}/v1`;
+  if (useAnthropicTransport) {
+    return `${trimmed}/v1`;
+  }
+
+  return trimmed;
 }
 
 function resolveEffectiveTransport(config: StoredProviderConfig) {
@@ -32,8 +36,9 @@ function resolveEffectiveTransport(config: StoredProviderConfig) {
 }
 
 export function createProviderModel(config: StoredProviderConfig) {
-  const baseUrl = normalizeGatewayBaseUrl(config.baseUrl);
-  switch (resolveEffectiveTransport(config)) {
+  const effectiveTransport = resolveEffectiveTransport(config);
+  const baseUrl = normalizeGatewayBaseUrl(config.baseUrl, effectiveTransport === "anthropic");
+  switch (effectiveTransport) {
     case "anthropic": {
       const provider = createAnthropic({
         baseURL: baseUrl,

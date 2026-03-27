@@ -18,6 +18,11 @@ type RuntimePing = {
   activeSkillAdapters?: string[];
 };
 
+export type ChromeRelayState = {
+  browserRelay: BrowserRelayCapability | null;
+  attachedTabs: number;
+};
+
 export type DesktopPickedFile = {
   kind: "file";
   name: string;
@@ -45,14 +50,6 @@ export type DesktopPickerResult = {
   entries: Array<DesktopPickedFile | DesktopPickedFolder>;
 };
 
-export type DesktopDirectoryPickerResult = {
-  canceled: boolean;
-  directories: Array<{
-    name: string;
-    path: string;
-  }>;
-};
-
 export type DesktopOpenPathResult = {
   ok: boolean;
   error?: string;
@@ -62,12 +59,15 @@ type DesktopBridge = {
   getAppMeta(): Promise<DesktopMeta>;
   pingRuntime(): Promise<RuntimePing>;
   openFileOrFolder(): Promise<DesktopPickerResult>;
-  openProjectDirectories(): Promise<DesktopDirectoryPickerResult>;
   openPath(path: string): Promise<DesktopOpenPathResult>;
   closeWindow(): Promise<void>;
   minimizeWindow(): Promise<void>;
   toggleFullscreenWindow(): Promise<void>;
   openSettings(): Promise<void>;
+  openChromeRelay(): Promise<void>;
+  getChromeRelayState(): Promise<ChromeRelayState | null>;
+  regenerateChromeRelayToken(): Promise<ChromeRelayState | null>;
+  launchChromeRelay(): Promise<ChromeRelayState | null>;
   mode: "electron" | "web-preview";
 };
 
@@ -107,12 +107,6 @@ function createBrowserBridge(): DesktopBridge {
         entries: [],
       };
     },
-    async openProjectDirectories() {
-      return {
-        canceled: true,
-        directories: [],
-      };
-    },
     async openPath() {
       return {
         ok: false,
@@ -135,6 +129,18 @@ function createBrowserBridge(): DesktopBridge {
     },
     async openSettings() {
       return;
+    },
+    async openChromeRelay() {
+      return;
+    },
+    async getChromeRelayState() {
+      return null;
+    },
+    async regenerateChromeRelayToken() {
+      return null;
+    },
+    async launchChromeRelay() {
+      return null;
     },
   };
 }

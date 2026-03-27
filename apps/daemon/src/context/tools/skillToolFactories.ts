@@ -1,9 +1,8 @@
 import { createAudioUnderstandTool } from "./audioUnderstandTool";
 import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
-import { createCodingAgentTool } from "./codingAgentTool";
 import { createManagedTaskTools } from "./managedTaskTools";
-import { createSkillTool } from "./skillTool";
+import { createViewImageTool } from "./viewImageTool";
 import { createWebFetchTool } from "./webFetchTool";
 import { createWebSearchTool } from "./webSearchTool";
 
@@ -22,6 +21,7 @@ const cachedBrowserTools = new Map<string, ToolSet>();
 const cachedWebFetchTools = new Map<string, ToolSet>();
 const cachedWebSearchTools = new Map<string, ToolSet>();
 const cachedAudioUnderstandTools = new Map<string, ToolSet>();
+const cachedViewImageTools = new Map<string, ToolSet>();
 
 interface SkillToolFactoryOptions {
   sessionId?: string;
@@ -79,6 +79,18 @@ function getAudioUnderstandToolSet(sessionId?: string) {
   return tools;
 }
 
+function getViewImageToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedViewImageTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createViewImageTool(sessionId);
+  cachedViewImageTools.set(cacheKey, tools);
+  return tools;
+}
+
 const BROWSER_TOOL_NAMES = new Set([
   "browser_navigate",
   "browser_snapshot",
@@ -103,9 +115,9 @@ const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) =
   ["browser_video_watch_start", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_video_watch_poll", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_video_watch_stop", (options) => getBrowserToolSet(options?.sessionId)],
-  ["coding_agent_run", () => createCodingAgentTool()],
   ["document_ingest", () => ({ document_ingest: getManagedTaskTools().document_ingest })],
   ["review_coach", () => ({ review_coach: getManagedTaskTools().review_coach })],
+  ["view_image", (options) => getViewImageToolSet(options?.sessionId)],
   ["web_fetch", (options) => getWebFetchToolSet(options?.sessionId)],
   ["web_search", (options) => getWebSearchToolSet(options?.sessionId)],
 ]);
@@ -152,7 +164,7 @@ function resolveSkillToolSelection(requestedNames: Set<string>, options?: SkillT
 }
 
 /**
- * Resolve skill-requested tool names into concrete ToolSet entries.
+ * Resolve tool-router-selected tool names into concrete ToolSet entries.
  * Base tools (grep/glob/read/write/edit/bash) are skipped — they are always loaded.
  * runtime_script_* names use prefix matching against managedTaskTools.
  */
@@ -164,6 +176,13 @@ export function listUnresolvedSkillTools(requestedNames: Set<string>) {
   return resolveSkillToolSelection(requestedNames).unresolved;
 }
 
+export function listAvailableToolAdapterNames() {
+  return [...new Set([
+    ...BROWSER_TOOL_NAMES,
+    ...skillToolFactories.keys(),
+  ])].sort();
+}
+
 /** Reset the managed-task cache (for testing). */
 export function resetSkillToolCache() {
   cachedManagedTaskTools = null;
@@ -171,17 +190,5 @@ export function resetSkillToolCache() {
   cachedWebFetchTools.clear();
   cachedWebSearchTools.clear();
   cachedAudioUnderstandTools.clear();
-  cachedSkillTool = undefined;
-}
-
-/**
- * Get the Skill tool - always available for agent to invoke skills.
- */
-let cachedSkillTool: ToolSet | undefined;
-
-export function getSkillTool(): ToolSet {
-  if (!cachedSkillTool) {
-    cachedSkillTool = createSkillTool();
-  }
-  return cachedSkillTool;
+  cachedViewImageTools.clear();
 }

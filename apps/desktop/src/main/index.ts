@@ -1,9 +1,12 @@
 import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
+import { existsSync } from "node:fs";
 import { focusOrCreateSettingsWindow } from "./settingsWindow";
+import { focusOrCreateChromeRelayWindow } from "./chromeRelayWindow";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { ChromeRelayBridgeServer } from "./chromeRelayBridgeServer";
 import { ChromeRelayHttpServer } from "./chromeRelayHttpServer";
 import { ChromeRelayService, createDefaultChromeRelayServiceOptions } from "./chromeRelayService";
 
@@ -12,7 +15,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL;
 let chromeRelayServer: ChromeRelayHttpServer | null = null;
+let chromeRelayBridgeServer: ChromeRelayBridgeServer | null = null;
 const debugCaptureEnabled = process.env.ALICELOOP_DEBUG_CAPTURE === "1";
+
+function resolveChromeRelayExtensionDir() {
+  const candidates = [
+    join(process.resourcesPath, "chrome-extension"),
+    join(app.getAppPath(), "resources/chrome-extension"),
+  ];
+
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
 
 function escapeHtml(value: string) {
   return value
@@ -410,38 +423,9 @@ ipcMain.handle("dialog:open-file-or-folder", async () => {
   };
 });
 
-ipcMain.handle("dialog:open-project-directories", async () => {
-  const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-  const result = await dialog.showOpenDialog(window, {
-    properties: ["openDirectory", "multiSelections"],
-  });
-
-  if (result.canceled || result.filePaths.length === 0) {
-    return {
-      canceled: true,
-      directories: [],
-    };
-  }
-
-  return {
-    canceled: false,
-    directories: result.filePaths.map((selectedPath) => ({
-      name: basename(selectedPath),
-      path: selectedPath,
-    })),
-  };
-});
-
 ipcMain.handle("path:open", async (_event, targetPath: string) => {
   const normalizedPath = targetPath.startsWith("~/") ? join(homedir(), targetPath.slice(2)) : targetPath;
-  const error = await shell.openPath(normalizedPath);
-
-  if (error) {
-    return {
-      ok: false,
-      error,
-    };
-  }
+  shell.showItemInFolder(normalizedPath);
 
   return {
     ok: true,
@@ -479,11 +463,34 @@ ipcMain.handle("window:open-settings", () => {
   focusOrCreateSettingsWindow();
 });
 
+ipcMain.handle("window:open-chrome-relay", () => {
+  focusOrCreateChromeRelayWindow();
+});
+
+ipcMain.handle("chrome-relay:get-status", () => chromeRelayBridgeServer?.getMeta() ?? null);
+
+ipcMain.handle("chrome-relay:regenerate-token", () => chromeRelayBridgeServer?.regenerateToken() ?? null);
+
+ipcMain.handle("chrome-relay:launch", async () => {
+  if (!chromeRelayServer) {
+    return null;
+  }
+
+  return await chromeRelayServer.launchChrome();
+});
+
 app.whenReady().then(() => {
-  const chromeRelayService = new ChromeRelayService(createDefaultChromeRelayServiceOptions(app.getPath("userData")));
+  const chromeExtensionDir = resolveChromeRelayExtensionDir();
+  const chromeRelayService = new ChromeRelayService(
+    createDefaultChromeRelayServiceOptions(app.getPath("userData"), chromeExtensionDir),
+  );
   chromeRelayServer = new ChromeRelayHttpServer(chromeRelayService);
   void chromeRelayServer.start().catch((error) => {
     console.error("[desktop] Failed to start Chrome relay server", error);
+  });
+  chromeRelayBridgeServer = new ChromeRelayBridgeServer();
+  void chromeRelayBridgeServer.start().catch((error) => {
+    console.error("[desktop] Failed to start Chrome relay bridge server", error);
   });
   createWindow();
 
@@ -502,4 +509,5 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   void chromeRelayServer?.stop().catch(() => undefined);
+  void chromeRelayBridgeServer?.stop().catch(() => undefined);
 });

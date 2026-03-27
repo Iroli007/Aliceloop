@@ -114,11 +114,14 @@ async function getJson<T>(url: string) {
 }
 
 async function sendJson<T>(url: string, method: "POST" | "PUT" | "DELETE", body?: unknown) {
+  const headers: Record<string, string> = {};
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
   const response = await fetch(url, {
     method,
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
@@ -155,7 +158,7 @@ async function main() {
     daemon = await startBuiltDaemon(commonEnv);
     const health = await waitForHealth(baseUrl);
     assert.equal(health.service, "aliceloop-daemon", "daemon should report service name");
-    assert(health.activeSkills.includes("coding-agent"), "built daemon should load skills from source tree");
+    assert(health.activeSkills.includes("web-search"), "built daemon should load skills from source tree");
 
     const config = await getJson<{
       enabled: boolean;
@@ -182,6 +185,59 @@ async function main() {
       `${baseUrl}/api/memory/search?q=${encodeURIComponent("fastify server")}&limit=5`,
     );
     assert.equal(search[0]?.id, created.json?.id, "semantic memory search should find the created memory");
+
+    const typedFact = {
+      content: "Prefer concise answers in Chinese.",
+      source: "manual",
+      durability: "permanent",
+      factKind: "preference",
+      factKey: "reply-style",
+      factState: "active",
+      relatedTopics: ["language", "style"],
+    };
+    const factCreated = await sendJson<{
+      id: string;
+      content: string;
+      factKind: string | null;
+      factKey: string | null;
+      factState: string;
+    }>(`${baseUrl}/api/memory/entries`, "POST", typedFact);
+    assert.equal(factCreated.status, 201, "typed fact creation should succeed");
+    assert.equal(factCreated.json?.factState, "active", "new typed fact should start active");
+
+    const factDuplicate = await sendJson<{
+      id: string;
+      factState: string;
+    }>(`${baseUrl}/api/memory/entries`, "POST", typedFact);
+    assert.equal(factDuplicate.status, 201, "duplicate typed fact should still return a record");
+    assert.equal(factDuplicate.json?.id, factCreated.json?.id, "same key and content should reuse the active fact");
+
+    const factSuperseding = await sendJson<{
+      id: string;
+      factState: string;
+    }>(`${baseUrl}/api/memory/entries`, "POST", {
+      ...typedFact,
+      content: "Prefer direct answers in Chinese.",
+    });
+    assert.equal(factSuperseding.status, 201, "superseding typed fact should succeed");
+    assert.notEqual(factSuperseding.json?.id, factCreated.json?.id, "changed content should create a new active fact");
+
+    const supersededRow = await getJson<{ id: string; factState: string }>(`${baseUrl}/api/memory/entries/${factCreated.json?.id}`);
+    assert.equal(supersededRow.factState, "superseded", "previous active fact should be superseded");
+
+    const retract = await sendJson<{ ok: boolean }>(`${baseUrl}/api/memory/entries/${factSuperseding.json?.id}`, "DELETE");
+    assert.equal(retract.status, 200, "typed fact delete should succeed");
+
+    const retractedRow = await getJson<{ id: string; factState: string }>(`${baseUrl}/api/memory/entries/${factSuperseding.json?.id}`);
+    assert.equal(retractedRow.factState, "retracted", "deleted typed fact should be retracted");
+
+    const activeMemories = await getJson<Array<{ id: string; factState: string }>>(
+      `${baseUrl}/api/memory/entries?limit=20`,
+    );
+    assert(
+      activeMemories.every((memory) => memory.factState === "active"),
+      "memory listing should default to active records only",
+    );
 
     const updatedConfig = await sendJson<{ maxRetrievalCount: number; queryRewrite: boolean }>(
       `${baseUrl}/api/memory/config`,

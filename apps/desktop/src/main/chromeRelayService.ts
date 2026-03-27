@@ -749,6 +749,7 @@ export interface ChromeRelayServiceOptions {
   profileDir: string;
   screenshotRoot: string;
   audioCaptureRoot: string;
+  chromeExtensionDir: string | null;
 }
 
 type RelayTabRecord = {
@@ -765,6 +766,8 @@ export class ChromeRelayService {
 
   private readonly audioCaptureRoot: string;
 
+  private readonly chromeExtensionDir: string | null;
+
   private chromeProcess: ChildProcess | null = null;
 
   private browser: Browser | null = null;
@@ -780,6 +783,7 @@ export class ChromeRelayService {
     this.profileDir = options.profileDir;
     this.screenshotRoot = options.screenshotRoot;
     this.audioCaptureRoot = options.audioCaptureRoot;
+    this.chromeExtensionDir = options.chromeExtensionDir;
   }
 
   getCapability(baseUrl: string, token: string): ChromeRelayMeta {
@@ -849,6 +853,10 @@ export class ChromeRelayService {
       [
         "--remote-debugging-port=0",
         `--user-data-dir=${this.profileDir}`,
+        ...(this.chromeExtensionDir ? [
+          `--disable-extensions-except=${this.chromeExtensionDir}`,
+          `--load-extension=${this.chromeExtensionDir}`,
+        ] : []),
         "about:blank",
       ],
       {
@@ -1103,6 +1111,21 @@ export class ChromeRelayService {
     }
   }
 
+  getAttachedTabCount() {
+    this.pruneClosedTabs();
+    return this.tabs.size;
+  }
+
+  async launchChrome() {
+    try {
+      await this.getBrowser();
+      this.markHealthy();
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
   async closeTab(tabId: string) {
     try {
       const record = await this.getTabRecord(tabId);
@@ -1141,11 +1164,12 @@ export class ChromeRelayService {
   }
 }
 
-export function createDefaultChromeRelayServiceOptions(userDataDir: string): ChromeRelayServiceOptions {
+export function createDefaultChromeRelayServiceOptions(userDataDir: string, chromeExtensionDir: string | null = null): ChromeRelayServiceOptions {
   return {
     chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     profileDir: join(userDataDir, "chrome-relay-profile"),
     screenshotRoot: join(userDataDir, DEFAULT_SCREENSHOT_ROOT_NAME),
     audioCaptureRoot: join(userDataDir, DEFAULT_AUDIO_CAPTURE_ROOT_NAME),
+    chromeExtensionDir,
   };
 }

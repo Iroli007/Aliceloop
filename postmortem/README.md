@@ -43,3 +43,4 @@ YYYY-MM-DD-<slug>.md
 | 日期 | 文件 | 严重级别 | 摘要 |
 |------|------|----------|------|
 | 2026-03-21 | [2026-03-21-ghost-settings-sidebar.md](./2026-03-21-ghost-settings-sidebar.md) | P1 | Dev 模式环境变量名错误导致 Electron 加载旧 dist 产物，设置侧边栏"删不掉" |
+| 2026-03-25 | [2026-03-25-sidebar-thread-overflow.md](./2026-03-25-sidebar-thread-overflow.md) | P1 | 侧边栏拉到极限时主内容区没有同步重算边界，导致用户气泡和 AI 回复越界 |

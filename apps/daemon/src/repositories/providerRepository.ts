@@ -47,21 +47,25 @@ function normalizeSecretText(value: string) {
   return value.trim();
 }
 
-function normalizeGatewayBaseUrl(value: string) {
+function normalizeGatewayBaseUrl(value: string, transport: ProviderTransportKind) {
   const normalized = normalizeConfigText(value).replace(/\/+$/, "");
   if (!normalized) {
     return "";
   }
 
-  if (normalized.endsWith("/v1/messages")) {
+  if (transport === "anthropic" && normalized.endsWith("/v1/messages")) {
     return normalized.slice(0, -"/messages".length);
   }
 
-  if (normalized.endsWith("/v1")) {
+  if (transport === "anthropic" && normalized.endsWith("/v1")) {
     return normalized;
   }
 
-  return `${normalized}/v1`;
+  if (transport === "anthropic") {
+    return `${normalized}/v1`;
+  }
+
+  return normalized;
 }
 
 function maskApiKey(apiKey: string | null) {
@@ -189,7 +193,7 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
   const next: StoredProviderConfig = {
     ...current,
     transport: input.transport ?? current.transport,
-    baseUrl: input.baseUrl !== undefined ? normalizeGatewayBaseUrl(input.baseUrl) || current.baseUrl : current.baseUrl,
+    baseUrl: input.baseUrl !== undefined ? normalizeGatewayBaseUrl(input.baseUrl, input.transport ?? current.transport) || current.baseUrl : current.baseUrl,
     model: input.model !== undefined ? normalizeConfigText(input.model) || current.model : current.model,
     apiKey: current.apiKey,
     enabled: input.enabled ?? current.enabled,
