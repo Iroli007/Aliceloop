@@ -15,6 +15,9 @@ Current conventions:
 - `source-url`: optional provenance link
 - frontmatter keys must be unique; duplicate keys are rejected at load time
 - use `allowed-tools`, not legacy `tools`
+- skill bodies should be AI-native capability prompts, not workflow scripts
+- prefer semantic boundaries, evidence rules, and routing guidance over numbered command procedures
+- command examples are allowed, but they should support the capability description rather than define the skill itself
 
 These files are loaded into:
 

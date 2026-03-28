@@ -246,6 +246,16 @@ async function main() {
     "tool router should route '帮我找一下' queries to web_search",
   );
   assert.deepEqual(
+    routeToolNamesForTurn("fetch"),
+    ["web_fetch"],
+    "tool router should treat a bare fetch command as an explicit web_fetch request",
+  );
+  assert.deepEqual(
+    routeToolNamesForTurn("search"),
+    ["web_search"],
+    "tool router should treat a bare search command as an explicit web_search request",
+  );
+  assert.deepEqual(
     routeToolNamesForTurn("帮我看看这张图里写了什么"),
     ["view_image"],
     "tool router should attach the image understanding tool from visual-inspection intent",
@@ -265,6 +275,28 @@ async function main() {
   assert.equal("web_fetch" in baseAndSkillTools, false, "web_fetch should not be injected into the default toolset");
   assert.equal("web_search" in baseAndSkillTools, false, "web_search should not be injected into the default toolset");
   assert.equal("view_image" in baseAndSkillTools, false, "view_image should not be injected into the default toolset");
+
+  const bareFetchSession = createSession("bare fetch smoke");
+  createSessionMessage({
+    sessionId: bareFetchSession.id,
+    clientMessageId: "bare-fetch-user-1",
+    deviceId: "desktop-smoke",
+    role: "user",
+    content: "fetch",
+    attachmentIds: [],
+  });
+  const bareFetchController = new AbortController();
+  const bareFetchContext = await loadContext(bareFetchSession.id, bareFetchController.signal);
+  assert.equal(
+    typeof bareFetchContext.tools.web_fetch,
+    "object",
+    "bare fetch commands should attach the web_fetch tool",
+  );
+  assert.deepEqual(
+    bareFetchContext.firstStepToolChoice,
+    { type: "tool", toolName: "web_fetch" },
+    "bare fetch commands should bias the first step toward web_fetch",
+  );
 
   const directResolved = resolveSkillTools(
     new Set([

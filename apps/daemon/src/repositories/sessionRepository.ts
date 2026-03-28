@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   type Attachment,
@@ -122,6 +122,8 @@ interface SessionThreadSummaryRow {
   messageCount: number;
   latestMessagePreview: string | null;
   latestMessageAt: string | null;
+  matchedPreview: string | null;
+  matchedMessageCreatedAt: string | null;
   projectId: string | null;
   projectName: string | null;
   projectPath: string | null;
@@ -205,6 +207,70 @@ function summarizeSessionTitle(content: string) {
   }
 
   return normalized.length > 24 ? `${normalized.slice(0, 24).trimEnd()}…` : normalized;
+}
+
+function escapeSqlLikePattern(value: string) {
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
+function findTranscriptArchiveMatch(
+  transcriptPath: string,
+  queryText: string,
+) {
+  if (!existsSync(transcriptPath)) {
+    return null;
+  }
+
+  let content = "";
+  try {
+    content = readFileSync(transcriptPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const normalizedQuery = queryText.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return null;
+  }
+
+  const normalizedContent = content.toLowerCase();
+  if (!normalizedContent.includes(normalizedQuery)) {
+    return null;
+  }
+
+  const lines = content.split(/\r?\n/);
+  let currentTimestamp: string | null = null;
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^## [^(]+ \(([^)]+)\)$/);
+    if (headingMatch) {
+      currentTimestamp = headingMatch[1] ?? null;
+      continue;
+    }
+
+    if (line.toLowerCase().includes(normalizedQuery)) {
+      const preview = line.trim();
+      return {
+        matchedPreview: preview.length > 0 ? summarizeMessagePreview(preview) : null,
+        matchedMessageCreatedAt: currentTimestamp,
+      };
+    }
+  }
+
+  const matchIndex = normalizedContent.indexOf(normalizedQuery);
+  if (matchIndex < 0) {
+    return null;
+  }
+
+  const preview = content
+    .slice(Math.max(0, matchIndex - 80), Math.min(content.length, matchIndex + normalizedQuery.length + 80))
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return {
+    matchedPreview: preview.length > 0 ? summarizeMessagePreview(preview) : null,
+    matchedMessageCreatedAt: null,
+  };
 }
 
 function toMessage(row: SessionMessageRow, attachments: Attachment[]): SessionMessage {
@@ -593,6 +659,8 @@ function toSessionThreadSummary(row: SessionThreadSummaryRow): SessionThreadSumm
     messageCount: row.messageCount,
     latestMessagePreview: summarizeMessagePreview(row.latestMessagePreview),
     latestMessageAt: row.latestMessageAt,
+    matchedPreview: summarizeMessagePreview(row.matchedPreview),
+    matchedMessageCreatedAt: row.matchedMessageCreatedAt,
     projectId: row.projectId,
     projectName: row.projectName,
     projectPath: row.projectPath,
@@ -613,6 +681,8 @@ function findReusableDraftSession(projectId: string | null): SessionThreadSummar
           0 AS messageCount,
           NULL AS latestMessagePreview,
           NULL AS latestMessageAt,
+          NULL AS matchedPreview,
+          NULL AS matchedMessageCreatedAt,
           projects.id AS projectId,
           projects.name AS projectName,
           projects.path AS projectPath,
@@ -661,6 +731,8 @@ export function listSessionThreads(): SessionThreadSummary[] {
           COALESCE(message_counts.messageCount, 0) AS messageCount,
           latest_message.content AS latestMessagePreview,
           latest_message.created_at AS latestMessageAt,
+          NULL AS matchedPreview,
+          NULL AS matchedMessageCreatedAt,
           projects.id AS projectId,
           projects.name AS projectName,
           projects.path AS projectPath,
@@ -712,6 +784,8 @@ export function listHistoricalSessionCandidates(
           COALESCE(message_counts.messageCount, 0) AS messageCount,
           latest_message.content AS latestMessagePreview,
           latest_message.created_at AS latestMessageAt,
+          NULL AS matchedPreview,
+          NULL AS matchedMessageCreatedAt,
           projects.id AS projectId,
           projects.name AS projectName,
           projects.path AS projectPath,
@@ -785,6 +859,112 @@ export function listSessionConversationMessages(
     .all(sessionId, normalizedLimit) as SessionConversationMessageRow[];
 
   return rows;
+}
+
+export function searchSessionThreads(query: string, limit = 10): SessionThreadSummary[] {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    return [];
+  }
+
+  const normalizedLimit = Math.max(1, Math.min(limit, 100));
+  const archiveResults: SessionThreadSummary[] = [];
+  const seenSessionIds = new Set<string>();
+
+  for (const thread of listSessionThreads()) {
+    if (archiveResults.length >= normalizedLimit) {
+      break;
+    }
+
+    if (!thread.projectPath) {
+      continue;
+    }
+
+    const transcriptPath = buildThreadTranscriptExportPaths(thread.projectPath, {
+      sessionId: thread.id,
+      sessionTitle: thread.title,
+      sessionCreatedAt: thread.createdAt,
+    }).markdownPath;
+    const archiveMatch = findTranscriptArchiveMatch(transcriptPath, trimmedQuery);
+    if (!archiveMatch) {
+      continue;
+    }
+
+    archiveResults.push({
+      ...thread,
+      matchedPreview: archiveMatch.matchedPreview,
+      matchedMessageCreatedAt: archiveMatch.matchedMessageCreatedAt,
+    });
+    seenSessionIds.add(thread.id);
+  }
+
+  if (archiveResults.length >= normalizedLimit) {
+    return archiveResults;
+  }
+
+  const db = getDatabase();
+  const likePattern = `%${escapeSqlLikePattern(trimmedQuery)}%`;
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          sessions.id AS id,
+          sessions.title AS title,
+          sessions.created_at AS createdAt,
+          sessions.updated_at AS updatedAt,
+          COALESCE(message_counts.messageCount, 0) AS messageCount,
+          latest_message.content AS latestMessagePreview,
+          latest_message.created_at AS latestMessageAt,
+          matched_message.content AS matchedPreview,
+          matched_message.created_at AS matchedMessageCreatedAt,
+          projects.id AS projectId,
+          projects.name AS projectName,
+          projects.path AS projectPath,
+          projects.kind AS projectKind
+        FROM sessions
+        LEFT JOIN projects
+          ON projects.id = sessions.project_id
+        LEFT JOIN (
+          SELECT
+            session_id,
+            COUNT(*) AS messageCount
+          FROM session_messages
+          WHERE role IN ('user', 'assistant')
+          GROUP BY session_id
+        ) AS message_counts
+          ON message_counts.session_id = sessions.id
+        LEFT JOIN session_messages AS latest_message
+          ON latest_message.id = (
+            SELECT id
+            FROM session_messages
+            WHERE session_id = sessions.id
+              AND role IN ('user', 'assistant')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+          )
+        LEFT JOIN session_messages AS matched_message
+          ON matched_message.id = (
+            SELECT id
+            FROM session_messages
+            WHERE session_id = sessions.id
+              AND role IN ('user', 'assistant')
+              AND TRIM(content) <> ''
+              AND content LIKE ? ESCAPE '\\'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+          )
+        WHERE matched_message.id IS NOT NULL
+        ORDER BY matched_message.created_at DESC, sessions.updated_at DESC, sessions.created_at DESC
+        LIMIT ?
+      `,
+    )
+    .all(likePattern, normalizedLimit) as SessionThreadSummaryRow[];
+
+  const fallbackResults = rows
+    .map(toSessionThreadSummary)
+    .filter((thread) => !seenSessionIds.has(thread.id));
+
+  return [...archiveResults, ...fallbackResults].slice(0, normalizedLimit);
 }
 
 export function createSession(

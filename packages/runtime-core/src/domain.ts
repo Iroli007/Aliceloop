@@ -197,6 +197,8 @@ export interface SessionThreadSummary {
   messageCount: number;
   latestMessagePreview: string | null;
   latestMessageAt: string | null;
+  matchedPreview?: string | null;
+  matchedMessageCreatedAt?: string | null;
   projectId?: string | null;
   projectName?: string | null;
   projectPath?: string | null;

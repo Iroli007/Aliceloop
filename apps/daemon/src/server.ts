@@ -91,6 +91,7 @@ import {
   getSessionSnapshot,
   heartbeatDevice,
   listSessionThreads,
+  searchSessionThreads,
   listSessionEventsSince,
 } from "./repositories/sessionRepository";
 import {
@@ -349,6 +350,11 @@ interface MemorySearchQuery {
   q?: string;
   limit?: string;
   source?: string;
+}
+
+interface ThreadSearchQuery {
+  q?: string;
+  limit?: string;
 }
 
 interface MemoryParams {
@@ -793,6 +799,9 @@ export async function createServer() {
 
       throw error;
     }
+  });
+  server.post("/api/memory/archive", async () => {
+    return resyncAllProjectSessionHistories();
   });
   server.get<{ Querystring: SemanticMemoryEntriesQuery }>("/api/memory/entries", async (request, reply) => {
     try {
@@ -1293,6 +1302,16 @@ export async function createServer() {
   });
 
   server.get("/api/sessions", async () => listSessionThreads());
+  server.get<{ Querystring: ThreadSearchQuery }>("/api/threads/search", async (request, reply) => {
+    const query = request.query.q?.trim();
+    if (!query) {
+      return reply.code(400).send({
+        error: "query_required",
+      });
+    }
+
+    return searchSessionThreads(query, parseLimitValue(request.query.limit, 10));
+  });
 
   server.post<{ Body: CreateSessionBody }>("/api/sessions", async (request, reply) => {
     try {

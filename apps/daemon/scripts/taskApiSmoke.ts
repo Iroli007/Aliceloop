@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -86,6 +86,48 @@ async function main() {
       activeSkills: string[];
       activeSkillAdapters: string[];
     };
+
+    const recallSessionResponse = await fetch(`${baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        title: "Recall API Smoke Session",
+      }),
+    });
+    assert.equal(recallSessionResponse.status, 200, "session create endpoint should respond");
+    const recallSessionPayload = (await recallSessionResponse.json()) as { id: string };
+
+    const recallMessageResponse = await fetch(`${baseUrl}/api/session/${encodeURIComponent(recallSessionPayload.id)}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        clientMessageId: "task-api-recall-1",
+        content: "Historical needle only appears in this older recall message.",
+        role: "user",
+        deviceId: "task-api-desktop",
+        deviceType: "desktop",
+      }),
+    });
+    assert.equal(recallMessageResponse.status, 200, "older recall message should be created");
+
+    const recallPreviewResponse = await fetch(`${baseUrl}/api/session/${encodeURIComponent(recallSessionPayload.id)}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        clientMessageId: "task-api-recall-2",
+        content: "Newest preview text is unrelated to the needle.",
+        role: "user",
+        deviceId: "task-api-desktop",
+        deviceType: "desktop",
+      }),
+    });
+    assert.equal(recallPreviewResponse.status, 200, "newer preview message should be created");
 
     const providerUpdateResponse = await fetch(`${baseUrl}/api/providers/openai`, {
       method: "PUT",
@@ -402,6 +444,28 @@ async function main() {
     const memoryDetailResponse = await fetch(`${baseUrl}/api/memories/${encodeURIComponent(memoriesPayload[0]?.id ?? "")}`);
     assert.equal(memoryDetailResponse.status, 200, "memory detail endpoint should respond");
     const memoryDetailPayload = (await memoryDetailResponse.json()) as { id: string; source: string };
+    const archiveResponse = await fetch(`${baseUrl}/api/memory/archive`, { method: "POST" });
+    assert.equal(archiveResponse.status, 200, "memory archive endpoint should respond");
+    const archivePayload = (await archiveResponse.json()) as { projectCount: number; sessionCount: number };
+    const projectBindingResponse = await fetch(`${baseUrl}/api/session/${encodeURIComponent(recallSessionPayload.id)}/project`);
+    assert.equal(projectBindingResponse.status, 200, "session project endpoint should respond");
+    const projectBindingPayload = (await projectBindingResponse.json()) as { transcriptMarkdownPath: string | null };
+    assert(projectBindingPayload.transcriptMarkdownPath, "project-backed session should expose transcript path");
+    appendFileSync(projectBindingPayload.transcriptMarkdownPath, "\nInjected archive-only API token: API-ARCHIVE-ONLY-SENTINEL\n", "utf8");
+    const threadSearchResponse = await fetch(`${baseUrl}/api/threads/search?q=${encodeURIComponent("recall message")}&limit=10`);
+    assert.equal(threadSearchResponse.status, 200, "thread search endpoint should respond");
+    const threadSearchPayload = (await threadSearchResponse.json()) as Array<{
+      id: string;
+      latestMessagePreview: string | null;
+      matchedPreview: string | null;
+      matchedMessageCreatedAt: string | null;
+    }>;
+    const archiveOnlyThreadSearchResponse = await fetch(`${baseUrl}/api/threads/search?q=${encodeURIComponent("API-ARCHIVE-ONLY-SENTINEL")}&limit=10`);
+    assert.equal(archiveOnlyThreadSearchResponse.status, 200, "archive-backed thread search should respond");
+    const archiveOnlyThreadSearchPayload = (await archiveOnlyThreadSearchResponse.json()) as Array<{
+      id: string;
+      matchedPreview: string | null;
+    }>;
 
     const skillsResponse = await fetch(`${baseUrl}/api/skills`);
     assert.equal(skillsResponse.status, 200, "skills endpoint should respond");
@@ -528,6 +592,25 @@ async function main() {
     assert(memoriesPayload.some((memory) => memory.source === "attention-index"), "ingest should distill an attention memory note");
     assert(memoriesPayload.some((memory) => memory.source === "review-coach"), "review-coach should create a memory note");
     assert.equal(memoryDetailPayload.source, "review-coach", "memory detail endpoint should resolve saved memory");
+    assert(archivePayload.projectCount >= 1, "memory archive should report project transcript exports");
+    assert(archivePayload.sessionCount >= 1, "memory archive should report synced sessions");
+    assert(threadSearchPayload.some((thread) => thread.id === recallSessionPayload.id), "thread search should match message body content");
+    assert(
+      threadSearchPayload.some((thread) => thread.id === recallSessionPayload.id && thread.matchedPreview?.includes("older recall message")),
+      "thread search should return matched preview text from the hit message",
+    );
+    assert(
+      threadSearchPayload.some((thread) => thread.id === recallSessionPayload.id && thread.latestMessagePreview?.includes("unrelated")),
+      "thread search should preserve the latest preview separately from matched preview",
+    );
+    assert(
+      threadSearchPayload.some((thread) => thread.id === recallSessionPayload.id && thread.matchedMessageCreatedAt),
+      "thread search should expose matched message timestamps",
+    );
+    assert(
+      archiveOnlyThreadSearchPayload.some((thread) => thread.id === recallSessionPayload.id && thread.matchedPreview?.includes("API-ARCHIVE-ONLY-SENTINEL")),
+      "thread search should prioritize transcript archive content when it exists only in exported markdown",
+    );
     assert.equal(healthPayload.ok, true, "health payload should mark daemon as healthy");
     assert.equal(healthPayload.service, "aliceloop-daemon", "health payload should include service id");
     assert(healthPayload.activeSkills.includes("plan-mode"), "health payload should expose active plan-mode skill");

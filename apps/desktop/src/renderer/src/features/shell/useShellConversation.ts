@@ -926,6 +926,8 @@ export function useShellConversation(): ShellConversationState {
     }
 
     console.log('[selectSession] Switching to:', sessionId, 'Clearing state');
+    activeSessionIdRef.current = sessionId;
+    rememberActiveSessionId(sessionId);
     setStatus("loading");
     setSnapshot((current) => {
       if (sessionId === localDraftSessionId) {
@@ -940,6 +942,8 @@ export function useShellConversation(): ShellConversationState {
   }
 
   function activateCreatedThread(createdThread: SessionThreadSummary) {
+    activeSessionIdRef.current = createdThread.id;
+    rememberActiveSessionId(createdThread.id);
     setSnapshot((current) => createEmptySnapshotFromThread(createdThread, current));
     setToolWorkflowEntries([]);
     setSessionEvents([]);
@@ -997,13 +1001,8 @@ export function useShellConversation(): ShellConversationState {
   }
 
   async function createSession(): Promise<CreateSessionResult> {
-    if (activeSessionId === localDraftSessionId) {
-      return {
-        ok: true,
-        sessionId: activeSessionId,
-      };
-    }
-
+    activeSessionIdRef.current = localDraftSessionId;
+    rememberActiveSessionId(localDraftSessionId);
     setSnapshot((current) => createLocalDraftSnapshot(current));
     setToolWorkflowEntries([]);
     setSessionEvents([]);

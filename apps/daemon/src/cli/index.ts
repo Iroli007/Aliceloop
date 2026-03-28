@@ -30,6 +30,21 @@ interface MemoryNotePayload {
   updatedAt: string;
 }
 
+interface SemanticMemoryPayload {
+  id: string;
+  content: string;
+  source: string;
+  durability: string;
+  factKind: string | null;
+  factKey: string | null;
+  factState: string;
+  createdAt: string;
+  updatedAt: string;
+  accessCount: number;
+  relatedTopics: string[];
+  similarityScore?: number;
+}
+
 interface RuntimeSettingsPayload {
   sandboxProfile: string;
   autoApproveToolRequests: boolean;
@@ -68,6 +83,11 @@ interface SessionThreadSummaryPayload {
   messageCount: number;
   latestMessagePreview: string | null;
   latestMessageAt: string | null;
+  matchedPreview?: string | null;
+  matchedMessageCreatedAt?: string | null;
+  projectId?: string | null;
+  projectName?: string | null;
+  projectPath?: string | null;
 }
 
 interface SessionSnapshotPayload {
@@ -223,6 +243,8 @@ function usage() {
     "  aliceloop status",
     "  aliceloop memory list [limit]",
     "  aliceloop memory search <query>",
+    "  aliceloop memory grep <query>",
+    "  aliceloop memory archive",
     "  aliceloop memory add <content>",
     "  aliceloop memory delete <id>",
     "  aliceloop reflect list [limit]",
@@ -741,7 +763,7 @@ async function handleMemory(args: string[]) {
 
   if (action === "list") {
     const limit = parseOptionalLimit(args[1], 20);
-    return apiRequest<MemoryNotePayload[]>(`/api/memories?limit=${limit}`);
+    return apiRequest<SemanticMemoryPayload[]>(`/api/memory/entries?limit=${limit}`);
   }
 
   if (action === "search") {
@@ -754,7 +776,26 @@ async function handleMemory(args: string[]) {
       q: query,
       limit: "10",
     });
-    return apiRequest<MemoryNotePayload[]>(`/api/memories/search?${params.toString()}`);
+    return apiRequest<SemanticMemoryPayload[]>(`/api/memory/search?${params.toString()}`);
+  }
+
+  if (action === "grep") {
+    const query = args.slice(1).join(" ").trim();
+    if (!query) {
+      throw new CliError("memory grep requires a query");
+    }
+
+    const params = new URLSearchParams({
+      q: query,
+      limit: "10",
+    });
+    return apiRequest<SessionThreadSummaryPayload[]>(`/api/threads/search?${params.toString()}`);
+  }
+
+  if (action === "archive") {
+    return apiRequest<{ projectCount: number; sessionCount: number }>("/api/memory/archive", {
+      method: "POST",
+    });
   }
 
   if (action === "add") {
@@ -763,9 +804,13 @@ async function handleMemory(args: string[]) {
       throw new CliError("memory add requires content");
     }
 
-    return apiRequest<MemoryNotePayload>("/api/memories", {
+    return apiRequest<SemanticMemoryPayload>("/api/memory/entries", {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        source: "manual",
+        durability: "permanent",
+      }),
     });
   }
 
@@ -775,7 +820,7 @@ async function handleMemory(args: string[]) {
       throw new CliError("memory delete requires an id");
     }
 
-    return apiRequest<{ ok: boolean; id: string }>(`/api/memories/${encodeURIComponent(memoryId)}`, {
+    return apiRequest<{ ok: boolean; id: string }>(`/api/memory/entries/${encodeURIComponent(memoryId)}`, {
       method: "DELETE",
     });
   }
@@ -918,16 +963,11 @@ async function handleThread(args: string[]) {
       throw new CliError("thread search requires a query");
     }
 
-    const threads = await apiRequest<SessionThreadSummaryPayload[]>("/api/sessions");
-    return threads.filter((thread) => {
-      const haystack = [
-        thread.title,
-        thread.latestMessagePreview ?? "",
-      ]
-        .join("\n")
-        .toLowerCase();
-      return haystack.includes(query);
+    const params = new URLSearchParams({
+      q: query,
+      limit: "10",
     });
+    return apiRequest<SessionThreadSummaryPayload[]>(`/api/threads/search?${params.toString()}`);
   }
 
   if (action === "delete") {

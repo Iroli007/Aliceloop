@@ -9,6 +9,8 @@
 - High-availability routing rule: preserve the relevant capability group across short continuation turns so critical routed skills do not disappear mid-workflow.
 - Do this by carrying forward the right routed skill group and its core companion skills for the current turn, not by loading the entire skill catalog.
 - Deep memory stays skill-driven: profile/fact recall and episodic history should be reached through the routed memory skills, not auto-injected into the prompt as a separate memory load layer.
+- Skills must stay AI-native: describe capability boundaries, evidence preferences, and when to use the skill, not rigid step-by-step workflows.
+- Command examples inside a skill are affordances, not the skill's identity. The agent should start from user intent and choose the right commands or tools, not blindly replay a canned procedure.
 - Binary image attachments are not readable with `read`; use the routed `view_image` tool to inspect a local image file when the user asks what is shown in it.
 
 - `glob`

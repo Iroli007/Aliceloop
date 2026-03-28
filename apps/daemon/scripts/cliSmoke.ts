@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,19 +26,27 @@ async function main() {
   process.env.ALICELOOP_SCHEDULER_POLL_MS = "100";
   process.env.ALICELOOP_TELEGRAM_BOT_TOKEN = "cli-smoke-bot-token";
 
-  const [{ createServer }, { runCli }, { createSession, createSessionMessage }] = await Promise.all([
+  const [{ createServer }, { runCli }, { createSession, createSessionMessage, getSessionProjectBinding }] = await Promise.all([
     import("../src/server.ts"),
     import("../src/cli/index.ts"),
     import("../src/repositories/sessionRepository.ts"),
   ]);
 
   const session = createSession("CLI Smoke Session");
-  const seededMessage = createSessionMessage({
+  createSessionMessage({
     sessionId: session.id,
     clientMessageId: "cli-smoke-user-1",
     deviceId: "cli-smoke-desktop",
     role: "user",
-    content: "Inspect the new CLI paths.",
+    content: "Archive token CLI smoke needle lives in this older message only.",
+    attachmentIds: [],
+  });
+  createSessionMessage({
+    sessionId: session.id,
+    clientMessageId: "cli-smoke-user-2",
+    deviceId: "cli-smoke-desktop",
+    role: "user",
+    content: "Inspect the newest CLI preview path instead.",
     attachmentIds: [],
   });
 
@@ -166,6 +174,24 @@ async function main() {
     const memorySearch = await capture(["memory", "search", "CLI smoke"]);
     assert.equal(memorySearch.code, 0, "memory search should succeed");
     assert(memorySearch.stdout.includes(addedMemory.id), "memory search should return the created memory");
+    assert(memorySearch.stdout.includes("\"durability\": \"permanent\""), "memory CLI should read from semantic memory entries");
+
+    const memoryArchive = await capture(["memory", "archive"]);
+    assert.equal(memoryArchive.code, 0, "memory archive should succeed");
+    assert(memoryArchive.stdout.includes("\"projectCount\""), "memory archive should report resync results");
+
+    const transcriptPath = getSessionProjectBinding(session.id)?.transcriptMarkdownPath;
+    assert(transcriptPath, "seeded session should have a transcript export path");
+    appendFileSync(transcriptPath, "\nInjected archive only token: CLI-ARCHIVE-ONLY-SENTINEL\n", "utf8");
+
+    const memoryGrep = await capture(["memory", "grep", "CLI smoke needle"]);
+    assert.equal(memoryGrep.code, 0, "memory grep should succeed");
+    assert(memoryGrep.stdout.includes(session.id), "memory grep should find the matching thread");
+    assert(memoryGrep.stdout.includes("\"matchedPreview\""), "memory grep should surface matched conversation text");
+
+    const archiveOnlyGrep = await capture(["memory", "grep", "CLI-ARCHIVE-ONLY-SENTINEL"]);
+    assert.equal(archiveOnlyGrep.code, 0, "memory grep should search transcript archives");
+    assert(archiveOnlyGrep.stdout.includes(session.id), "memory grep should find archive-only transcript content");
 
     const configGet = await capture(["config", "get", "runtime.sandboxProfile"]);
     assert.equal(configGet.code, 0, "config get should succeed");
@@ -202,6 +228,11 @@ async function main() {
     const skillsShow = await capture(["skills", "show", "skill-hub"]);
     assert.equal(skillsShow.code, 0, "skills show should succeed");
     assert(skillsShow.stdout.includes("\"id\": \"skill-hub\""), "skills show should return the requested skill");
+
+    const threadBodySearch = await capture(["thread", "search", "CLI smoke needle"]);
+    assert.equal(threadBodySearch.code, 0, "thread search should succeed");
+    assert(threadBodySearch.stdout.includes(session.id), "thread search should find the matching thread body");
+    assert(threadBodySearch.stdout.includes("\"matchedPreview\""), "thread search should expose matched preview metadata");
 
     const providerBaseUrlSet = await capture([
       "config",
@@ -301,7 +332,7 @@ async function main() {
 
     const threadInfo = await capture(["thread", "info", session.id]);
     assert.equal(threadInfo.code, 0, "thread info should succeed");
-    assert(threadInfo.stdout.includes("\"messageCount\": 1"), "thread info should include message counts");
+    assert(threadInfo.stdout.includes("\"messageCount\": 2"), "thread info should include message counts");
 
     const threadSearch = await capture(["thread", "search", "CLI Smoke"]);
     assert.equal(threadSearch.code, 0, "thread search should succeed");

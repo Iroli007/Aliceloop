@@ -1,7 +1,7 @@
 ---
 name: memory-management
 label: memory-management
-description: Search and manage Aliceloop profile/fact memory. Use when the user asks about remembered preferences, long-term facts, account details, explicit remember/forget actions, or continuity-sensitive personal facts.
+description: Search and manage Aliceloop's memory and conversation recall. Use when the user asks about past conversations, personal facts, preferences, or anything that requires recalling information ("do you know my...", "we talked about before...", "do you remember...", "help me find what we said about..."). Also used to store new durable memories and search through archived chat threads.
 status: available
 mode: instructional
 allowed-tools:
@@ -12,77 +12,74 @@ allowed-tools:
 
 # Memory Management Skill
 
-Use this skill for Aliceloop's Profile / Fact Memory layer.
+Aliceloop has a built-in recall system with two layers:
+- durable memory for stable facts and preferences
+- conversation history search for past thread wording
 
-This layer is for stable information:
-- user preferences
-- long-term personal facts
-- account-level facts
-- persistent constraints
-- durable decisions
-
-Do not use this skill for raw conversation replay. If the user is asking "what did we say before", "what did I tell you yesterday", or wants the original thread context, route or combine with `thread-management`.
+Use the `aliceloop` CLI to interact with it.
 
 ## Tools
 
 ```bash
+# List memories
 aliceloop memory list [limit]
+
+# Semantic search
 aliceloop memory search "<query>"
+
+# Search conversation history
+aliceloop memory grep "<query>"
+
+# Force transcript archive resync
+aliceloop memory archive
+
+# Add a memory
 aliceloop memory add "<content>"
+
+# Delete a memory
 aliceloop memory delete <id>
 ```
 
 ## When to Use
 
-- **User asks about remembered personal facts**:
-  - "do you remember what I like"
-  - "what are my preferences"
-  - "you know my style right"
-- **User explicitly asks to remember something**:
-  - "remember this"
-  - "记住我以后喜欢简洁回答"
-  - "以后都按这个来"
-- **User asks to forget or overwrite a stable fact**:
-  - "forget that"
-  - "我现在不喜欢 A 了"
-  - "把以前那个偏好删掉"
-- **You need stable profile/fact memory before answering a continuity-sensitive question**
+- **User asks anything about the past** ("do you know what I like", "what did we discuss before", "what was that plan we talked about last time") → Search memory AND grep threads
+- **User says "remember this"** → `aliceloop memory add "..."`
+- **User asks "do you remember..."** → `aliceloop memory search "..."` + `aliceloop memory grep "..."`
+- **User says "forget about..."** → Search and delete matching memories
+- **Time-sensitive info** (projects, deadlines) → Store with appropriate context
 
 ## Search Strategy
 
-When the user asks about remembered information, use this order:
+When the user asks about past information, always try both layers when needed:
 
-1. `aliceloop memory search "<query>"` first
-2. answer from matching active facts if results are clear
-3. if the question is really about prior conversation wording or chronology, also use `thread-management`
+1. `aliceloop memory search "<query>"` for semantic recall of stable facts
+2. `aliceloop memory grep "<keyword>"` for keyword search in conversation history
 
-Use Profile / Fact Memory for **facts**.
-Use Episodic History for **what was said in a conversation**.
+If one layer is not enough, use the other. They complement each other.
 
-## Commands
+## Two-Layer Recall
+
+1. **Vector Memory** (`aliceloop memory search`) — semantic search, finds conceptually related memories
+2. **Conversation History** (`aliceloop memory grep`) — keyword search, finds exact words and phrases in past threads
+
+Use semantic search when the user asks vague recall questions.
+Use grep when you need specific terms, names, wording, or code snippets.
+
+## Conversation History Search
+
+Aliceloop automatically exports project-backed thread transcripts as markdown files. `memory grep` prioritizes those conversation archives in `threads/` before falling back to live runtime history.
 
 ```bash
-# List stored memories
-aliceloop memory list
+# Keyword search through archived conversations
+aliceloop memory grep <keyword>
 
-# Search remembered facts/preferences
-aliceloop memory search "<query>"
-
-# Add a stable memory
-aliceloop memory add "<content>"
-
-# Delete a memory by id
-aliceloop memory delete <id>
+# Force re-export of thread archives now
+aliceloop memory archive
 ```
 
-## Add Strategy
+Conversation archives are stored in the project's `threads/` directory as markdown files with frontmatter (`threadId`, `title`, `createdAt`, `updatedAt`, `model`, `messageCount`). They are auto-exported when sessions change and can be resynced explicitly with `memory archive`.
 
-Before adding a new fact:
-
-1. search for related memory first
-2. avoid adding near-duplicates
-3. prefer one concise stable statement over a long paragraph
-4. set `factKind` whenever the type is obvious
+## Durable Memory
 
 Recommended `factKind` values:
 - `preference` for likes/dislikes/style preferences
@@ -100,28 +97,18 @@ Examples:
 - `favorite_editor`
 - `timezone_preference`
 
-This helps newer facts supersede older ones cleanly.
+Prefer one concise stable statement over a long transcript-like paragraph.
+If a stable preference changed, treat the new fact as the current truth.
 
-## Delete Strategy
+## Pairing With Other Skills
 
-When the user asks to forget something:
-
-1. search first
-2. identify the exact matching memory
-3. run `aliceloop memory delete <id>` on the correct memory id
-4. confirm what was removed
-
-Do not guess memory ids.
-
-## Pairing With Other Memory Skills
-
-- Use `thread-management` when the user wants past thread content, wording, or chronology.
+- Use `thread-management` when the user wants to inspect, create, list, or delete threads directly.
+- Use `thread-management` after recall search when you need exact thread context from a specific candidate.
 - Use `self-reflection` for rolling session-level conclusions and temporary discussion summary.
-- Use this skill only for durable profile/fact memory.
 
 ## Tips
 
 - Always confirm what you stored or deleted.
-- Prefer stable facts over noisy transcript-like text.
-- Do not claim a memory exists unless `aliceloop memory search` actually found it.
-- If a user says a previous preference changed, treat the new fact as the current truth and update memory accordingly.
+- Do not claim a memory exists unless retrieval actually found it.
+- Use `aliceloop memory grep` when vector recall does not give enough exact evidence.
+- Durable memory should stay concise and stable rather than transcript-like.
