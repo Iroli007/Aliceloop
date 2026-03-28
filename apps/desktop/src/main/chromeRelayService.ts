@@ -8,7 +8,9 @@ import { chromium } from "playwright-core";
 import type {
   BrowserReadablePayload,
   BrowserAudioCapturePayload,
+  BrowserEvalPayload,
   BrowserMediaProbePayload,
+  BrowserRelayTabsPayload,
   BrowserScreenshotPayload,
   BrowserSearchResultsPayload,
   BrowserSnapshotPayload,
@@ -324,6 +326,38 @@ async function collectSearchResults(
     backend: "desktop_chrome",
     tabId,
   };
+}
+
+function sanitizeEvalResult(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value ?? null;
+  }
+
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeEvalResult(entry));
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (typeof value === "object") {
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return String(value);
+    }
+  }
+
+  return String(value);
 }
 
 type PageAudioCaptureResult = {
@@ -755,6 +789,9 @@ export interface ChromeRelayServiceOptions {
 type RelayTabRecord = {
   id: string;
   page: Page;
+  history: string[];
+  historyIndex: number;
+  suppressNextHistoryEvent: boolean;
 };
 
 export class ChromeRelayService {
@@ -933,21 +970,93 @@ export class ChromeRelayService {
     return record;
   }
 
-  async openTab() {
+  private trackTabNavigation(record: RelayTabRecord, url: string) {
+    const normalizedUrl = url.trim();
+    if (!normalizedUrl) {
+      return;
+    }
+
+    if (record.suppressNextHistoryEvent) {
+      record.suppressNextHistoryEvent = false;
+      return;
+    }
+
+    const currentUrl = record.history[record.historyIndex] ?? null;
+    if (currentUrl === normalizedUrl) {
+      return;
+    }
+
+    if (record.historyIndex < record.history.length - 1) {
+      record.history = record.history.slice(0, record.historyIndex + 1);
+    }
+
+    record.history.push(normalizedUrl);
+    record.historyIndex = record.history.length - 1;
+  }
+
+  async openTab(url?: string, waitUntil?: string) {
     try {
       const context = await this.getContext();
       const page = await context.newPage();
       await page.setViewportSize(DEFAULT_VIEWPORT).catch(() => undefined);
       const tabId = randomUUID();
-      this.tabs.set(tabId, { id: tabId, page });
+      const record: RelayTabRecord = {
+        id: tabId,
+        page,
+        history: [],
+        historyIndex: -1,
+        suppressNextHistoryEvent: false,
+      };
+      page.on("framenavigated", (frame) => {
+        if (frame !== page.mainFrame()) {
+          return;
+        }
+
+        this.trackTabNavigation(record, frame.url());
+      });
+      if (url?.trim()) {
+        await page.goto(url.trim(), {
+          waitUntil: normalizeWaitUntil(waitUntil),
+          timeout: 20_000,
+        });
+      }
+      if (record.historyIndex < 0) {
+        this.trackTabNavigation(record, page.url());
+      }
+      this.tabs.set(tabId, record);
       page.on("close", () => {
         this.tabs.delete(tabId);
       });
       this.markHealthy();
+      const title = await page.title().catch(() => null);
 
       return {
         tabId,
         url: page.url(),
+        title,
+      };
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
+  async listTabs(): Promise<BrowserRelayTabsPayload> {
+    try {
+      this.pruneClosedTabs();
+      this.markHealthy();
+      const tabs = await Promise.all([...this.tabs.values()].map(async (record, index) => ({
+        tabId: record.id,
+        url: record.page.url(),
+        title: await record.page.title().catch(() => null),
+        active: index === this.tabs.size - 1,
+      })));
+      const activeTabId = tabs.find((tab) => tab.active)?.tabId ?? tabs.at(-1)?.tabId ?? null;
+
+      return {
+        backend: "desktop_chrome",
+        activeTabId,
+        tabs,
       };
     } catch (error) {
       this.markError(error);
@@ -1105,6 +1214,113 @@ export class ChromeRelayService {
       const record = await this.getTabRecord(tabId);
       this.markHealthy();
       return await collectSearchResults(record.page, tabId, maxResults);
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
+  async readDom(tabId: string, options?: { maxTextLength?: number; maxElements?: number }) {
+    return this.snapshot(tabId, options);
+  }
+
+  async scroll(tabId: string, direction: "up" | "down" | "left" | "right", amount?: number) {
+    try {
+      const record = await this.getTabRecord(tabId);
+      const distance = Math.max(50, Math.min(4_000, Math.round(amount ?? 800)));
+      const deltas = {
+        up: { x: 0, y: -distance },
+        down: { x: 0, y: distance },
+        left: { x: -distance, y: 0 },
+        right: { x: distance, y: 0 },
+      } as const;
+      const delta = deltas[direction];
+      await record.page.mouse.wheel(delta.x, delta.y);
+      await delay(250);
+      this.markHealthy();
+      return collectSnapshot(record.page, tabId);
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
+  async eval(tabId: string, expression: string): Promise<BrowserEvalPayload> {
+    try {
+      const record = await this.getTabRecord(tabId);
+      const result = await record.page.evaluate(async ({ source }) => {
+        const resolved = await (0, eval)(source);
+        if (resolved === undefined || resolved === null) {
+          return resolved ?? null;
+        }
+
+        if (typeof resolved === "string" || typeof resolved === "number" || typeof resolved === "boolean") {
+          return resolved;
+        }
+
+        if (typeof resolved === "bigint") {
+          return resolved.toString();
+        }
+
+        try {
+          return JSON.parse(JSON.stringify(resolved));
+        } catch {
+          return String(resolved);
+        }
+      }, { source: expression });
+      this.markHealthy();
+      return {
+        url: record.page.url(),
+        backend: "desktop_chrome",
+        tabId,
+        result: sanitizeEvalResult(result),
+      };
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
+  async back(tabId: string, waitUntil: string | undefined) {
+    try {
+      const record = await this.getTabRecord(tabId);
+      if (record.historyIndex <= 0) {
+        this.markHealthy();
+        return collectSnapshot(record.page, tabId);
+      }
+
+      record.historyIndex -= 1;
+      record.suppressNextHistoryEvent = true;
+      await record.page.goto(record.history[record.historyIndex] ?? record.page.url(), {
+        waitUntil: normalizeWaitUntil(waitUntil),
+        timeout: 20_000,
+      });
+      await this.waitForSettledPage(record.page, normalizeWaitUntil(waitUntil));
+      this.markHealthy();
+      return collectSnapshot(record.page, tabId);
+    } catch (error) {
+      this.markError(error);
+      throw error;
+    }
+  }
+
+  async forward(tabId: string, waitUntil: string | undefined) {
+    try {
+      const record = await this.getTabRecord(tabId);
+      if (record.historyIndex >= record.history.length - 1) {
+        this.markHealthy();
+        return collectSnapshot(record.page, tabId);
+      }
+
+      record.historyIndex += 1;
+      record.suppressNextHistoryEvent = true;
+      await record.page.goto(record.history[record.historyIndex] ?? record.page.url(), {
+        waitUntil: normalizeWaitUntil(waitUntil),
+        timeout: 20_000,
+      });
+      await this.waitForSettledPage(record.page, normalizeWaitUntil(waitUntil));
+      this.markHealthy();
+      return collectSnapshot(record.page, tabId);
     } catch (error) {
       this.markError(error);
       throw error;

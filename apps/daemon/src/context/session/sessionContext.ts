@@ -8,7 +8,6 @@ import type { SessionSnapshot } from "@aliceloop/runtime-core";
 import type { SessionProjectBinding } from "@aliceloop/runtime-core";
 import {
   type SkillRouteHints,
-  inferStickySkillGroupIdsFromContext,
   inferStickySkillIdsFromContext,
   needsBrowserAutomation,
   needsWebFetch,
@@ -475,12 +474,8 @@ function buildSkillRouteHints(input: {
   recentToolNames: string[];
 }): SkillRouteHints {
   const stickySkillIds = new Set<string>();
-  const stickyGroupIds = new Set<SkillRouteHints["stickyGroupIds"][number]>();
-  const reasons: string[] = [];
+  const reasons = new Set<string>();
   const currentQuery = input.latestContent;
-  const carriedForwardContext = [input.carryForwardFacts, input.worksetConstraints]
-    .filter((value): value is string => Boolean(value))
-    .join(" / ");
 
   const sawRecentWebTool = input.recentToolNames.some((toolName) => {
     return toolName === "web_search" || toolName === "web_fetch";
@@ -498,9 +493,6 @@ function buildSkillRouteHints(input: {
   for (const skillId of inferStickySkillIdsFromContext(currentQuery)) {
     stickySkillIds.add(skillId);
   }
-  for (const groupId of inferStickySkillGroupIdsFromContext(currentQuery)) {
-    stickyGroupIds.add(groupId);
-  }
 
   if (
     input.researchContinuation
@@ -508,9 +500,8 @@ function buildSkillRouteHints(input: {
     || needsWebResearch(currentQuery)
     || needsDeepResearchFollowup
   ) {
-    stickyGroupIds.add("research-core");
     stickySkillIds.add("web-search");
-    reasons.push("carry forward live research/fact-check tools");
+    reasons.add("carry forward live research/fact-check tools");
   }
 
   if (
@@ -518,9 +509,8 @@ function buildSkillRouteHints(input: {
     || needsWebFetch(currentQuery)
     || needsDeepResearchFollowup
   ) {
-    stickyGroupIds.add("research-core");
     stickySkillIds.add("web-fetch");
-    reasons.push("carry forward explicit page-reading workflow");
+    reasons.add("carry forward recent page reading");
   }
 
   if (
@@ -528,38 +518,13 @@ function buildSkillRouteHints(input: {
     || (input.continuationLike && needsBrowserAutomation(currentQuery))
     || (input.continuationLike && loginOrQrContinuation)
   ) {
-    stickyGroupIds.add("browser-interaction");
     stickySkillIds.add("browser");
-    reasons.push("carry forward browser workflow");
-  }
-
-  if (input.continuationLike && carriedForwardContext) {
-    if (/[xX]\.com|twitter|推特|tweet|推文/u.test(carriedForwardContext)) {
-      stickyGroupIds.add("social-platform");
-      stickySkillIds.add("twitter-media");
-      reasons.push("carry forward social platform workflow");
-    }
-    if (/小红书|xiaohongshu|rednote|xhs/u.test(carriedForwardContext)) {
-      stickyGroupIds.add("social-platform");
-      stickySkillIds.add("xiaohongshu");
-      reasons.push("carry forward social platform workflow");
-    }
-    if (/telegram|\btg\b|电报/u.test(carriedForwardContext)) {
-      stickyGroupIds.add("social-platform");
-      stickySkillIds.add("telegram");
-      reasons.push("carry forward social platform workflow");
-    }
-    if (/discord|webhook/u.test(carriedForwardContext)) {
-      stickyGroupIds.add("social-platform");
-      stickySkillIds.add("discord");
-      reasons.push("carry forward social platform workflow");
-    }
+    reasons.add("carry forward recent browser context");
   }
 
   return {
     stickySkillIds: [...stickySkillIds],
-    stickyGroupIds: [...stickyGroupIds],
-    reasons,
+    reasons: [...reasons],
   };
 }
 
@@ -750,7 +715,6 @@ function buildRecentConversationFocusFromSnapshot(
       effectiveUserQuery: null,
       routeHints: {
         stickySkillIds: [],
-        stickyGroupIds: [],
         reasons: [],
       },
     };
@@ -836,9 +800,6 @@ function buildRecentConversationFocusFromSnapshot(
 
   if (routeHints.stickySkillIds.length > 0) {
     lines.push(`- Sticky skill routing for this turn: ${routeHints.stickySkillIds.join(", ")}`);
-  }
-  if (routeHints.stickyGroupIds.length > 0) {
-    lines.push(`- Sticky skill groups for this turn: ${routeHints.stickyGroupIds.join(", ")}`);
   }
 
   if (originalTopicAnchor) {

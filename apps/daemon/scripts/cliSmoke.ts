@@ -33,7 +33,7 @@ async function main() {
   ]);
 
   const session = createSession("CLI Smoke Session");
-  createSessionMessage({
+  const seededMessage = createSessionMessage({
     sessionId: session.id,
     clientMessageId: "cli-smoke-user-1",
     deviceId: "cli-smoke-desktop",
@@ -238,7 +238,7 @@ async function main() {
       "config",
       "set",
       "providers.openai.baseUrl",
-      `http://127.0.0.1:${imageBackendAddress.port}`,
+      `http://127.0.0.1:${imageBackendAddress.port}/v1`,
     ]);
     assert.equal(providerBaseUrlSet.code, 0, "provider base url update should succeed");
 
@@ -485,19 +485,6 @@ async function main() {
     const taskDelete = await capture(["tasks", "delete", addedTask.id]);
     assert.equal(taskDelete.code, 0, "tasks delete should succeed");
     assert(taskDelete.stdout.includes(addedTask.id), "tasks delete should return the deleted task");
-
-    const reflectionAdd = await capture(["reflect", "add", "I should keep CLI smoke coverage tight and honest."]);
-    assert.equal(reflectionAdd.code, 0, "reflect add should succeed");
-    const reflectionPayload = JSON.parse(reflectionAdd.stdout) as { id: string; source: string };
-    assert.equal(reflectionPayload.source, "self-reflection", "reflect add should store a self-reflection note");
-
-    const reflectionSearch = await capture(["reflect", "search", "coverage tight"]);
-    assert.equal(reflectionSearch.code, 0, "reflect search should succeed");
-    assert(reflectionSearch.stdout.includes(reflectionPayload.id), "reflect search should find the reflection note");
-
-    const reflectionDelete = await capture(["reflect", "delete", reflectionPayload.id]);
-    assert.equal(reflectionDelete.code, 0, "reflect delete should succeed");
-    assert(reflectionDelete.stdout.includes(reflectionPayload.id), "reflect delete should echo the deleted reflection id");
 
     const memoryDelete = await capture(["memory", "delete", addedMemory.id]);
     assert.equal(memoryDelete.code, 0, "memory delete should succeed");

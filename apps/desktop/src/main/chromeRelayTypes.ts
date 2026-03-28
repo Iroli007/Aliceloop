@@ -31,6 +31,26 @@ export interface BrowserScreenshotPayload {
   tabId: string;
 }
 
+export interface BrowserRelayTabSummary {
+  tabId: string;
+  url: string;
+  title: string | null;
+  active: boolean;
+}
+
+export interface BrowserRelayTabsPayload {
+  backend: BrowserBackendKind;
+  activeTabId: string | null;
+  tabs: BrowserRelayTabSummary[];
+}
+
+export interface BrowserEvalPayload {
+  url: string;
+  backend: BrowserBackendKind;
+  tabId: string;
+  result: unknown;
+}
+
 export interface BrowserMediaCandidate {
   ref: string;
   tag: "video" | "audio";

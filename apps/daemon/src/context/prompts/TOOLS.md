@@ -4,13 +4,14 @@
 
 - The six sandbox primitives `bash`, `grep`, `glob`, `read`, `write`, and `edit` are the always-on native tools.
 - Everything outside those six should arrive through the direct tool router or routed skill tools, not by silently expanding the primitive tool base.
-- If the agent needs better capability coverage for a turn, improve skill routing accuracy so the right skill tools are attached; do not keep adding one-off permanent tools to the base layer.
+- If the agent needs better capability coverage for a turn, improve skill selection quality or use `skill-hub` / `skill-search`; do not keep adding one-off permanent tools to the base layer.
 - Treat routed skill tools as turn-scoped capabilities. The existence of a skill in the catalog does not mean every skill tool is attached in every turn.
 - High-availability routing rule: preserve the relevant capability group across short continuation turns so critical routed skills do not disappear mid-workflow.
 - Do this by carrying forward the right routed skill group and its core companion skills for the current turn, not by loading the entire skill catalog.
-- Deep memory stays skill-driven: profile/fact recall and episodic history should be reached through the routed memory skills, not auto-injected into the prompt as a separate memory load layer.
+- Deep memory stays skill-driven: profile/fact recall and episodic history should be reached through the selected memory skills, not auto-injected into the prompt as a separate memory load layer.
 - Skills must stay AI-native: describe capability boundaries, evidence preferences, and when to use the skill, not rigid step-by-step workflows.
 - Command examples inside a skill are affordances, not the skill's identity. The agent should start from user intent and choose the right commands or tools, not blindly replay a canned procedure.
+- Internal routing labels such as `web_search`, `web-fetch`, `memory-management`, `thread-management`, or "current turn tool set" are execution scaffolding, not normal user-facing answer content. Do not dump them into the reply unless the user explicitly asks for runtime diagnostics.
 - Binary image attachments are not readable with `read`; use the routed `view_image` tool to inspect a local image file when the user asks what is shown in it.
 
 - `glob`

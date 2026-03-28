@@ -5,7 +5,7 @@ import type {
   RuntimeCatalogSnapshot,
   RuntimeScriptDefinition,
 } from "@aliceloop/runtime-core";
-import { getSkillDefinition, listSkillDefinitions } from "../context/skills/skillLoader";
+import { getSkillDefinition, listActiveSkillDefinitions, listSkillDefinitions } from "../context/skills/skillLoader";
 import { getDatabase } from "../db/client";
 import { listMcpServerDefinitions } from "./mcpServerRepository";
 import { listProviderConfigs } from "./providerRepository";
@@ -63,7 +63,7 @@ const runtimeScripts: StoredRuntimeScriptDefinition[] = [
   },
 ];
 
-export { getSkillDefinition, listSkillDefinitions };
+export { getSkillDefinition, listActiveSkillDefinitions, listSkillDefinitions };
 
 function toPublicRuntimeScript(script: StoredRuntimeScriptDefinition): RuntimeScriptDefinition {
   return {
@@ -112,7 +112,7 @@ export function getRuntimeCatalogSnapshot(limit = 10): RuntimeCatalogSnapshot {
       sandboxRunCount: countRows("sandbox_runs"),
     },
     providers: listProviderConfigs(),
-    skills: listSkillDefinitions(),
+    skills: listActiveSkillDefinitions(),
     scripts: listRuntimeScriptDefinitions(),
     mcpServers: listMcpServerDefinitions(),
     recentSandboxRuns: listSandboxRuns(limit),

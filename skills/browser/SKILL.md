@@ -1,7 +1,7 @@
 ---
 name: browser
 label: browser
-description: Browser automation for AI agents. Use when the task needs real page interaction, login/session persistence, or Chrome-session-backed `opencli` commands.
+description: Browser automation for Aliceloop. Use when the user needs to interact with websites - navigating, filling forms, clicking buttons, opening login flows, taking screenshots, or browsing a site step by step. Prefer Aliceloop's native browser tools for arbitrary pages and use OpenCLI only for supported structured site adapters.
 status: available
 mode: instructional
 source-url: https://github.com/jackwener/opencli
@@ -16,96 +16,159 @@ allowed-tools:
   - browser_video_watch_start
   - browser_video_watch_poll
   - browser_video_watch_stop
+  - chrome_relay_status
+  - chrome_relay_list_tabs
+  - chrome_relay_open
+  - chrome_relay_navigate
+  - chrome_relay_read
+  - chrome_relay_read_dom
+  - chrome_relay_click
+  - chrome_relay_type
+  - chrome_relay_screenshot
+  - chrome_relay_scroll
+  - chrome_relay_eval
+  - chrome_relay_back
+  - chrome_relay_forward
 ---
 
 # Browser
 
-Use this skill for tasks that require a real browser session rather than raw HTTP.
+Three engines, pick the right one.
 
-Examples:
+| Engine | When to Use | How |
+|--------|-------------|-----|
+| **Aliceloop Native Browser** | Fresh automation, arbitrary sites, form filling, screenshots, login/QR handoff, any page that needs general interaction | `browser_*` tools |
+| **Chrome Relay** | Reading or interacting with attached desktop Chrome relay tabs, especially when you want explicit tab state or readable extraction | `chrome_relay_*` tools |
+| **OpenCLI** | Supported site adapters with structured output and existing Chrome login state | `skills/browser/scripts/opencli` |
 
-- multi-step website navigation
-- login-protected pages
-- form filling and submission
-- clicking menus, tabs, and modal flows
-- account interactions such as comments, likes, follows, and post submission after the user explicitly asks for them
-- browsing social feeds, timelines, recommendation streams, creator homepages, videos, and posts while logged in
-- taking screenshots for verification
-- extracting content from dynamic SPAs
-- using `opencli` for Chrome-session-backed site commands
+## Aliceloop Native Browser (Primary Engine)
 
-## Runtime
+Use the native browser tools for:
 
-Use `scripts/opencli` when a command already exists in the OpenCLI registry.
-Use the native browser tools when you need direct page control inside Aliceloop.
+- unknown sites
+- arbitrary page exploration
+- login pages, QR codes, captcha handoff, and screenshots
+- multi-step navigation where you need to see the current page state
+- form filling, clicks, and DOM-driven interaction
 
-## Login
+### Core Workflow
 
-- Chrome must already be logged into the target site.
-- OpenCLI browser commands reuse that Chrome login session.
-- If a site is not logged in, open Chrome manually, sign in, then rerun `scripts/opencli`.
+The native browser flow is:
 
-## Command Guide
+Navigate -> Snapshot -> Interact -> Re-snapshot
 
-```bash
-scripts/opencli list
-scripts/opencli doctor
-scripts/opencli bilibili hot --limit 5
-scripts/opencli bilibili search "rust"
-scripts/opencli xiaohongshu search "美食"
-scripts/opencli twitter timeline --limit 20
-scripts/opencli gh pr list --limit 5
-scripts/opencli docker ps
+```text
+browser_navigate(url="https://example.com")
+browser_snapshot()
+browser_click(ref="...")
+browser_type(ref="...", text="...")
+browser_snapshot()
 ```
 
-## Aliceloop Browser Tools
+### Essential Commands
 
-When you need in-process page interaction, use the browser tools below:
+```text
+browser_navigate(url="https://example.com")
+browser_snapshot()
+browser_click(ref="...")
+browser_type(ref="...", text="...")
+browser_screenshot()
+```
 
-- `browser_navigate`
-- `browser_snapshot`
-- `browser_click`
-- `browser_type`
-- `browser_screenshot`
+If the task is about understanding a playback page instead of only clicking around it, the same browser session can also expose:
+
 - `browser_media_probe`
 - `browser_video_watch_start`
 - `browser_video_watch_poll`
 - `browser_video_watch_stop`
 
-## Guardrails
+### Ref Lifecycle
 
-- Use snapshots for page state.
-- After a page change, re-snapshot before trusting the result.
-- For login, CAPTCHA, SMS, or 2FA, let the user take over the visible browser window.
-- If the user asks for a QR code, capture the real page with `browser_screenshot`.
-- For video content, open the actual playback page and use the watch tools.
-- For comments, likes, follows, reposts, or post submission, require explicit user request.
+Refs returned by `browser_snapshot` are page-state dependent. Re-snapshot after:
 
-## Aliceloop status
+- clicking links or buttons that navigate
+- form submissions
+- dynamic page updates that replace or reorder elements
 
-This skill is active.
+### Profile Persistence
 
-Runtime behavior:
+When Aliceloop Desktop has a healthy Chrome relay, the browser path uses a persistent Chrome session and can reuse login state there. When no relay is available, it falls back to local Playwright.
 
-- On Aliceloop Desktop with a healthy browser relay, it controls a visible Google Chrome window through the local desktop relay.
-- Outside Desktop, or when no healthy relay is registered, it falls back to the local Playwright adapter.
+## Chrome Relay
 
-Available tools:
+Use relay tools when the task is about the attached desktop Chrome relay tab itself: reading it, switching tabs, inspecting DOM refs, scrolling, or running a quick page-side expression.
 
-- `browser_navigate`
-- `browser_snapshot`
-- `browser_click`
-- `browser_type`
-- `browser_screenshot`
-- `browser_media_probe`
-- `browser_video_watch_start`
-- `browser_video_watch_poll`
-- `browser_video_watch_stop`
+### Essential Commands
 
-Current limitations:
+```text
+chrome_relay_status()
+chrome_relay_list_tabs()
+chrome_relay_open(url="https://example.com")
+chrome_relay_navigate(url="https://example.com")
+chrome_relay_read()
+chrome_relay_read_dom()
+chrome_relay_click(ref="...")
+chrome_relay_type(ref="...", text="...")
+chrome_relay_screenshot()
+chrome_relay_scroll(direction="down")
+chrome_relay_eval(expression="document.title")
+chrome_relay_back()
+chrome_relay_forward()
+```
 
-- each Aliceloop session binds to one browser tab at a time, so refresh snapshots after page-changing actions
-- desktop relay uses an Aliceloop-managed Chrome profile, not the user's personal Chrome profile
-- login state persists inside the Aliceloop-managed Chrome profile, so logging into Bilibili, Douyin, X/Twitter, or other sites once lets later browser tasks reuse that session
-- this is intended to be platform-agnostic: the same browser workflow covers Bilibili, Douyin, X/Twitter, Weibo, and similar sites
-- Playwright fallback still requires local Playwright browsers; if Chromium is missing, run `npx playwright install chromium`
+### Relay Notes
+
+- `chrome_relay_read()` is for readable text with metadata.
+- `chrome_relay_read_dom()` is for element refs and page structure.
+- `chrome_relay_list_tabs()` only lists tabs attached to the Aliceloop relay session.
+- If relay is unavailable, these tools fail fast instead of silently falling back.
+
+## OpenCLI (Structured Site Engine)
+
+Use OpenCLI only when the task is clearly a supported, structured command on a known site such as Bilibili, Xiaohongshu, Twitter/X, or Reddit.
+
+It is not the default path for unknown sites or free-form browsing.
+
+### Installation
+
+```bash
+npm install -g @jackwener/opencli
+```
+
+### Setup
+
+Use the bundled helper script for every invocation:
+
+```bash
+skills/browser/scripts/opencli doctor
+skills/browser/scripts/opencli list
+```
+
+### Essential Commands
+
+```bash
+skills/browser/scripts/opencli twitter search "openai" -f json
+skills/browser/scripts/opencli bilibili hot --limit 10 -f json
+skills/browser/scripts/opencli xiaohongshu search "露营" -f json
+```
+
+### Session Persistence
+
+OpenCLI reuses the logged-in Chrome session from its Browser Bridge. Run `skills/browser/scripts/opencli doctor` first when the task depends on OpenCLI.
+
+## Constraints
+
+- For QR login, captcha, or visual verification pages, stay on Aliceloop's native browser tools so you can capture and show the real page.
+- If OpenCLI is missing, the helper script will try `npx -y @jackwener/opencli` first and otherwise print the manual install command.
+- If a site does not map cleanly to a supported OpenCLI adapter, fall back to the native browser tools.
+- If you need attached relay tab state, use `chrome_relay_*` directly instead of pretending OpenCLI is a general browser.
+
+## Decision Guide
+
+- Need to automate an arbitrary site from scratch? -> Aliceloop native browser
+- Need to click around, fill a form, or take screenshots? -> Aliceloop native browser
+- Need a visible login, QR, or captcha handoff? -> Aliceloop native browser
+- Need to read or manipulate an attached desktop relay tab? -> Chrome relay
+- Need DOM refs or readable extraction from the relay tab? -> Chrome relay
+- Need a supported structured site command? -> OpenCLI
+- Need existing Chrome login state on a supported adapter? -> OpenCLI

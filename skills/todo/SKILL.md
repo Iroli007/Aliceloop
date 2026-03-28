@@ -1,9 +1,6 @@
 ---
 name: todo
-label: todo
 description: Maintain a lightweight Markdown todo list inside the workspace for longer multi-step work.
-status: available
-mode: instructional
 allowed-tools:
   - read
   - write

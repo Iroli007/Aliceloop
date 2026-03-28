@@ -1,9 +1,6 @@
 ---
 name: scheduler
-label: scheduler
 description: Schedule recurring work, reminders, and periodic checks through the Aliceloop daemon cron service.
-status: available
-mode: instructional
 allowed-tools:
   - bash
   - read

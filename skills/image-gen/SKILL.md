@@ -1,9 +1,6 @@
 ---
 name: image-gen
-label: image-gen
 description: Generate images from prompts through an OpenAI-compatible image backend and save them locally.
-status: available
-mode: instructional
 allowed-tools:
   - bash
   - read

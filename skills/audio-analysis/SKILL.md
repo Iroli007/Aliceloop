@@ -1,9 +1,6 @@
 ---
 name: audio-analysis
-label: audio-analysis
 description: Understand audio, voice notes, and spoken clips through a direct audio tool. Use when the user shares audio or asks what was said, summarized, or emphasized.
-status: available
-mode: instructional
 allowed-tools:
   - audio_understand
 ---

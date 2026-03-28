@@ -1,6 +1,7 @@
 import { createAudioUnderstandTool } from "./audioUnderstandTool";
 import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
+import { createChromeRelayTools } from "./chromeRelayTool";
 import { createManagedTaskTools } from "./managedTaskTools";
 import { createViewImageTool } from "./viewImageTool";
 import { createWebFetchTool } from "./webFetchTool";
@@ -18,6 +19,7 @@ function getManagedTaskTools(): ToolSet {
 }
 
 const cachedBrowserTools = new Map<string, ToolSet>();
+const cachedChromeRelayTools = new Map<string, ToolSet>();
 const cachedWebFetchTools = new Map<string, ToolSet>();
 const cachedWebSearchTools = new Map<string, ToolSet>();
 const cachedAudioUnderstandTools = new Map<string, ToolSet>();
@@ -52,6 +54,18 @@ function getWebFetchToolSet(sessionId?: string) {
 
   const tools = createWebFetchTool(sessionId);
   cachedWebFetchTools.set(cacheKey, tools);
+  return tools;
+}
+
+function getChromeRelayToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedChromeRelayTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createChromeRelayTools(sessionId);
+  cachedChromeRelayTools.set(cacheKey, tools);
   return tools;
 }
 
@@ -103,6 +117,22 @@ const BROWSER_TOOL_NAMES = new Set([
   "browser_video_watch_stop",
 ]);
 
+const CHROME_RELAY_TOOL_NAMES = new Set([
+  "chrome_relay_status",
+  "chrome_relay_list_tabs",
+  "chrome_relay_open",
+  "chrome_relay_navigate",
+  "chrome_relay_read",
+  "chrome_relay_read_dom",
+  "chrome_relay_click",
+  "chrome_relay_type",
+  "chrome_relay_screenshot",
+  "chrome_relay_scroll",
+  "chrome_relay_eval",
+  "chrome_relay_back",
+  "chrome_relay_forward",
+]);
+
 // Tool name -> factory, each factory returns { [toolName]: tool({...}) }
 const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) => ToolSet>([
   ["audio_understand", (options) => getAudioUnderstandToolSet(options?.sessionId)],
@@ -137,6 +167,11 @@ function resolveSkillToolSelection(requestedNames: Set<string>, options?: SkillT
         Object.assign(tools, getBrowserToolSet(options?.sessionId));
         browserToolsAttached = true;
       }
+      continue;
+    }
+
+    if (CHROME_RELAY_TOOL_NAMES.has(name)) {
+      Object.assign(tools, getChromeRelayToolSet(options?.sessionId));
       continue;
     }
 
@@ -179,6 +214,7 @@ export function listUnresolvedSkillTools(requestedNames: Set<string>) {
 export function listAvailableToolAdapterNames() {
   return [...new Set([
     ...BROWSER_TOOL_NAMES,
+    ...CHROME_RELAY_TOOL_NAMES,
     ...skillToolFactories.keys(),
   ])].sort();
 }
@@ -187,6 +223,7 @@ export function listAvailableToolAdapterNames() {
 export function resetSkillToolCache() {
   cachedManagedTaskTools = null;
   cachedBrowserTools.clear();
+  cachedChromeRelayTools.clear();
   cachedWebFetchTools.clear();
   cachedWebSearchTools.clear();
   cachedAudioUnderstandTools.clear();

@@ -1,36 +1,67 @@
 ---
 name: web-fetch
-label: web-fetch
 description: Fetch and read a known URL, API response, or document. Use when exact page content matters more than discovery.
-status: available
-mode: instructional
-source-url: https://docs.anthropic.com/en/docs/claude-code/settings
 allowed-tools:
-  - web_fetch
+  - Bash
+  - WebFetch
+  - ChromeRelayNavigate
+  - ChromeRelayRead
+  - ChromeRelayReadDom
+  - ChromeRelayListTabs
+  - ChromeRelayClick
+  - ChromeRelayScreenshot
+  - ChromeRelayScroll
+  - ChromeRelayEval
 ---
 
 # Web Fetch
 
-Use the built-in `web_fetch` tool to read a known URL.
+Fetch web content using the best available method, in priority order.
 
-Call `web_fetch` with a concrete URL that you already found, and ask for the main page content when needed. For example, fetch `https://example.com/article` after `web_search` has already found it.
+## 1. Chrome Relay (Primary - always try this first)
 
-`web_fetch` is the reading layer, not the discovery layer.
+Use the desktop Chrome relay tools for all web fetching when you need authenticated state, live rendering, or explicit tab control.
 
-## Good fits
+```text
+chrome_relay_status()
+chrome_relay_list_tabs()
+chrome_relay_open(url="https://example.com")
+chrome_relay_navigate(url="https://x.com/notifications")
+chrome_relay_read()
+chrome_relay_read_dom()
+chrome_relay_click(ref="...")
+chrome_relay_screenshot()
+chrome_relay_scroll(direction="down")
+chrome_relay_eval(expression="document.title")
+```
 
-- read a docs page
-- inspect an API response
-- summarize an article
-- fetch release notes from a known URL
+Always start with Chrome relay when the page may depend on:
 
-## Browser Fallback
+- authenticated pages such as Twitter/X, GitHub, Google, or webmail
+- JavaScript-rendered SPAs
+- pages behind login walls
+- pages that need clicks, screenshots, scrolling, DOM inspection, or multi-step interaction
 
-If the page is login-protected, highly interactive, or needs multi-step manipulation, switch to the browser skill.
+## 2. Web Fetch Tool (Fallback for simple/public pages)
+
+If Chrome relay is unavailable, or the page is simple public content, fall back to `web_fetch`:
+
+```text
+web_fetch(url="https://example.com/article")
+```
+
+- Renders public pages into readable text
+- Good for articles, docs, APIs, release notes, and simple public content
+- No login/session capability
+
+## Browser Skill
+
+If the task becomes full browser automation rather than tab reading, switch to the browser skill. That path can use native `browser_*` tools for arbitrary pages or OpenCLI for supported structured site adapters.
 
 ## Tips
 
-- Keep the main content, URL, and publication date when relevant.
-- Quote sparingly and summarize the rest.
+- Chrome relay first when login state or live browser state matters.
+- Check `chrome_relay_list_tabs()` first if you expect an existing relay tab.
+- Use `chrome_relay_read()` for readable text and `chrome_relay_read_dom()` when you need refs or DOM structure.
+- Use `web_fetch` only for simple/public pages when relay is unnecessary or unavailable.
 - If you do not already have a concrete URL, go back to `web_search`.
-- Prefer official or primary sources when URLs conflict.

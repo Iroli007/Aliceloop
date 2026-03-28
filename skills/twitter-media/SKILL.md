@@ -1,76 +1,40 @@
 ---
 name: twitter-media
 label: twitter-media
-description: Extract text and media from Twitter/X post URLs through the fxtwitter-compatible API. Use when users share a twitter.com or x.com link and want the post contents or media assets.
+description: Extract content from Twitter/X links, x.com links, twitter.com links, and tweet URLs, or use OpenCLI for logged-in Twitter/X actions such as search, profile reads, timeline reads, bookmarks, notifications, and lightweight interactions.
 status: available
 mode: instructional
+source-url: https://github.com/jackwener/opencli
 allowed-tools:
   - bash
+  - web_fetch
 ---
 
-# Twitter Media Skill
+# Twitter Media
 
-Use this skill to turn a Twitter/X post URL into structured text, image links, video links, and local downloads when needed.
+Use this skill for Twitter/X-specific tasks. Prefer the smallest path that fits.
 
-Examples:
+## Public Links
 
-- summarize a linked tweet
-- inspect the attached images or video thumbnails
-- save the raw media locally for a later step
-- extract the post text without opening the main site
+For a public `twitter.com` or `x.com` status link where the user only wants the post text, author, media, or thumbnail, prefer the free fxtwitter-compatible API.
 
-## API
-
-Twitter/X blocks most direct scraping, so use the public fxtwitter-compatible JSON endpoint:
-
-```text
-https://api.fxtwitter.com/{username}/status/{tweet_id}
-```
-
-If fxtwitter is unavailable, try `https://api.vxtwitter.com/{username}/status/{tweet_id}`.
-
-## Workflow
-
-1. Parse the username and tweet id from the shared URL.
-2. Fetch the JSON payload from the API.
-3. Return the tweet text, author, and media list.
-4. Download specific media files only when the user needs them for follow-up analysis or reuse.
-
-## URL Parsing
+It does not require login and is usually the fastest path.
 
 ```bash
-URL="https://x.com/YRyokan51928/status/2026565956206817573?s=20"
+URL="https://x.com/username/status/123456789?s=20"
 CLEAN=$(echo "$URL" | sed 's/[?#].*//' | sed 's:/*$::')
-USERNAME=$(echo "$CLEAN" | grep -oP '(?:twitter\.com|x\.com)/\K[^/]+')
-TWEET_ID=$(echo "$CLEAN" | grep -oP 'status/\K[0-9]+')
+USERNAME=$(echo "$CLEAN" | grep -oE '(twitter\.com|x\.com)/[^/]+' | sed 's#^.*/##')
+TWEET_ID=$(echo "$CLEAN" | grep -oE 'status/[0-9]+' | sed 's#status/##')
+curl -s "https://api.fxtwitter.com/${USERNAME}/status/${TWEET_ID}"
 ```
 
-## Fetch and Extract
+If fxtwitter is unavailable, try the compatible fallback:
 
 ```bash
-curl -s "https://api.fxtwitter.com/${USERNAME}/status/${TWEET_ID}" | python3 -m json.tool
-
-curl -s "https://api.fxtwitter.com/${USERNAME}/status/${TWEET_ID}" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-tweet = data.get('tweet', {})
-print('Author:', tweet.get('author', {}).get('name', 'unknown'))
-print('Text:', tweet.get('text', '(no text)'))
-media = tweet.get('media', {})
-for item in media.get('all', []):
-    mtype = item.get('type', 'unknown')
-    if mtype == 'photo':
-        print(f'Photo: {item[\"url\"]}')
-    elif mtype == 'video':
-        print(f'Video: {item[\"url\"]}')
-        print(f'Thumbnail: {item[\"thumbnail_url\"]}')
-    elif mtype == 'gif':
-        print(f'GIF: {item[\"url\"]}')
-        print(f'Thumbnail: {item[\"thumbnail_url\"]}')
-"
+curl -s "https://api.vxtwitter.com/${USERNAME}/status/${TWEET_ID}"
 ```
 
-## Download Media
+If the user needs the actual asset, you can download media directly:
 
 ```bash
 curl -sL -o /tmp/tweet_photo.jpg "PHOTO_URL"
@@ -78,9 +42,26 @@ curl -sL -o /tmp/tweet_thumb.jpg "THUMBNAIL_URL"
 curl -sL -o /tmp/tweet_video.mp4 "VIDEO_URL"
 ```
 
-## Tips
+## Logged-In Twitter/X
 
-- The API is public and typically requires no authentication.
-- For videos, prefer the highest-bitrate MP4 variant when several formats are available.
-- Thumbnails are often enough for a quick visual summary when full video download is unnecessary.
-- Save downloads to explicit local paths so later steps can reuse them or attach them through a separate file-sharing workflow.
+For timeline browsing, search, bookmarks, notifications, profile inspection, or lightweight actions, use OpenCLI:
+
+```bash
+skills/browser/scripts/opencli doctor
+skills/browser/scripts/opencli twitter search "openai" -f json
+skills/browser/scripts/opencli twitter profile openai -f json
+skills/browser/scripts/opencli twitter timeline openai -f json
+skills/browser/scripts/opencli twitter bookmarks -f json
+skills/browser/scripts/opencli twitter notifications -f json
+```
+
+OpenCLI fits when:
+
+- the task needs the logged-in session
+- the task is structured and Twitter-specific
+- the user wants repeatable JSON output
+
+## Constraints
+
+- If the user needs a visible login page, QR, or captcha handoff, switch to the browser skill.
+- If a simple public tweet link is enough, prefer fxtwitter over OpenCLI.

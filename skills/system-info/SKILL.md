@@ -1,43 +1,45 @@
 ---
 name: system-info
-label: system-info
-description: Get system information -- OS version, disk usage, memory, running processes, network status.
-status: available
-mode: instructional
+description: Get system information — OS version, disk usage, memory, running processes, network status. Use when users ask about their computer status or system health.
 allowed-tools:
   - bash
 ---
 
 # System Info
 
-Gather system information using standard command-line tools.
-
-## Commands
-
 ```bash
-date
-uptime
+# Any Unix
 
-sw_vers
-uname -a
-df -h
-du -sh ~/Desktop ~/Documents ~/Downloads
-vm_stat
-top -l 1 -s 0 | head -12
-sysctl -n machdep.cpu.brand_string
-sysctl -n hw.ncpu
-ps aux | head -10
-ps aux --sort=-%cpu | head -10
-lsof -i :3000
-ifconfig | grep "inet "
-networksetup -getairportnetwork en0
-ping -c 1 8.8.8.8
-pmset -g batt
+# Disk usage
+df -h                                # All volumes
+du -sh ~/Desktop ~/Documents ~/Downloads  # Common folders
+
+# Memory
+vm_stat                              # macOS memory stats
+top -l 1 -s 0 | head -12            # Quick system overview
+
+# CPU
+sysctl -n machdep.cpu.brand_string   # CPU model
+sysctl -n hw.ncpu                    # CPU count
+
+# Running processes (top CPU/memory)
+ps aux --sort=-%cpu | head -10       # Top CPU
+ps aux --sort=-%mem | head -10       # Top memory
+
+# Network
+ifconfig | grep "inet "              # IP addresses
+networksetup -getairportnetwork en0  # WiFi network (macOS)
+ping -c 1 8.8.8.8                    # Connectivity check
+
+# Battery (MacBook)
+pmset -g batt                        # Battery status
+
+# Uptime
+uptime
 ```
 
 ## Tips
 
-- Prefer the narrowest command that answers the question.
-- Use `date` for the current local clock and `uptime` for a quick host-health read.
-- Use `lsof -i :PORT` when the task is really about a running service.
-- Keep output excerpts short when only one metric matters.
+- Use `sw_vers` for macOS version details
+- Use `system_profiler SPHardwareDataType` for full hardware info
+- Use `lsof -i :PORT` to check what's running on a port

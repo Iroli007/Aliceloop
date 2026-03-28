@@ -1,9 +1,6 @@
 ---
 name: reactions
-label: reactions
 description: Add lightweight emoji reactions to Aliceloop session messages for acknowledgement and quick feedback; adjacent support state, not core memory.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---

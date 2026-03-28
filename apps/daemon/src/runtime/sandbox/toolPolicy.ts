@@ -5,6 +5,7 @@ import { realpathSync } from "node:fs";
 import { normalizeSandboxPermissionProfile } from "@aliceloop/runtime-core";
 import { getDataDir, getUploadsDir } from "../../db/client";
 import {
+  type NormalizedBashPolicyInput,
   SandboxViolationError,
   type RunBashInput,
   type SandboxExecutorOptions,
@@ -17,7 +18,47 @@ const projectRoot = resolve(currentDir, "../../../../../");
 const defaultAllowedReadRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedWriteRoots = [projectRoot, getDataDir(), getUploadsDir()];
 const defaultAllowedCwdRoots = [projectRoot, getDataDir(), getUploadsDir()];
-const defaultAllowedCommands = ["cat", "find", "git", "head", "ls", "node", "npm", "pwd", "rg", "rm", "rmdir", "screencapture", "sed", "sips", "tsx", "wc"];
+const defaultAllowedCommands = [
+  "aliceloop",
+  "cat",
+  "date",
+  "du",
+  "echo",
+  "env",
+  "find",
+  "git",
+  "grep",
+  "head",
+  "id",
+  "ifconfig",
+  "lsof",
+  "ls",
+  "networksetup",
+  "node",
+  "npm",
+  "ping",
+  "pmset",
+  "ps",
+  "pwd",
+  "realpath",
+  "rg",
+  "rm",
+  "rmdir",
+  "screencapture",
+  "sed",
+  "sips",
+  "stat",
+  "sw_vers",
+  "sysctl",
+  "system_profiler",
+  "top",
+  "tsx",
+  "uname",
+  "vm_stat",
+  "wc",
+  "which",
+  "whoami",
+];
 const safeAbsoluteCommandRoots = new Set([
   "/bin",
   "/usr/bin",
@@ -190,7 +231,15 @@ export function buildSandboxToolPolicy(options: SandboxExecutorOptions): Sandbox
   const permissionProfile = normalizeSandboxPermissionProfile(options.permissionProfile);
   const fullAccess = permissionProfile === "full-access";
   const workspaceRoot = options.workspaceRoot?.trim();
-  const workspaceRoots = workspaceRoot ? uniqueRoots([workspaceRoot]) : null;
+  const workspaceReadRoots = !fullAccess && workspaceRoot
+    ? uniqueRoots([workspaceRoot, ...(options.extraReadRoots ?? [])])
+    : null;
+  const workspaceWriteRoots = !fullAccess && workspaceRoot
+    ? uniqueRoots([workspaceRoot, ...(options.extraWriteRoots ?? [])])
+    : null;
+  const workspaceCwdRoots = !fullAccess && workspaceRoot
+    ? uniqueRoots([workspaceRoot, ...(options.extraCwdRoots ?? [])])
+    : null;
 
   return {
     label: options.label,
@@ -199,20 +248,20 @@ export function buildSandboxToolPolicy(options: SandboxExecutorOptions): Sandbox
     elevatedAccess: permissionProfile === "development" ? "elevated" : "standard",
     supportsElevatedActions: permissionProfile === "development",
     requiresBashApproval: !fullAccess && Boolean(options.requestBashApproval),
-    allowedReadRoots: workspaceRoots
-      ? workspaceRoots
-      : fullAccess
-        ? null
+    allowedReadRoots: fullAccess
+      ? null
+      : workspaceReadRoots
+        ? workspaceReadRoots
         : uniqueRoots([...defaultAllowedReadRoots, ...(options.extraReadRoots ?? [])]),
-    allowedWriteRoots: workspaceRoots
-      ? workspaceRoots
-      : fullAccess
-        ? null
+    allowedWriteRoots: fullAccess
+      ? null
+      : workspaceWriteRoots
+        ? workspaceWriteRoots
         : uniqueRoots([...defaultAllowedWriteRoots, ...(options.extraWriteRoots ?? [])]),
-    allowedCwdRoots: workspaceRoots
-      ? workspaceRoots
-      : fullAccess
-        ? null
+    allowedCwdRoots: fullAccess
+      ? null
+      : workspaceCwdRoots
+        ? workspaceCwdRoots
         : uniqueRoots([...defaultAllowedCwdRoots, ...(options.extraCwdRoots ?? [])]),
     allowedCommands: [...new Set([...(options.allowedCommands ?? []), ...defaultAllowedCommands])],
   };
@@ -324,6 +373,29 @@ export function assertCommandArguments(
       );
     }
   }
+}
+
+export function assertBashExecution(policy: SandboxToolPolicy, input: NormalizedBashPolicyInput) {
+  assertCwd(policy, input.cwd);
+
+  if (input.script) {
+    for (const shellCommand of input.scriptCommands) {
+      assertCommand(policy, shellCommand.command);
+      assertCommandArguments(policy, {
+        command: shellCommand.command,
+        args: shellCommand.args,
+        cwd: input.cwd,
+      });
+    }
+    return;
+  }
+
+  assertCommand(policy, input.command ?? "");
+  assertCommandArguments(policy, {
+    command: input.command ?? "",
+    args: input.args,
+    cwd: input.cwd,
+  });
 }
 
 export function getDefaultSandboxRoots() {

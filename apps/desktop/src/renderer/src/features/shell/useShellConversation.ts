@@ -761,7 +761,7 @@ export function useShellConversation(): ShellConversationState {
           fetchSessionSnapshot(currentBaseUrl, currentSessionId),
           fetchSessionEvents(currentBaseUrl, currentSessionId),
         ]);
-        if (!cancelled) {
+        if (!cancelled && activeSessionIdRef.current === currentSessionId) {
           lastEventSeqRef.current = nextSnapshot.lastEventSeq;
           setSnapshot(nextSnapshot);
           setToolWorkflowEntries(buildToolWorkflowEntries(nextEvents));
@@ -829,7 +829,7 @@ export function useShellConversation(): ShellConversationState {
 
         try {
           const nextSnapshot = await fetchSessionSnapshot(currentBaseUrl, currentSessionId);
-          if (!disposed) {
+          if (!disposed && activeSessionIdRef.current === currentSessionId) {
             lastEventSeqRef.current = Math.max(lastEventSeqRef.current, nextSnapshot.lastEventSeq);
             setSnapshot(nextSnapshot);
             setStatus("ready");

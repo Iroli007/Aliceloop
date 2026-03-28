@@ -1,9 +1,6 @@
 ---
 name: video-analysis
-label: video-analysis
 description: Understand common web video playback through media probing, short audio sampling, subtitle reading, and rolling summaries. Use when the user wants to know what a web video is saying or showing.
-status: available
-mode: instructional
 allowed-tools:
   - browser_media_probe
   - browser_video_watch_start

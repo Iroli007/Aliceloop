@@ -1,9 +1,6 @@
 ---
 name: memory-management
-label: memory-management
 description: Search and manage Aliceloop's memory and conversation recall. Use when the user asks about past conversations, personal facts, preferences, or anything that requires recalling information ("do you know my...", "we talked about before...", "do you remember...", "help me find what we said about..."). Also used to store new durable memories and search through archived chat threads.
-status: available
-mode: instructional
 allowed-tools:
   - bash
   - read
@@ -56,6 +53,7 @@ When the user asks about past information, always try both layers when needed:
 2. `aliceloop memory grep "<keyword>"` for keyword search in conversation history
 
 If one layer is not enough, use the other. They complement each other.
+On routed recall turns, Aliceloop may load the retrieved memory results into the conversation context before answering.
 
 ## Two-Layer Recall
 
@@ -79,36 +77,10 @@ aliceloop memory archive
 
 Conversation archives are stored in the project's `threads/` directory as markdown files with frontmatter (`threadId`, `title`, `createdAt`, `updatedAt`, `model`, `messageCount`). They are auto-exported when sessions change and can be resynced explicitly with `memory archive`.
 
-## Durable Memory
-
-Recommended `factKind` values:
-- `preference` for likes/dislikes/style preferences
-- `constraint` for hard requirements or "never do X"
-- `decision` for settled choices
-- `profile` for durable personal facts
-- `account` for account/tool/provider information
-- `workflow` for stable ways the user wants work done
-- `other` if nothing else fits
-
-Use `factKey` when the fact belongs to a stable slot that may later be replaced.
-Examples:
-- `response_style`
-- `language_preference`
-- `favorite_editor`
-- `timezone_preference`
-
-Prefer one concise stable statement over a long transcript-like paragraph.
-If a stable preference changed, treat the new fact as the current truth.
-
-## Pairing With Other Skills
-
-- Use `thread-management` when the user wants to inspect, create, list, or delete threads directly.
-- Use `thread-management` after recall search when you need exact thread context from a specific candidate.
-- Use `self-reflection` for rolling session-level conclusions and temporary discussion summary.
-
 ## Tips
 
-- Always confirm what you stored or deleted.
-- Do not claim a memory exists unless retrieval actually found it.
-- Use `aliceloop memory grep` when vector recall does not give enough exact evidence.
-- Durable memory should stay concise and stable rather than transcript-like.
+- Always confirm what you stored/deleted with the user
+- Use `aliceloop memory search` to find related memories before adding duplicates
+- Do not claim a memory exists unless retrieval actually found it
+- Use `aliceloop memory grep` to search conversation archives when semantic recall is not enough
+- Conversation archives live in the project's `threads/` directory and are auto-exported as markdown files

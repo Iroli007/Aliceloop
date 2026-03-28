@@ -66,9 +66,8 @@ import {
   getRuntimeScriptDefinition,
   getStoredRuntimeScriptDefinition,
   listRuntimeScriptDefinitions,
-  listSkillDefinitions,
+  listActiveSkillDefinitions,
 } from "./repositories/runtimeCatalogRepository";
-import { listActiveSkillDefinitions } from "./context/skills/skillLoader";
 import {
   getMcpServerDefinition,
   installMcpServer,
@@ -927,7 +926,7 @@ export async function createServer() {
       ok: true,
     };
   });
-  server.get("/api/skills", async () => listSkillDefinitions());
+  server.get("/api/skills", async () => listActiveSkillDefinitions());
   server.get<{ Params: SkillParams }>("/api/skills/:id", async (request, reply) => {
     const skill = getSkillDefinition(request.params.id);
     if (!skill) {

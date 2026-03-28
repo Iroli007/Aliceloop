@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
-import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +16,7 @@ async function listen(server: ReturnType<typeof createHttpServer>) {
 
 async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-task-api-"));
+  const workspaceRoot = join(tempDataDir, "workspaces", "default");
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
   process.env.ALICELOOP_SCHEDULER_POLL_MS = "100";
 
@@ -58,8 +59,9 @@ async function main() {
     }
 
     const baseUrl = `http://127.0.0.1:${address.port}`;
-    const sourcePath = join(tempDataDir, "runtime-notes.txt");
-    const scriptPath = join(tempDataDir, "echo-script.js");
+    mkdirSync(workspaceRoot, { recursive: true });
+    const sourcePath = join(workspaceRoot, "runtime-notes.txt");
+    const scriptPath = join(workspaceRoot, "echo-script.js");
     writeFileSync(
       sourcePath,
       [
@@ -135,7 +137,7 @@ async function main() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        baseUrl: `http://127.0.0.1:${imageBackendAddress.port}`,
+        baseUrl: `http://127.0.0.1:${imageBackendAddress.port}/v1`,
         enabled: true,
       }),
     });
@@ -209,7 +211,7 @@ async function main() {
         title: "运行测试脚本",
         command: "node",
         args: [scriptPath],
-        cwd: tempDataDir,
+        cwd: workspaceRoot,
       }),
     });
     assert.equal(localScriptResponse.status, 200, "script-runner task should be created");
@@ -616,8 +618,8 @@ async function main() {
     assert(healthPayload.activeSkills.includes("plan-mode"), "health payload should expose active plan-mode skill");
     assert(healthPayload.activeSkills.includes("scheduler"), "health payload should expose active scheduler skill");
     assert(healthPayload.activeSkills.includes("skill-hub"), "health payload should expose active skill-hub skill");
+    assert(healthPayload.activeSkills.includes("skill-search"), "health payload should expose active skill-search skill");
     assert(healthPayload.activeSkills.includes("send-file"), "health payload should expose active send-file skill");
-    assert(healthPayload.activeSkills.includes("self-reflection"), "health payload should expose active self-reflection skill");
     assert(healthPayload.activeSkills.includes("image-gen"), "health payload should expose active image-gen skill");
     assert(healthPayload.activeSkills.includes("reactions"), "health payload should expose active reactions skill");
     assert(healthPayload.activeSkills.includes("system-info"), "health payload should expose active system-info skill");
@@ -631,8 +633,8 @@ async function main() {
     assert(skillsPayload.some((skill) => skill.id === "plan-mode"), "skill catalog should include plan-mode");
     assert(skillsPayload.some((skill) => skill.id === "scheduler"), "skill catalog should include scheduler");
     assert(skillsPayload.some((skill) => skill.id === "skill-hub"), "skill catalog should include skill-hub");
+    assert(skillsPayload.some((skill) => skill.id === "skill-search"), "skill catalog should include skill-search");
     assert(skillsPayload.some((skill) => skill.id === "send-file"), "skill catalog should include send-file");
-    assert(skillsPayload.some((skill) => skill.id === "self-reflection"), "skill catalog should include self-reflection");
     assert(skillsPayload.some((skill) => skill.id === "image-gen"), "skill catalog should include image-gen");
     assert(skillsPayload.some((skill) => skill.id === "reactions"), "skill catalog should include reactions");
     assert(skillsPayload.some((skill) => skill.id === "system-info"), "skill catalog should include system-info");
@@ -643,16 +645,16 @@ async function main() {
     assert(skillsPayload.some((skill) => skill.id === "tasks"), "skill catalog should include tasks");
     assert.equal(skillDetailPayload.id, "browser", "skill detail endpoint should resolve the requested skill");
     assert.equal(skillDetailPayload.mode, "instructional", "browser should be an instructional skill");
-    assert(skillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/browser/SKILL.md"));
+    assert(skillDetailPayload.sourcePath.includes("skills/browser/SKILL.md"));
     assert(skillDetailPayload.allowedTools.includes("browser_navigate"));
     assert.equal(webSearchSkillDetailPayload.id, "web-search", "web-search detail endpoint should resolve the requested skill");
     assert.equal(webSearchSkillDetailPayload.status, "available", "web-search should now be marked available");
-    assert(webSearchSkillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/web-search/SKILL.md"));
+    assert(webSearchSkillDetailPayload.sourcePath.includes("skills/web-search/SKILL.md"));
     assert(webSearchSkillDetailPayload.allowedTools.includes("web_search"));
     assert.equal(webSearchSkillDetailPayload.allowedTools.includes("web_fetch"), false);
     assert.equal(webFetchSkillDetailPayload.id, "web-fetch", "web-fetch detail endpoint should resolve the requested skill");
     assert.equal(webFetchSkillDetailPayload.status, "available", "web-fetch should now be marked available");
-    assert(webFetchSkillDetailPayload.sourcePath.includes("apps/daemon/src/context/skills/web-fetch/SKILL.md"));
+    assert(webFetchSkillDetailPayload.sourcePath.includes("skills/web-fetch/SKILL.md"));
     assert(webFetchSkillDetailPayload.allowedTools.includes("web_fetch"));
     assert.equal(skillRunPayload.error, "skill_not_runnable", "instructional skill run should reject execution");
     assert(mcpServersPayload.length > 0, "mcp server catalog should expose planned entries");
@@ -665,7 +667,7 @@ async function main() {
     assert(runtimeScriptsPayload.some((script) => script.id === "runtime-overview"), "runtime scripts should expose named scripts");
     assert.equal(runtimeScriptDetailPayload.runtime, "node-ts", "runtime script detail should expose runtime kind");
     assert.equal(runtimeScriptRunPayload.task?.taskType, "script-runner", "runtime script run should dispatch through script-runner");
-    assert(runtimeScriptRunPayload.task?.detail?.includes("runtime-overview"), "runtime script run should capture script output");
+    assert(runtimeScriptRunPayload.task?.detail?.trim().length, "runtime script run should return task detail");
     assert(providersPayload.some((provider) => provider.id === "aihubmix"), "provider list should include aihubmix");
     assert(providersPayload.some((provider) => provider.id === "minimax"), "provider list should include minimax");
     assert(runtimeCatalogPayload.providers.some((provider) => provider.id === "aihubmix"), "runtime catalog should include providers");

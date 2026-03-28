@@ -1,7 +1,10 @@
 import type {
   BrowserAudioCapturePayload,
   BrowserBackend,
+  BrowserEvalPayload,
   BrowserMediaProbePayload,
+  BrowserReadablePayload,
+  BrowserRelayTabsPayload,
   BrowserScreenshotPayload,
   BrowserSnapshotPayload,
   BrowserSessionRecord,
@@ -38,7 +41,7 @@ function coerceRelayDetail(payload: unknown, fallback: string) {
   return detail ?? error ?? fallback;
 }
 
-async function requestRelay<T>(
+export async function requestDesktopRelay<T>(
   session: BrowserSessionRecord,
   path: string,
   init?: RequestInit,
@@ -83,12 +86,12 @@ async function requestRelay<T>(
   return payload as T;
 }
 
-async function ensureDesktopTab(session: BrowserSessionRecord) {
+export async function ensureDesktopRelayTab(session: BrowserSessionRecord) {
   if (session.tabId) {
     return session.tabId;
   }
 
-  const opened = await requestRelay<{ tabId?: unknown }>(session, "/tabs/open", {
+  const opened = await requestDesktopRelay<{ tabId?: unknown }>(session, "/tabs/open", {
     method: "POST",
     body: JSON.stringify({}),
   });
@@ -109,8 +112,8 @@ export const desktopChromeRelayBackend: BrowserBackend = {
   kind: "desktop_chrome",
 
   async navigate(session, url, waitUntil) {
-    const tabId = await ensureDesktopTab(session);
-    const snapshot = await requestRelay<BrowserSnapshotPayload>(session, `/tabs/${encodeURIComponent(tabId)}/navigate`, {
+    const tabId = await ensureDesktopRelayTab(session);
+    const snapshot = await requestDesktopRelay<BrowserSnapshotPayload>(session, `/tabs/${encodeURIComponent(tabId)}/navigate`, {
       method: "POST",
       body: JSON.stringify({
         url,
@@ -122,7 +125,7 @@ export const desktopChromeRelayBackend: BrowserBackend = {
   },
 
   async snapshot(session, options) {
-    const tabId = await ensureDesktopTab(session);
+    const tabId = await ensureDesktopRelayTab(session);
     const searchParams = new URLSearchParams();
     if (typeof options?.maxTextLength === "number") {
       searchParams.set("maxTextLength", String(options.maxTextLength));
@@ -131,7 +134,7 @@ export const desktopChromeRelayBackend: BrowserBackend = {
       searchParams.set("maxElements", String(options.maxElements));
     }
     const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
-    const snapshot = await requestRelay<BrowserSnapshotPayload>(
+    const snapshot = await requestDesktopRelay<BrowserSnapshotPayload>(
       session,
       `/tabs/${encodeURIComponent(tabId)}/snapshot${suffix}`,
       {
@@ -143,8 +146,8 @@ export const desktopChromeRelayBackend: BrowserBackend = {
   },
 
   async click(session, ref, waitUntil) {
-    const tabId = await ensureDesktopTab(session);
-    const snapshot = await requestRelay<BrowserSnapshotPayload>(session, `/tabs/${encodeURIComponent(tabId)}/click`, {
+    const tabId = await ensureDesktopRelayTab(session);
+    const snapshot = await requestDesktopRelay<BrowserSnapshotPayload>(session, `/tabs/${encodeURIComponent(tabId)}/click`, {
       method: "POST",
       body: JSON.stringify({
         ref,
@@ -156,8 +159,8 @@ export const desktopChromeRelayBackend: BrowserBackend = {
   },
 
   async type(session, ref, text, submit) {
-    const tabId = await ensureDesktopTab(session);
-    const snapshot = await requestRelay<BrowserSnapshotPayload>(session, `/tabs/${encodeURIComponent(tabId)}/type`, {
+    const tabId = await ensureDesktopRelayTab(session);
+    const snapshot = await requestDesktopRelay<BrowserSnapshotPayload>(session, `/tabs/${encodeURIComponent(tabId)}/type`, {
       method: "POST",
       body: JSON.stringify({
         ref,
@@ -170,8 +173,8 @@ export const desktopChromeRelayBackend: BrowserBackend = {
   },
 
   async screenshot(session, outputPath, fullPage, ref) {
-    const tabId = await ensureDesktopTab(session);
-    const result = await requestRelay<BrowserScreenshotPayload>(
+    const tabId = await ensureDesktopRelayTab(session);
+    const result = await requestDesktopRelay<BrowserScreenshotPayload>(
       session,
       `/tabs/${encodeURIComponent(tabId)}/screenshot`,
       {
@@ -188,13 +191,13 @@ export const desktopChromeRelayBackend: BrowserBackend = {
   },
 
   async mediaProbe(session, ref) {
-    const tabId = await ensureDesktopTab(session);
+    const tabId = await ensureDesktopRelayTab(session);
     const searchParams = new URLSearchParams();
     if (ref?.trim()) {
       searchParams.set("ref", ref.trim());
     }
     const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
-    const result = await requestRelay<BrowserMediaProbePayload>(
+    const result = await requestDesktopRelay<BrowserMediaProbePayload>(
       session,
       `/tabs/${encodeURIComponent(tabId)}/media-probe${suffix}`,
       {
@@ -206,8 +209,8 @@ export const desktopChromeRelayBackend: BrowserBackend = {
   },
 
   async captureAudioClip(session, options) {
-    const tabId = await ensureDesktopTab(session);
-    const result = await requestRelay<BrowserAudioCapturePayload>(
+    const tabId = await ensureDesktopRelayTab(session);
+    const result = await requestDesktopRelay<BrowserAudioCapturePayload>(
       session,
       `/tabs/${encodeURIComponent(tabId)}/capture-audio`,
       {
@@ -232,7 +235,7 @@ export const desktopChromeRelayBackend: BrowserBackend = {
     }
 
     try {
-      await requestRelay<{ ok?: boolean }>(session, `/tabs/${encodeURIComponent(session.tabId)}`, {
+      await requestDesktopRelay<{ ok?: boolean }>(session, `/tabs/${encodeURIComponent(session.tabId)}`, {
         method: "DELETE",
       });
     } catch {
@@ -245,3 +248,100 @@ export const desktopChromeRelayBackend: BrowserBackend = {
     session.relayToken = null;
   },
 };
+
+export async function listDesktopRelayTabs(session: BrowserSessionRecord) {
+  return requestDesktopRelay<BrowserRelayTabsPayload>(session, "/tabs", {
+    method: "GET",
+  });
+}
+
+export async function readDesktopRelay(session: BrowserSessionRecord, tabId: string, options?: {
+  maxTextLength?: number;
+  extractMain?: boolean;
+}) {
+  const searchParams = new URLSearchParams();
+  if (typeof options?.maxTextLength === "number") {
+    searchParams.set("maxTextLength", String(options.maxTextLength));
+  }
+  if (typeof options?.extractMain === "boolean") {
+    searchParams.set("extractMain", String(options.extractMain));
+  }
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+  return requestDesktopRelay<BrowserReadablePayload>(
+    session,
+    `/tabs/${encodeURIComponent(tabId)}/readable${suffix}`,
+    { method: "GET" },
+  );
+}
+
+export async function readDesktopRelayDom(session: BrowserSessionRecord, tabId: string, options?: {
+  maxTextLength?: number;
+  maxElements?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (typeof options?.maxTextLength === "number") {
+    searchParams.set("maxTextLength", String(options.maxTextLength));
+  }
+  if (typeof options?.maxElements === "number") {
+    searchParams.set("maxElements", String(options.maxElements));
+  }
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : "";
+  return requestDesktopRelay<BrowserSnapshotPayload>(
+    session,
+    `/tabs/${encodeURIComponent(tabId)}/read-dom${suffix}`,
+    { method: "GET" },
+  );
+}
+
+export async function scrollDesktopRelay(session: BrowserSessionRecord, tabId: string, direction: "up" | "down" | "left" | "right", amount?: number) {
+  return requestDesktopRelay<BrowserSnapshotPayload>(
+    session,
+    `/tabs/${encodeURIComponent(tabId)}/scroll`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        direction,
+        amount,
+      }),
+    },
+  );
+}
+
+export async function evalDesktopRelay(session: BrowserSessionRecord, tabId: string, expression: string) {
+  return requestDesktopRelay<BrowserEvalPayload>(
+    session,
+    `/tabs/${encodeURIComponent(tabId)}/eval`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expression,
+      }),
+    },
+  );
+}
+
+export async function backDesktopRelay(session: BrowserSessionRecord, tabId: string, waitUntil?: BrowserWaitUntil) {
+  return requestDesktopRelay<BrowserSnapshotPayload>(
+    session,
+    `/tabs/${encodeURIComponent(tabId)}/back`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        waitUntil,
+      }),
+    },
+  );
+}
+
+export async function forwardDesktopRelay(session: BrowserSessionRecord, tabId: string, waitUntil?: BrowserWaitUntil) {
+  return requestDesktopRelay<BrowserSnapshotPayload>(
+    session,
+    `/tabs/${encodeURIComponent(tabId)}/forward`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        waitUntil,
+      }),
+    },
+  );
+}

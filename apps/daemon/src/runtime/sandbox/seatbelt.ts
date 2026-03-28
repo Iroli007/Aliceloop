@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 
 const SANDBOX_EXEC_PATH = "/usr/bin/sandbox-exec";
 
@@ -44,6 +45,14 @@ export function buildSeatbeltProfile(options: {
   lines.push(";; Restrict file reads and writes under /Users");
   lines.push(`(deny file-read* (subpath "/Users"))`);
   lines.push(`(deny file-write* (subpath "/Users"))`);
+
+  const metadataRoots = collectAncestorRoots([...options.allowedReadRoots, ...options.allowedWriteRoots]);
+  if (metadataRoots.length > 0) {
+    lines.push(";; Allow metadata reads for ancestors of permitted roots");
+    for (const root of metadataRoots) {
+      lines.push(`(allow file-read-metadata (subpath ${sbplQuote(root)}))`);
+    }
+  }
 
   if (options.allowedWriteRoots.length > 0) {
     lines.push(";; Allow writes to explicitly permitted roots");
@@ -103,4 +112,22 @@ export function wrapWithSeatbelt(
 function sbplQuote(value: string): string {
   const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `"${escaped}"`;
+}
+
+function collectAncestorRoots(paths: string[]) {
+  const roots = new Set<string>();
+
+  for (const inputPath of paths) {
+    let current = resolve(inputPath);
+    while (true) {
+      const parent = dirname(current);
+      if (parent === current) {
+        break;
+      }
+      roots.add(parent);
+      current = parent;
+    }
+  }
+
+  return [...roots];
 }

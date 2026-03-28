@@ -6,25 +6,24 @@ Each skill lives in its own directory and is defined by a `SKILL.md` file with Y
 
 Current conventions:
 
-- `name`: stable skill id
-- `label`: optional UI label
-- `description`: short routing hint for the model and desktop catalog
-- `status`: `available` or `planned`
-- `mode`: currently `instructional`
-- `allowed-tools`: the minimal tool surface a skill expects when it is relevant; this is documentation and routing metadata, not a dynamic tool-loading mechanism
-- `source-url`: optional provenance link
+- required frontmatter: `name`, `description`
+- common optional frontmatter: `allowed-tools`, `source-url`
+- `label`: optional, and should be omitted unless it differs from `name`
+- `status`: optional, and should be omitted for normal active skills; use it only for non-default states such as `planned`
+- `mode`: optional, and should be omitted unless a skill truly needs a non-default mode
+- `allowed-tools`: the minimal tool surface a skill expects when it is relevant; this is documentation and search metadata, not a dynamic tool-loading mechanism
 - frontmatter keys must be unique; duplicate keys are rejected at load time
 - use `allowed-tools`, not legacy `tools`
 - skill bodies should be AI-native capability prompts, not workflow scripts
-- prefer semantic boundaries, evidence rules, and routing guidance over numbered command procedures
+- prefer semantic boundaries and evidence rules over workflow-style trigger writing
 - command examples are allowed, but they should support the capability description rather than define the skill itself
 
 These files are loaded into:
 
-- the desktop runtime catalog (`/api/skills`)
+- the active desktop runtime catalog (`/api/skills`)
 - the daemon system prompt as a discoverable skill index
 
-The TypeScript routing and loader code still lives under:
+The TypeScript selection and loader code still lives under:
 
 - `/Users/raper/workspace/Projects/Aliceloop/apps/daemon/src/context/skills/`
 
@@ -42,16 +41,16 @@ Memory-layer skill map:
 
 - Conversation Buffer: prompt-only, not a skill
 - Task Working Memory: `tasks`, `continue`, `plan-mode`, `todo`, `scheduler`, `notebook`
-- Session Summary: `self-reflection`
 - Profile / Fact Memory: `memory-management`
-- Episodic History: `thread-management`
+- Episodic History Recall: `memory-management`
+- Thread Administration: `thread-management`
 - Support State: `self-management`, `reactions`
 
-These memory skills are invoked on demand through routing. Their underlying memory stores are not auto-loaded into the prompt as a separate memory layer.
+These memory skills are invoked on demand through selection. Their underlying memory stores are not auto-loaded into the prompt as a separate memory layer.
 
 Current runtime assembly rules:
 
-- skills are routed as instruction text only
-- non-base tools are routed separately by `apps/daemon/src/context/tools/toolRouter.ts`
+- skills are selected as instruction text only
+- non-base tools are selected separately by `apps/daemon/src/context/tools/toolRouter.ts`
 - concrete adapter factories live in `apps/daemon/src/context/tools/skillToolFactories.ts`
-- `status: planned` skills remain catalog / prompt entries only until the runtime can genuinely support them
+- `status: planned` skills stay out of the active runtime catalog and routing path until the runtime can genuinely support them

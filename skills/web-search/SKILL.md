@@ -1,36 +1,80 @@
 ---
 name: web-search
-label: web-search
-description: Search the web for current information and source discovery. Use when you need fresh facts, multiple viewpoints, or a first pass over a topic.
-status: available
-mode: instructional
-source-url: https://docs.anthropic.com/en/docs/claude-code/settings
+description: Search the web for information using the built-in `web_search` tool. Use when users ask questions requiring up-to-date information, research, or fact-checking.
 allowed-tools:
+  - bash
   - web_search
+  - web_fetch
 ---
 
-# Web Search
+# Web Search Skill
 
-Use the built-in `web_search` tool for discovery. It returns ranked sources, snippets, and source links.
+Search the web using the built-in `web_search` tool. On Aliceloop this is the built-in research path for current information, fact-checking, and source discovery.
 
-Call `web_search` with a focused query and keep the result count small. For example, search for `python 3.13 new features` or `峰哥亡命天涯 最新情况`.
+## Web Search Tool (Primary)
 
-When a candidate URL matters, switch to the `web-fetch` skill and read the exact page.
+```text
+web_search(query="your search query", max_results=5)
+```
 
-## Good fits
+- Returns structured results with titles, URLs, snippets, and source metadata
+- Works well for up-to-date information, broad research, and fact-checking
+- Keep `max_results` small unless the task needs a wider sweep
 
-- latest releases, prices, scores, or policy updates
-- fact-checking a claim
-- finding official docs or primary sources
-- comparing several current sources before answering
+## Fetching Page Content
+
+After finding URLs from search, use `web_fetch` to read the actual page content:
+
+```text
+web_fetch(url="https://example.com/article")
+```
+
+- Use it when exact page content matters more than discovery
+- Prefer official docs, primary sources, and pages with clear publication dates
 
 ## Browser Fallback
 
-If a page needs login, CAPTCHA, or multi-step interaction, use the browser skill instead.
+If `web_search` or `web_fetch` are not enough because a page needs login, captcha, or multi-step interaction, fall back to the browser skill:
+
+```text
+browser_navigate(url="https://example.com")
+browser_snapshot()
+```
+
+If the page needs clicks, typing, or screenshots, continue with the native browser tools:
+
+```text
+browser_click(ref="...")
+browser_type(ref="...", text="...")
+browser_screenshot()
+```
+
+The browser skill prefers a visible Aliceloop Desktop Chrome relay with persistent login state when available, and otherwise falls back to local Playwright. For supported structured site adapters, the browser path may also use OpenCLI after the native browser path is ruled out.
 
 ## Tips
 
-- Search with a few focused queries instead of one vague query.
-- Prefer official docs, vendor pages, standards bodies, or primary reporting.
-- Compare dates when sources disagree.
-- Cite the URLs you relied on at the end.
+- For complex queries, try multiple search approaches
+- Always summarize findings instead of dumping raw results
+- For freshness queries like `today`, `latest`, `今天`, or `最新`, use the current runtime year instead of hardcoding a fixed year
+- Compare dates and sources when reports conflict
+- Search is the discovery layer. If a concrete page matters, follow up with `web_fetch` instead of re-searching forever
+
+## Examples
+
+**"Latest AI news":**
+
+```text
+web_search(query="latest AI news <current_year>", max_results=5)
+```
+
+**"Python 3.13 new features":**
+
+```text
+web_search(query="python 3.13 new features", max_results=5)
+```
+
+**Fetch a specific article after search:**
+
+```text
+web_fetch(url="https://docs.python.org/3.13/whatsnew/3.13.html")
+```

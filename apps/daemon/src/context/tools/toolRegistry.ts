@@ -13,6 +13,7 @@ interface BuildToolSetOptions {
   query?: string | null;
   routeHints?: SkillRouteHints;
   hasImageAttachment?: boolean;
+  additionalToolNames?: string[];
 }
 
 function collectAllowedTools(activeSkills: SkillDefinition[]) {
@@ -42,6 +43,7 @@ export function buildToolSet(
     ...routeToolNamesForTurn(options?.query, options?.routeHints, {
       hasImageAttachment: options?.hasImageAttachment,
     }),
+    ...(options?.additionalToolNames ?? []),
     ...collectAllowedTools(activeSkills),
   ]);
 
