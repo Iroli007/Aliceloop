@@ -111,13 +111,29 @@ export class ChromeRelayHttpServer {
     }
 
     try {
+      if (requestUrl.pathname === "/status" && request.method === "GET") {
+        writeJson(response, 200, {
+          ok: true,
+          ...this.getStatus(),
+        });
+        return;
+      }
+
+      if (requestUrl.pathname === "/tabs" && request.method === "GET") {
+        writeJson(response, 200, await this.service.listTabs());
+        return;
+      }
+
       if (requestUrl.pathname === "/tabs/open" && request.method === "POST") {
-        const result = await this.service.openTab();
+        const body = await readJsonBody(request);
+        const url = typeof body.url === "string" ? body.url.trim() : undefined;
+        const waitUntil = typeof body.waitUntil === "string" ? body.waitUntil : undefined;
+        const result = await this.service.openTab(url, waitUntil);
         writeJson(response, 200, result);
         return;
       }
 
-      const tabRouteMatch = requestUrl.pathname.match(/^\/tabs\/([^/]+)\/(navigate|snapshot|click|type|screenshot|media-probe|capture-audio|readable|search-results)$/);
+      const tabRouteMatch = requestUrl.pathname.match(/^\/tabs\/([^/]+)\/(navigate|snapshot|click|type|screenshot|media-probe|capture-audio|readable|search-results|read-dom|scroll|eval|back|forward)$/);
       if (tabRouteMatch) {
         const [, tabId, action] = tabRouteMatch;
         if (action === "navigate" && request.method === "POST") {
@@ -218,6 +234,59 @@ export class ChromeRelayHttpServer {
         if (action === "search-results" && request.method === "GET") {
           const maxResults = Number(requestUrl.searchParams.get("maxResults") ?? "5");
           writeJson(response, 200, await this.service.searchResults(tabId, Number.isFinite(maxResults) ? maxResults : 5));
+          return;
+        }
+
+        if (action === "read-dom" && request.method === "GET") {
+          const maxTextLength = requestUrl.searchParams.get("maxTextLength");
+          const maxElements = requestUrl.searchParams.get("maxElements");
+          writeJson(
+            response,
+            200,
+            await this.service.readDom(tabId, {
+              maxTextLength: maxTextLength ? Number(maxTextLength) : undefined,
+              maxElements: maxElements ? Number(maxElements) : undefined,
+            }),
+          );
+          return;
+        }
+
+        if (action === "scroll" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const direction = typeof body.direction === "string" ? body.direction : "down";
+          if (!["up", "down", "left", "right"].includes(direction)) {
+            badRequest(response, "direction must be one of up/down/left/right");
+            return;
+          }
+
+          const amount = typeof body.amount === "number" ? body.amount : undefined;
+          writeJson(response, 200, await this.service.scroll(tabId, direction as "up" | "down" | "left" | "right", amount));
+          return;
+        }
+
+        if (action === "eval" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const expression = typeof body.expression === "string" ? body.expression : "";
+          if (!expression.trim()) {
+            badRequest(response, "expression is required");
+            return;
+          }
+
+          writeJson(response, 200, await this.service.eval(tabId, expression));
+          return;
+        }
+
+        if (action === "back" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const waitUntil = typeof body.waitUntil === "string" ? body.waitUntil : undefined;
+          writeJson(response, 200, await this.service.back(tabId, waitUntil));
+          return;
+        }
+
+        if (action === "forward" && request.method === "POST") {
+          const body = await readJsonBody(request);
+          const waitUntil = typeof body.waitUntil === "string" ? body.waitUntil : undefined;
+          writeJson(response, 200, await this.service.forward(tabId, waitUntil));
           return;
         }
       }

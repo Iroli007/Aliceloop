@@ -1,9 +1,6 @@
 ---
 name: send-file
-label: send-file
 description: Send local files or photos into an Aliceloop conversation from the CLI.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---

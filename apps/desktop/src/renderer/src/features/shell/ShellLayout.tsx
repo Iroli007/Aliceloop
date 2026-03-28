@@ -277,7 +277,7 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
 
   for (const event of sessionEvents) {
     if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
-      const payload = event.payload as { message?: SessionMessage; skills?: unknown };
+      const payload = event.payload as { message?: SessionMessage; skills?: unknown; tools?: unknown };
       const message = payload.message;
       if (!message) {
         continue;
@@ -287,6 +287,14 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
         for (const skill of payload.skills) {
           if (typeof skill === "string" && skill.trim()) {
             currentTurnSkills.add(skill.trim());
+          }
+        }
+      }
+
+      if (message.role === "assistant" && Array.isArray(payload.tools)) {
+        for (const tool of payload.tools) {
+          if (typeof tool === "string" && tool.trim()) {
+            currentTurnTools.add(tool.trim());
           }
         }
       }
@@ -558,6 +566,22 @@ function buildTimeline(
 
   flushAssistantTurn();
   return blocks;
+}
+
+function getAssistantTurnRenderKey(
+  sessionId: string,
+  entry: Extract<TimelineBlock, { kind: "assistant-turn" }>,
+) {
+  const firstItem = entry.items[0];
+  if (!firstItem) {
+    return `assistant-turn-${sessionId}-empty`;
+  }
+
+  if (firstItem.kind === "message") {
+    return `assistant-turn-${sessionId}-message-${firstItem.message.id}`;
+  }
+
+  return `assistant-turn-${sessionId}-tool-${firstItem.tool.toolCallId}`;
 }
 
 function getThreadDateParts(value: string | null) {
@@ -1527,7 +1551,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   if (entry.kind === "assistant-turn") {
                     return (
                       <section
-                        key={`assistant-turn-${entry.items[0] && "message" in entry.items[0] ? entry.items[0].message.id : "empty"}`}
+                        key={getAssistantTurnRenderKey(conversation.sessionId, entry)}
                         className="workspace__assistant-turn"
                       >
                         <TurnMetaBadge tools={entry.turnMeta.tools} skills={entry.turnMeta.skills} />

@@ -1,22 +1,18 @@
 import type { ModelMessage, ToolChoice, ToolSet } from "ai";
 import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
+import { buildProfileFactMemoryBlock } from "./memory/memoryContext";
 import {
   buildSessionContextFragments,
 } from "./session/sessionContext";
-import { buildSkillContextBlock } from "./skills/skillLoader";
-import { resolveRelevantSkillRouting } from "./skills/skillRouter";
-import {
-  advanceSessionSkillCacheTurn,
-  getSessionSkillCacheHints,
-  inspectSessionSkillCache,
-  rememberSessionSkillRoute,
-} from "./skills/sessionSkillCache";
-import { getSkillGroupIdsForSkill, mergeSkillRouteHints, needsBrowserAutomation, needsImageAnalysis, needsWebFetch, needsWebResearch } from "./skills/skillRouting";
+import { buildHistoricalContextBlock } from "./session/historyContext";
+import { buildSkillContextBlock, selectRelevantSkillDefinitions } from "./skills/skillLoader";
+import { mergeSkillRouteHints, needsBrowserAutomation, needsCameraCapture, needsEpisodicHistoryRecall, needsFileManagement, needsImageAnalysis, needsWebFetch, needsWebResearch } from "./skills/skillRouting";
 import { buildToolSet } from "./tools/toolRegistry";
 import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import { getDefaultProjectDirectory } from "../repositories/projectRepository";
+import { getDataDir } from "../db/client";
 import {
   isAliceloopGeneratedFile,
   markGeneratedFileDeleted,
@@ -24,6 +20,7 @@ import {
 } from "../repositories/sessionGeneratedFileRepository";
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
 import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
+import { getSandboxProjectRoot } from "../runtime/sandbox/toolPolicy";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -46,6 +43,11 @@ const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
   maxDurationMs: 20 * 60 * 1000, // 20 minutes
 };
 
+interface LoadContextOptions {
+  additionalStickySkillIds?: string[];
+  additionalToolNames?: string[];
+}
+
 function prefersDeepResearchFetch(query: string) {
   return /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u.test(query.trim());
 }
@@ -53,6 +55,7 @@ function prefersDeepResearchFetch(query: string) {
 export async function loadContext(
   sessionId: string,
   abortSignal: AbortSignal,
+  options?: LoadContextOptions,
 ): Promise<AgentContext> {
   const timings: Record<string, number | string | null> = {};
 
@@ -84,39 +87,28 @@ export async function loadContext(
   const userQuery = recentConversationFocus.effectiveUserQuery ?? latestUserQuery;
   timings.effectiveUserQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
 
-  advanceSessionSkillCacheTurn(sessionId);
-  const shouldUseSkillCache = recentConversationFocus.continuationLike
-    || recentConversationFocus.researchContinuation;
-  const cachedRouteHints = getSessionSkillCacheHints(sessionId, {
-    includeSticky: shouldUseSkillCache,
-  });
-  const routeHints = mergeSkillRouteHints(recentConversationFocus.routeHints, cachedRouteHints);
-  const cachedSkillSnapshot = inspectSessionSkillCache(sessionId);
-  timings.cachedSkillCount = cachedSkillSnapshot.stickySkillIds.length;
-  timings.cachedSkillGroupCount = cachedSkillSnapshot.stickyGroupIds.length;
-  timings.skillCacheUsed = shouldUseSkillCache && (
-    cachedRouteHints.stickySkillIds.length > 0 || cachedRouteHints.stickyGroupIds.length > 0
-  )
-    ? 1
-    : 0;
+  const routeHints = mergeSkillRouteHints(
+    recentConversationFocus.routeHints,
+    (options?.additionalStickySkillIds?.length ?? 0) > 0
+      ? {
+          stickySkillIds: options?.additionalStickySkillIds ?? [],
+          reasons: ["runtime-capability-recovery"],
+        }
+      : null,
+  );
+  timings.cachedSkillCount = 0;
+  timings.cachedSkillGroupCount = 0;
+  timings.skillCacheUsed = 0;
 
   timings.projectBindingAggregated = 1;
   timings.attachmentRootsAggregated = 1;
 
   const skillRoutingStartedAt = nowMs();
-  const routedSkillDecision = await resolveRelevantSkillRouting(userQuery, routeHints, {
-    abortSignal,
-  });
-  const routedSkills = routedSkillDecision.skills;
-  const routedSkillGroupIds = [...new Set(routedSkills.flatMap((skill) => getSkillGroupIdsForSkill(skill.id)))];
-  rememberSessionSkillRoute(sessionId, {
-    skillIds: routedSkills.map((skill) => skill.id),
-    groupIds: routedSkillGroupIds,
-  });
+  const routedSkills = selectRelevantSkillDefinitions(userQuery, routeHints);
   timings.skillRoutingMs = roundMs(nowMs() - skillRoutingStartedAt);
-  timings.skillRouteSource = routedSkillDecision.routeSource;
-  timings.ruleSkillCount = routedSkillDecision.ruleSkillIds.length;
-  timings.fallbackSkillCount = routedSkillDecision.fallbackSkillIds.length;
+  timings.skillRouteSource = "metadata";
+  timings.ruleSkillCount = routedSkills.length;
+  timings.fallbackSkillCount = 0;
   const browserRelayAvailable = hasHealthyDesktopRelay();
   const skillsStartedAt = nowMs();
   const skills = buildSkillContextBlock(routedSkills, {
@@ -126,8 +118,31 @@ export async function loadContext(
   timings.skillsMs = roundMs(nowMs() - skillsStartedAt);
   timings.routedSkillCount = routedSkills.length;
   timings.routedSkills = routedSkills.map((skill) => skill.id).join(",");
-  timings.routedSkillGroups = routedSkillGroupIds.join(",");
+  timings.routedSkillGroups = "";
   timings.browserRelayAvailable = browserRelayAvailable ? 1 : 0;
+
+  const routedSkillIds = new Set(routedSkills.map((skill) => skill.id));
+
+  const profileFactMemoryStartedAt = nowMs();
+  const profileFactMemory = routedSkillIds.has("memory-management") && userQuery
+    ? await buildProfileFactMemoryBlock(userQuery)
+    : { content: "", timings: { skipReason: "skill_not_routed" } };
+  timings.profileFactMemoryMs = roundMs(nowMs() - profileFactMemoryStartedAt);
+  timings.profileFactMemoryChars = profileFactMemory.content.length;
+  timings.profileFactMemoryCount = profileFactMemory.timings.memoryCount ?? null;
+  timings.profileFactMemorySkipReason = typeof profileFactMemory.timings.skipReason === "string"
+    ? profileFactMemory.timings.skipReason
+    : null;
+
+  const historicalContextStartedAt = nowMs();
+  const historicalContext = routedSkillIds.has("memory-management") && userQuery && needsEpisodicHistoryRecall(userQuery)
+    ? buildHistoricalContextBlock(sessionId, userQuery)
+    : { content: "", timings: { skipReason: "skill_not_routed" } };
+  timings.historicalContextMs = roundMs(nowMs() - historicalContextStartedAt);
+  timings.historicalContextChars = historicalContext.content.length;
+  timings.historicalContextSkipReason = typeof historicalContext.timings.skipReason === "string"
+    ? historicalContext.timings.skipReason
+    : null;
 
   const messages = sessionContext.messages;
   timings.messageCount = messages.length;
@@ -151,6 +166,7 @@ export async function loadContext(
     permissionProfile: "full-access",
     autoApproveToolRequests,
     workspaceRoot: workspaceProject.path,
+    extraReadRoots: [getSandboxProjectRoot(), getDataDir()],
     defaultCwd: workspaceProject.path,
     requestBashApproval: undefined,
     requestElevatedApproval: (input) =>
@@ -178,6 +194,7 @@ export async function loadContext(
     query: userQuery,
     routeHints,
     hasImageAttachment: latestUserHasImageAttachment,
+    additionalToolNames: options?.additionalToolNames,
   });
   timings.toolsMs = roundMs(nowMs() - toolsStartedAt);
   timings.toolQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
@@ -185,7 +202,6 @@ export async function loadContext(
   const initialToolChoice = (() => {
     const toolNames = new Set(Object.keys(tools));
     const queryText = userQuery ?? "";
-    const routedSkillIds = new Set(routedSkills.map((skill) => skill.id));
 
     if (toolNames.has("view_image") && (latestUserHasImageAttachment || needsImageAnalysis(queryText))) {
       return { type: "tool", toolName: "view_image" } as const;
@@ -212,15 +228,17 @@ export async function loadContext(
     if (
       toolNames.has("bash")
       && (
-        routedSkillIds.has("skill-discovery")
-        || routedSkillIds.has("skills-search")
+        routedSkillIds.has("skill-hub")
+        || routedSkillIds.has("skill-search")
         || routedSkillIds.has("memory-management")
         || routedSkillIds.has("thread-management")
-        || routedSkillIds.has("self-reflection")
         || routedSkillIds.has("tasks")
         || routedSkillIds.has("plan-mode")
         || routedSkillIds.has("scheduler")
         || routedSkillIds.has("system-info")
+        || routedSkillIds.has("file-manager")
+        || needsCameraCapture(queryText)
+        || needsFileManagement(queryText)
       )
     ) {
       return { type: "tool", toolName: "bash" } as const;
@@ -234,6 +252,8 @@ export async function loadContext(
     sessionContext.activeTurn,
     sessionContext.recentToolActivity,
     sessionContext.recentResearchMemory,
+    profileFactMemory.content,
+    historicalContext.content,
     skills,
   ].filter(Boolean);
 

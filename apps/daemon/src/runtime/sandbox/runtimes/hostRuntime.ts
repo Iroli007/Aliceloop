@@ -1,12 +1,11 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { getDataDir } from "../../../db/client";
 import {
-  assertCommand,
-  assertCommandArguments,
-  assertCwd,
+  assertBashExecution,
   assertReadable,
   assertWritable,
   getSandboxProjectRoot,
@@ -14,6 +13,8 @@ import {
 import { buildSeatbeltProfile, isSeatbeltAvailable, wrapWithSeatbelt } from "../seatbelt";
 import {
   type DeletePathInput,
+  type ParsedBashCommand,
+  type NormalizedBashPolicyInput,
   SandboxViolationError,
   type EditTextFileInput,
   type ReadTextFileInput,
@@ -28,6 +29,11 @@ import {
 const execFileAsync = promisify(execFile);
 const projectRoot = getSandboxProjectRoot();
 const tsxCliPath = resolve(projectRoot, "node_modules/tsx/dist/cli.mjs");
+const daemonPackageRoot = resolve(projectRoot, "apps/daemon");
+const daemonDistCliPath = resolve(daemonPackageRoot, "dist/cli/index.js");
+const daemonSourceCliPath = resolve(daemonPackageRoot, "src/cli/index.ts");
+const runtimeBinDir = resolve(getDataDir(), "runtime-bin");
+const aliceloopShimPath = resolve(runtimeBinDir, "aliceloop");
 
 type HostRuntimeRunInput = {
   primitive: "read" | "write" | "edit" | "delete" | "bash";
@@ -42,13 +48,81 @@ type DeleteTargetKind = "file" | "directory";
 
 function pickEnvironment() {
   const env: Record<string, string> = {};
-  for (const key of ["ALICELOOP_DATA_DIR", "HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TMPDIR", "USER"]) {
+  for (const key of [
+    "ALICELOOP_DAEMON_HOST",
+    "ALICELOOP_DAEMON_PORT",
+    "ALICELOOP_DAEMON_URL",
+    "ALICELOOP_DATA_DIR",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TMPDIR",
+    "USER",
+  ]) {
     const value = process.env[key];
     if (typeof value === "string" && value.length > 0) {
       env[key] = value;
     }
   }
+
+  const shimDir = ensureAliceloopCliShimDir();
+  if (shimDir) {
+    const currentPath = env.PATH?.trim();
+    env.PATH = currentPath ? `${shimDir}:${currentPath}` : shimDir;
+  }
+
   return env;
+}
+
+function resolveAliceloopCliArgs(args: string[]) {
+  if (existsSync(daemonDistCliPath)) {
+    return [daemonDistCliPath, ...args];
+  }
+
+  if (existsSync(daemonSourceCliPath) && existsSync(tsxCliPath)) {
+    return [tsxCliPath, daemonSourceCliPath, ...args];
+  }
+
+  return null;
+}
+
+function ensureAliceloopCliShimDir() {
+  const cliArgs = resolveAliceloopCliArgs([]);
+  if (!cliArgs) {
+    return null;
+  }
+
+  mkdirSync(runtimeBinDir, { recursive: true });
+  const shimContent = [
+    "#!/bin/sh",
+    `exec "${process.execPath}" ${cliArgs.map((arg) => `"${arg}"`).join(" ")} "$@"`,
+    "",
+  ].join("\n");
+
+  if (!existsSync(aliceloopShimPath)) {
+    writeFileSync(aliceloopShimPath, shimContent, "utf8");
+    chmodSync(aliceloopShimPath, 0o755);
+    return runtimeBinDir;
+  }
+
+  const currentContent = readFileSyncSafe(aliceloopShimPath);
+  if (currentContent !== shimContent) {
+    writeFileSync(aliceloopShimPath, shimContent, "utf8");
+    chmodSync(aliceloopShimPath, 0o755);
+  }
+
+  return runtimeBinDir;
+}
+
+function readFileSyncSafe(filePath: string) {
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 function summarizeBytes(length: number) {
@@ -66,6 +140,11 @@ function summarizeText(text: string, maxLength = 240) {
 
 function summarizeCommandLine(command: string, args: string[]) {
   return [command, ...args.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg))].join(" ").trim();
+}
+
+function summarizeShellScript(script: string) {
+  const normalized = script.replace(/\s+/g, " ").trim();
+  return normalized.length > 240 ? `${normalized.slice(0, 240).trimEnd()}…` : normalized;
 }
 
 function buildBashApprovalFingerprint(command: string, args: string[], cwd: string) {
@@ -90,6 +169,224 @@ function noteBashApprovalAttempt(
   }
 
   context.seenBashApprovalFingerprints.add(fingerprint);
+}
+
+function assertSupportedShellScript(script: string) {
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index];
+    const next = script[index + 1];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (quote === "'") {
+      if (char === "'") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+
+    if (char === ">" || char === "<" || char === "`" || (char === "$" && next === "(") || char === "&") {
+      if (char === "&" && next === "&") {
+        index += 1;
+        continue;
+      }
+      throw new SandboxViolationError(
+        `bash denied for unsupported shell feature in script: ${char}; use simple commands, pipes, &&, ||, or ; only`,
+        { allowElevatedFallback: false },
+      );
+    }
+
+    if (char === "|" && next === "|") {
+      index += 1;
+    }
+  }
+
+  if (quote !== null) {
+    throw new SandboxViolationError(
+      "bash denied for unterminated quoted string in script",
+      { allowElevatedFallback: false },
+    );
+  }
+}
+
+function splitShellCommands(script: string) {
+  const commands: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index];
+    const next = script[index + 1];
+
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+
+    if (quote === "'") {
+      current += char;
+      if (char === "'") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      current += char;
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+
+    if (char === "\\") {
+      current += char;
+      escape = true;
+      continue;
+    }
+
+    if (char === ";" || char === "\n" || char === "|") {
+      const trimmed = current.trim();
+      if (trimmed) {
+        commands.push(trimmed);
+      }
+      current = "";
+      if (char === "|" && next === "|") {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (char === "&" && next === "&") {
+      const trimmed = current.trim();
+      if (trimmed) {
+        commands.push(trimmed);
+      }
+      current = "";
+      index += 1;
+      continue;
+    }
+
+    current += char;
+  }
+
+  const trimmed = current.trim();
+  if (trimmed) {
+    commands.push(trimmed);
+  }
+
+  return commands;
+}
+
+function tokenizeShellWords(input: string) {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+
+    if (quote === "'") {
+      if (char === "'") {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      if (char === "\\") {
+        escape = true;
+      } else if (char === '"') {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
+function parseShellScriptCommands(script: string): ParsedBashCommand[] {
+  assertSupportedShellScript(script);
+
+  return splitShellCommands(script)
+    .map((segment) => tokenizeShellWords(segment))
+    .filter((tokens) => tokens.length > 0)
+    .map(([command, ...args]) => ({ command, args }));
 }
 
 async function requestDeleteApproval(
@@ -124,6 +421,16 @@ function resolveExecution(command: string, args: string[]) {
       executable: process.execPath,
       args,
     };
+  }
+
+  if (command === "aliceloop") {
+    const cliArgs = resolveAliceloopCliArgs(args);
+    if (cliArgs) {
+      return {
+        executable: process.execPath,
+        args: cliArgs,
+      };
+    }
   }
 
   if (command === "tsx" && existsSync(tsxCliPath)) {
@@ -349,6 +656,35 @@ async function executeBashResult(
   };
 }
 
+async function executeBashScriptResult(
+  script: string,
+  cwd: string,
+  timeoutMs: number,
+  maxBufferBytes: number,
+  seatbeltProfile: string | null = null,
+) {
+  let execution = {
+    executable: "/bin/sh",
+    args: ["-lc", script],
+  };
+  if (seatbeltProfile) {
+    execution = wrapWithSeatbelt(execution.executable, execution.args, seatbeltProfile);
+  }
+  const { stdout, stderr } = await execFileAsync(execution.executable, execution.args, {
+    cwd,
+    timeout: timeoutMs,
+    env: pickEnvironment(),
+    maxBuffer: maxBufferBytes,
+  });
+  return {
+    result: {
+      stdout,
+      stderr,
+    },
+    detail: `bash script completed; stdout=${summarizeText(stdout)}; stderr=${summarizeText(stderr)}`,
+  };
+}
+
 function buildSeatbeltProfileForContext(context: SandboxRuntimeContext): string | null {
   if (!context.seatbeltEnabled) {
     return null;
@@ -358,6 +694,24 @@ function buildSeatbeltProfileForContext(context: SandboxRuntimeContext): string 
     allowedReadRoots: context.toolPolicy.allowedReadRoots ?? [],
     denyNetwork: context.toolPolicy.permissionProfile === "development",
   });
+}
+
+const seatbeltBypassCommands = new Set([
+  "lsof",
+  "ping",
+  "top",
+]);
+
+function shouldBypassSeatbeltForCommand(context: SandboxRuntimeContext, command: string) {
+  return context.toolPolicy.permissionProfile === "development" && seatbeltBypassCommands.has(command);
+}
+
+function shouldBypassSeatbeltForScript(
+  context: SandboxRuntimeContext,
+  commands: Array<{ command: string; args: string[] }>,
+) {
+  return context.toolPolicy.permissionProfile === "development"
+    && commands.some(({ command }) => seatbeltBypassCommands.has(command));
 }
 
 function createFileElevatedApproval(
@@ -728,10 +1082,21 @@ async function runBashAsDelete(context: SandboxRuntimeContext, command: string, 
 }
 
 async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
+  const script = input.script?.trim() || null;
   const command = input.command.trim();
   const args = input.args ?? [];
   const cwd = resolve(input.cwd ?? context.defaultCwd ?? projectRoot);
   const timeoutMs = Math.max(250, Math.min(input.timeoutMs ?? context.defaultTimeoutMs, 60_000));
+  const scriptCommands = script && !context.toolPolicy.fullAccess ? parseShellScriptCommands(script) : [];
+  const policyInput: NormalizedBashPolicyInput = {
+    cwd,
+    command: script ? null : command,
+    args,
+    script,
+    scriptCommands,
+  };
+  const shellApprovalCommand = script ? "sh" : command;
+  const shellApprovalArgs = script ? ["-lc", script] : args;
   const deleteLikeBashApproval = requiresDeleteApprovalForBash(command, args)
     ? {
         title: "等待确认删除命令",
@@ -739,6 +1104,17 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
         commandLine: summarizeCommandLine(command, args),
         command,
         args,
+        cwd,
+      }
+    : null;
+
+  const deleteLikeScriptApproval = script && requiresDeleteApprovalForBash("sh", ["-lc", script])
+    ? {
+        title: "等待确认删除脚本命令",
+        detail: `即将通过 ${summarizeShellScript(script)} 删除工作区内的文件。确认后只执行这一次脚本。`,
+        commandLine: summarizeShellScript(script),
+        command: "sh",
+        args: ["-lc", script],
         cwd,
       }
     : null;
@@ -751,51 +1127,51 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
     context,
     run: {
       primitive: "bash",
-      command,
-      args,
+      command: script ? "sh" : command,
+      args: shellApprovalArgs,
       cwd,
-      detail: `running ${command} ${args.join(" ")}`.trim(),
+      detail: script ? `running shell script ${summarizeShellScript(script)}` : `running ${command} ${args.join(" ")}`.trim(),
     },
     preflight() {
-      assertCommand(context.toolPolicy, command);
-      assertCwd(context.toolPolicy, cwd);
-      assertCommandArguments(context.toolPolicy, {
-        command,
-        args,
-        cwd,
-      });
+      assertBashExecution(context.toolPolicy, policyInput);
     },
     buildElevatedApproval() {
-      noteBashApprovalAttempt(context, command, args, cwd);
-      return createBashElevatedApproval(command, args, cwd);
+      noteBashApprovalAttempt(context, shellApprovalCommand, shellApprovalArgs, cwd);
+      return createBashElevatedApproval(shellApprovalCommand, shellApprovalArgs, cwd);
     },
     async executeStandard() {
-      assertCommand(context.toolPolicy, command);
-      assertCwd(context.toolPolicy, cwd);
-      assertCommandArguments(context.toolPolicy, {
-        command,
-        args,
-        cwd,
-      });
+      assertBashExecution(context.toolPolicy, policyInput);
       if (deleteLikeBashApproval) {
         await requestDeleteApproval(context, deleteLikeBashApproval);
       }
+      if (deleteLikeScriptApproval) {
+        await requestDeleteApproval(context, deleteLikeScriptApproval);
+      }
       if (!context.toolPolicy.fullAccess && context.requestBashApproval && !context.autoApproveToolRequests) {
-        noteBashApprovalAttempt(context, command, args, cwd);
+        noteBashApprovalAttempt(context, shellApprovalCommand, shellApprovalArgs, cwd);
         await context.requestBashApproval({
-          command,
-          args,
+          command: shellApprovalCommand,
+          args: shellApprovalArgs,
           cwd,
         });
       }
-      const profile = buildSeatbeltProfileForContext(context);
-      return executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes, profile);
+      const profile = script
+        ? (shouldBypassSeatbeltForScript(context, scriptCommands) ? null : buildSeatbeltProfileForContext(context))
+        : (shouldBypassSeatbeltForCommand(context, command) ? null : buildSeatbeltProfileForContext(context));
+      return script
+        ? executeBashScriptResult(script, cwd, timeoutMs, context.maxBufferBytes, profile)
+        : executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes, profile);
     },
     async executeElevated() {
       if (deleteLikeBashApproval) {
         await requestDeleteApproval(context, deleteLikeBashApproval);
       }
-      return executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes);
+      if (deleteLikeScriptApproval) {
+        await requestDeleteApproval(context, deleteLikeScriptApproval);
+      }
+      return script
+        ? executeBashScriptResult(script, cwd, timeoutMs, context.maxBufferBytes)
+        : executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes);
     },
   });
 }

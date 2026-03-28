@@ -1,9 +1,6 @@
 ---
 name: tasks
-label: tasks
 description: Track durable Task Working Memory across sessions with the local Aliceloop tracked-task CLI.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---

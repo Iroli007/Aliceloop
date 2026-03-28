@@ -21,15 +21,6 @@ interface HealthPayload {
   activeSkillAdapters: string[];
 }
 
-interface MemoryNotePayload {
-  id: string;
-  kind: string;
-  title: string;
-  content: string;
-  source: string;
-  updatedAt: string;
-}
-
 interface SemanticMemoryPayload {
   id: string;
   content: string;
@@ -247,10 +238,6 @@ function usage() {
     "  aliceloop memory archive",
     "  aliceloop memory add <content>",
     "  aliceloop memory delete <id>",
-    "  aliceloop reflect list [limit]",
-    "  aliceloop reflect search <query>",
-    "  aliceloop reflect add <content>",
-    "  aliceloop reflect delete <id>",
     "  aliceloop config list",
     "  aliceloop config get <path>",
     "  aliceloop config set <path> <value>",
@@ -826,60 +813,6 @@ async function handleMemory(args: string[]) {
   }
 
   throw new CliError(`Unknown memory command: ${action ?? "(missing)"}\n\n${usage()}`);
-}
-
-async function handleReflect(args: string[]) {
-  const action = args[0];
-  const source = "self-reflection";
-
-  if (action === "list") {
-    const limit = parseOptionalLimit(args[1], 20);
-    return apiRequest<MemoryNotePayload[]>(`/api/memories?limit=${limit}&source=${encodeURIComponent(source)}`);
-  }
-
-  if (action === "search") {
-    const query = args.slice(1).join(" ").trim();
-    if (!query) {
-      throw new CliError("reflect search requires a query");
-    }
-
-    const params = new URLSearchParams({
-      q: query,
-      limit: "10",
-      source,
-    });
-    return apiRequest<MemoryNotePayload[]>(`/api/memories/search?${params.toString()}`);
-  }
-
-  if (action === "add") {
-    const content = args.slice(1).join(" ").trim();
-    if (!content) {
-      throw new CliError("reflect add requires content");
-    }
-
-    return apiRequest<MemoryNotePayload>("/api/memories", {
-      method: "POST",
-      body: JSON.stringify({
-        content,
-        source,
-        kind: "learning-pattern",
-        title: `Reflection · ${content.slice(0, 40).trimEnd()}`,
-      }),
-    });
-  }
-
-  if (action === "delete") {
-    const memoryId = args[1]?.trim();
-    if (!memoryId) {
-      throw new CliError("reflect delete requires an id");
-    }
-
-    return apiRequest<{ ok: boolean; id: string }>(`/api/memories/${encodeURIComponent(memoryId)}`, {
-      method: "DELETE",
-    });
-  }
-
-  throw new CliError(`Unknown reflect command: ${action ?? "(missing)"}\n\n${usage()}`);
 }
 
 async function handleConfig(args: string[]) {
@@ -1711,9 +1644,6 @@ export async function runCli(args: string[], io: CliIO = defaultIo) {
         break;
       case "memory":
         result = await handleMemory(args.slice(1));
-        break;
-      case "reflect":
-        result = await handleReflect(args.slice(1));
         break;
       case "config":
         result = await handleConfig(args.slice(1));

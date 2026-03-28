@@ -62,6 +62,21 @@ export function refreshDesktopRelaySession(session: BrowserSessionRecord): Brows
   return session;
 }
 
+export function resolveDesktopRelaySession(sessionId: string): BrowserSessionRecord {
+  const session = getBrowserSession(sessionId);
+  if (session.backend === "desktop_chrome" && session.relayBaseUrl && session.relayToken) {
+    return session;
+  }
+
+  const relay = getHealthyBrowserRelayCapability();
+  if (!relay) {
+    throw new Error("No healthy Aliceloop Desktop Chrome relay is registered.");
+  }
+
+  applyRelayCapability(session, relay);
+  return session;
+}
+
 export function previewBrowserRuntime(
   sessionId: string,
 ): { backend: BrowserBackendKind; tabId: string | null } {

@@ -87,14 +87,12 @@ async function main() {
   const [
     { loadContext },
     { createSession, createSessionMessage, appendSessionEvent },
-    { clearSessionSkillCache },
     { resetSkillCatalogCache },
     { resetSkillToolCache },
     { resetRuntimeSettingsCache },
   ] = await Promise.all([
     import("../src/context/index.ts"),
     import("../src/repositories/sessionRepository.ts"),
-    import("../src/context/skills/sessionSkillCache.ts"),
     import("../src/context/skills/skillLoader.ts"),
     import("../src/context/tools/skillToolFactories.ts"),
     import("../src/repositories/runtimeSettingsRepository.ts"),
@@ -107,7 +105,6 @@ async function main() {
   };
 
   const genericSession = createSession("loadContext benchmark generic");
-  clearSessionSkillCache(genericSession.id);
   createSessionMessage({
     sessionId: genericSession.id,
     clientMessageId: "bench-generic-user-1",

@@ -2,11 +2,10 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
 import type { ReasoningEffort } from "@aliceloop/runtime-core";
-import { stepCountIs, streamText } from "ai";
+import { generateText, stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
 import { autoCompactMessages } from "./autoCompact";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
-import { refreshSummaryMemory } from "../context/memory/summaryMemory";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
@@ -33,6 +32,7 @@ import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
 import { saveStreamCheckpoint, clearStreamCheckpoint } from "./streamCheckpoint";
 import { ToolStateMachine, type ToolCallState } from "./toolStateMachine";
+import { repairTextToolCall } from "./toolCallRepair";
 
 // ---------------------------------------------------------------------------
 // Helpers (unchanged)
@@ -77,6 +77,17 @@ function publishAssistantReply(sessionId: string, content: string, skills: strin
   }
 
   void syncSessionProjectHistory(sessionId).catch(() => {});
+}
+
+function buildAssistantEventPayload(skills: string[], tools: string[]) {
+  const payload: { skills?: string[]; tools?: string[] } = {};
+  if (skills.length > 0) {
+    payload.skills = skills;
+  }
+  if (tools.length > 0) {
+    payload.tools = tools;
+  }
+  return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
 function resolveImageMimeType(filePath: string): string | null {
@@ -145,6 +156,31 @@ function sanitizeAssistantTextForChat(value: string) {
     "我没有返回可直接显示的真实图片附件。",
     "如果需要二维码、登录页或截图，我应该打开真实页面并用 `browser_screenshot` 或受支持的截图链路把图片作为附件发回聊天，而不是粘贴 base64 / SVG 文本。",
   ].join("\n");
+}
+
+function getRenderableAssistantText(providerId: string, value: string, final = false) {
+  const sanitized = sanitizeAssistantTextForChat(value);
+  if (providerId !== "minimax") {
+    return sanitized;
+  }
+
+  const trimmed = sanitized.trimStart();
+  if (!trimmed || final) {
+    return sanitized;
+  }
+
+  const lowerTrimmed = trimmed.toLowerCase();
+  const minimaxPrelude = "minimax:tool_call";
+
+  if (minimaxPrelude.startsWith(lowerTrimmed)) {
+    return null;
+  }
+
+  if (lowerTrimmed.startsWith(minimaxPrelude)) {
+    return "";
+  }
+
+  return sanitized;
 }
 
 function isResearchToolName(toolName: string) {
@@ -225,10 +261,10 @@ function predictToolBackend(sessionId: string, toolName: string): { backend?: st
 }
 
 function extractBashImagePaths(input: unknown, output?: unknown): string[] {
-  const toolInput = extractJsonObject<{ command?: string; args?: string[] }>(input);
+  const toolInput = extractJsonObject<{ command?: string; args?: string[]; script?: string }>(input);
   if (!toolInput) return [];
 
-  const { command, args = [] } = toolInput;
+  const { command, args = [], script } = toolInput;
   const discovered = new Set<string>();
 
   if (command === "/usr/sbin/screencapture" || command === "screencapture") {
@@ -245,6 +281,12 @@ function extractBashImagePaths(input: unknown, output?: unknown): string[] {
 
   for (const imagePath of extractImagePathsFromText(args.join(" "))) {
     discovered.add(imagePath);
+  }
+
+  if (typeof script === "string") {
+    for (const imagePath of extractImagePathsFromText(script)) {
+      discovered.add(imagePath);
+    }
   }
 
   for (const imagePath of extractImagePathsFromUnknown(output)) {
@@ -413,6 +455,241 @@ function summarizeUnknown(value: unknown, maxLength = 800) {
   }
 }
 
+function buildMiniMaxToolFallbackPrompt(toolName: string, input: Record<string, unknown>, output: unknown) {
+  return [
+    `You previously attempted to call the tool "${toolName}" with input: ${summarizeUnknown(input, 400) ?? "{}"}`,
+    `The tool returned: ${summarizeUnknown(output, 4000) ?? ""}`,
+    "Answer the user's original request directly in normal prose.",
+    "Do not emit XML, <tool> tags, or tool_call markup.",
+  ].join("\n\n");
+}
+
+async function executeMiniMaxTextToolCallFallback(
+  run: AgentRun,
+  stateMachine: ToolStateMachine,
+  reasoningEffort: ReasoningEffort,
+  assistantText: string,
+) {
+  const parsed = repairTextToolCall(assistantText);
+  if (!parsed) {
+    return null;
+  }
+
+  const tool = run.context.tools[parsed.toolName] as { execute?: (input: unknown) => Promise<unknown> } | undefined;
+  if (!tool || typeof tool.execute !== "function") {
+    const availableTools = Object.keys(run.context.tools);
+    const availablePreview = availableTools.slice(0, 12).join(", ");
+    return {
+      replacementText: [
+        `MiniMax 尝试调用 \`${parsed.toolName}\`，但当前回合没有把这个工具加入工具集。`,
+        availablePreview
+          ? `当前已挂载的工具有：${availablePreview}${availableTools.length > 12 ? " 等" : ""}。`
+          : "当前回合没有挂载任何可执行工具。",
+      ].join("\n\n"),
+      toolCallCount: 0,
+      parsedMarkup: parsed.markup,
+    };
+  }
+
+  const toolCallId = `minimax-fallback-${randomUUID()}`;
+  stateMachine.start(toolCallId, parsed.toolName, parsed.input);
+  stateMachine.markInputAvailable(toolCallId);
+
+  const predictedRuntime = predictToolBackend(run.sessionId, parsed.toolName);
+  publishRuntimeEvent(run.sessionId, "tool.call.started", {
+    toolCallId,
+    toolName: parsed.toolName,
+    inputPreview: summarizeUnknown(parsed.input),
+    backend: predictedRuntime.backend,
+    tabId: predictedRuntime.tabId,
+    state: "input-available",
+    fallbackSource: "minimax_text_tool_call",
+  });
+
+  const toolStartedAt = nowMs();
+
+  try {
+    const output = await tool.execute(parsed.input);
+    stateMachine.markOutputAvailable(toolCallId, output);
+    stateMachine.complete(toolCallId);
+
+    const browserPayload = extractBrowserToolPayload(output);
+    publishRuntimeEvent(run.sessionId, "tool.call.completed", {
+      toolCallId,
+      toolName: parsed.toolName,
+      success: true,
+      resultPreview: summarizeUnknown(output),
+      durationMs: roundMs(nowMs() - toolStartedAt),
+      backend: browserPayload.backend ?? predictedRuntime.backend,
+      tabId: browserPayload.tabId ?? predictedRuntime.tabId,
+      state: "output-available",
+      fallbackSource: "minimax_text_tool_call",
+    });
+
+    void maybePublishToolImageAttachment(
+      run.sessionId,
+      parsed.toolName,
+      output,
+      parsed.input,
+    ).catch(() => {});
+
+    let finalText = "";
+
+    try {
+      const followup = await generateText({
+        model: createProviderModel(run.provider),
+        system: run.context.systemPrompt,
+        messages: [
+          ...autoCompactMessages(run.context.messages, 8),
+          {
+            role: "assistant",
+            content: assistantText,
+          },
+          {
+            role: "user",
+            content: buildMiniMaxToolFallbackPrompt(parsed.toolName, parsed.input, output),
+          },
+        ],
+        providerOptions: buildAgentProviderOptions(run.provider, reasoningEffort),
+        abortSignal: run.abortController.signal,
+      });
+      finalText = followup.text.trim();
+    } catch {
+      finalText = "";
+    }
+
+    if (!finalText) {
+      finalText = [
+        `已接住 MiniMax 的文本工具调用并执行了 \`${parsed.toolName}\`。`,
+        summarizeUnknown(output, 4000) ?? "",
+      ].filter(Boolean).join("\n\n");
+    }
+
+    return {
+      replacementText: finalText,
+      toolCallCount: 1,
+      parsedMarkup: parsed.markup,
+    };
+  } catch (error) {
+    stateMachine.markError(toolCallId, error);
+    stateMachine.complete(toolCallId);
+
+    publishRuntimeEvent(run.sessionId, "tool.call.completed", {
+      toolCallId,
+      toolName: parsed.toolName,
+      success: false,
+      resultPreview: summarizeUnknown(error),
+      durationMs: roundMs(nowMs() - toolStartedAt),
+      backend: predictedRuntime.backend,
+      tabId: predictedRuntime.tabId,
+      state: "output-error",
+      fallbackSource: "minimax_text_tool_call",
+    });
+
+    return {
+      replacementText: [
+        `MiniMax 返回了文本形式的工具调用：${parsed.markup}`,
+        `我尝试按 AI-native fallback 执行 \`${parsed.toolName}\`，但失败了：${error instanceof Error ? error.message : String(error)}`,
+      ].join("\n\n"),
+      toolCallCount: 1,
+      parsedMarkup: parsed.markup,
+    };
+  }
+}
+
+interface CapabilityRecoveryRequest {
+  additionalStickySkillIds: string[];
+  additionalToolNames: string[];
+  reason: string;
+}
+
+function isRecoverableToolName(toolName: string) {
+  return toolName === "bash"
+    || toolName === "web_search"
+    || toolName === "web_fetch"
+    || toolName.startsWith("browser_")
+    || toolName.startsWith("chrome_relay_");
+}
+
+function inferStickySkillsForToolName(toolName: string) {
+  if (toolName === "web_search") {
+    return ["web-search"];
+  }
+
+  if (toolName === "web_fetch") {
+    return ["web-fetch"];
+  }
+
+  if (toolName.startsWith("browser_") || toolName.startsWith("chrome_relay_")) {
+    return ["browser"];
+  }
+
+  return [];
+}
+
+function extractReferencedToolNameFromAssistantText(text: string) {
+  const toolMatch = text.match(/\b(bash|web_search|web_fetch|browser_[a-z_]+|chrome_relay_[a-z_]+)\b/u);
+  return toolMatch?.[1] ?? null;
+}
+
+function inferCapabilityRecoveryRequest(
+  assistantText: string,
+  attachedToolNames: string[],
+  resolvedToolCallCount: number,
+): CapabilityRecoveryRequest | null {
+  if (resolvedToolCallCount > 0) {
+    return null;
+  }
+
+  const attached = new Set(attachedToolNames);
+  const repairedToolCall = repairTextToolCall(assistantText);
+  if (
+    repairedToolCall
+    && isRecoverableToolName(repairedToolCall.toolName)
+    && !attached.has(repairedToolCall.toolName)
+  ) {
+    return {
+      additionalStickySkillIds: [
+        ...inferStickySkillsForToolName(repairedToolCall.toolName),
+        "skill-search",
+        "skill-hub",
+      ],
+      additionalToolNames: [repairedToolCall.toolName],
+      reason: `missing_tool:${repairedToolCall.toolName}`,
+    };
+  }
+
+  const referencedToolName = extractReferencedToolNameFromAssistantText(assistantText);
+  if (
+    referencedToolName
+    && isRecoverableToolName(referencedToolName)
+    && !attached.has(referencedToolName)
+    && /未挂载|没加载|不可用|unavailable|not available|skill 路由|通过 skill/u.test(assistantText)
+  ) {
+    return {
+      additionalStickySkillIds: [
+        ...inferStickySkillsForToolName(referencedToolName),
+        "skill-search",
+        "skill-hub",
+      ],
+      additionalToolNames: [referencedToolName],
+      reason: `referenced_missing_tool:${referencedToolName}`,
+    };
+  }
+
+  if (
+    /我需要先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|让我先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|不是直接挂载的基座工具|需要通过 skill 路由|可用的 skill/u.test(assistantText)
+  ) {
+    return {
+      additionalStickySkillIds: ["skill-search", "skill-hub"],
+      additionalToolNames: attached.has("bash") ? [] : ["bash"],
+      reason: "skill_discovery_needed",
+    };
+  }
+
+  return null;
+}
+
 type RuntimeEventType =
   | "tool.call.started"
   | "tool.call.completed"
@@ -483,7 +760,7 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
   const safety = createSafetyChecker(context.safetyConfig);
   const startedAtMs = nowMs();
 
-  return {
+  const run: AgentRun = {
     sessionId,
     jobId,
     provider: activeProvider,
@@ -523,7 +800,7 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
         model: activeProvider.model,
         queueWaitMs,
         contextLoadMs,
-        context: context.timings,
+        context: run.context.timings,
         stream: streamTimings,
         providerRunMs,
         endToEndMs,
@@ -572,6 +849,8 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
       activeAgents.delete(sessionId);
     },
   };
+
+  return run;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +866,10 @@ interface StreamResult {
   };
 }
 
-async function executeStream(run: AgentRun): Promise<StreamResult> {
+async function executeStreamAttempt(
+  run: AgentRun,
+  existingAssistantMessageId?: string | null,
+): Promise<StreamResult & { assistantMessageId: string | null; attachedToolNames: string[] }> {
   const requestStartedAt = nowMs();
   const toolCallInputs = new Map<string, unknown>();
   const runtimeSettings = getRuntimeSettings();
@@ -704,7 +986,14 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   });
   const streamSetupMs = roundMs(nowMs() - requestStartedAt);
 
-  const { text, timings, diagnostics } = await consumeTextStream(run, stream, requestStartedAt);
+  const { text, timings, diagnostics, assistantMessageId } = await consumeTextStream(
+    run,
+    stream,
+    stateMachine,
+    runtimeSettings.reasoningEffort,
+    requestStartedAt,
+    existingAssistantMessageId ?? null,
+  );
   return {
     text,
     timings: {
@@ -712,6 +1001,46 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
       ...timings,
     },
     diagnostics,
+    assistantMessageId,
+    attachedToolNames: Object.keys(run.context.tools),
+  };
+}
+
+async function executeStream(run: AgentRun): Promise<StreamResult> {
+  let assistantMessageId: string | null = null;
+  let lastResult: StreamResult | null = null;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await executeStreamAttempt(run, assistantMessageId);
+    assistantMessageId = result.assistantMessageId;
+    lastResult = {
+      text: result.text,
+      timings: result.timings,
+      diagnostics: result.diagnostics,
+    };
+
+    const recovery = inferCapabilityRecoveryRequest(
+      result.text,
+      result.attachedToolNames,
+      result.diagnostics?.resolvedToolCallCount ?? 0,
+    );
+    if (!recovery || attempt > 0) {
+      return lastResult;
+    }
+
+    run.context = await loadContext(run.sessionId, run.abortController.signal, {
+      additionalStickySkillIds: recovery.additionalStickySkillIds,
+      additionalToolNames: recovery.additionalToolNames,
+    });
+  }
+
+  return lastResult ?? {
+    text: "",
+    timings: {},
+    diagnostics: {
+      resolvedToolCallCount: 0,
+      providerMetadataPreview: null,
+    },
   };
 }
 
@@ -724,25 +1053,43 @@ const DEBOUNCE_MS = 80;
 async function consumeTextStream(
   run: AgentRun,
   stream: Awaited<ReturnType<typeof streamText>>,
+  stateMachine: ToolStateMachine,
+  reasoningEffort: ReasoningEffort,
   requestStartedAt: number,
-): Promise<{ text: string; timings: Record<string, number | null>; diagnostics: StreamResult["diagnostics"] }> {
+  existingAssistantMessageId: string | null,
+): Promise<{
+  text: string;
+  assistantMessageId: string | null;
+  timings: Record<string, number | null>;
+  diagnostics: StreamResult["diagnostics"];
+}> {
   let text = "";
   const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
   const routedSkillIds = run.context.routedSkillIds;
-  let assistantMessageId: string | null = null;
+  let assistantMessageId: string | null = existingAssistantMessageId;
   let pendingFlush = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let firstTokenMs: number | null = null;
-  let resolvedToolCalls: Awaited<ReturnType<typeof stream.toolCalls>> = [];
+  let resolvedToolCalls: unknown[] = [];
+  const attachedToolNames = Object.keys(run.context.tools);
+  let fallbackToolCallCount = 0;
+
+  function getChatContent(final = false) {
+    return getRenderableAssistantText(run.provider.id, text, final);
+  }
 
   function flush() {
     if (!assistantMessageId || !pendingFlush) return;
     pendingFlush = false;
+    const content = getChatContent();
+    if (content === null) {
+      return;
+    }
     const updateResult = updateSessionMessage({
       sessionId: run.sessionId,
       messageId: assistantMessageId,
-      content: sanitizeAssistantTextForChat(text),
-      eventPayload: routedSkillIds.length > 0 ? { skills: routedSkillIds } : undefined,
+      content,
+      eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
     });
     publishSessionEvent(updateResult.event);
   }
@@ -757,6 +1104,11 @@ async function consumeTextStream(
     saveStreamCheckpoint(run.sessionId, text);
 
     if (!assistantMessageId) {
+      const content = getChatContent();
+      if (content === null || !content) {
+        continue;
+      }
+
       firstTokenMs = roundMs(nowMs() - requestStartedAt);
       // First delta: create the message immediately
       const messageResult = createSessionMessage({
@@ -764,9 +1116,9 @@ async function consumeTextStream(
         clientMessageId: assistantClientMessageId,
         deviceId: "runtime-agent",
         role: "assistant",
-        content: sanitizeAssistantTextForChat(text),
+        content,
         attachmentIds: [],
-        eventPayload: routedSkillIds.length > 0 ? { skills: routedSkillIds } : undefined,
+        eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
       });
 
       assistantMessageId = messageResult.message.id;
@@ -793,24 +1145,51 @@ async function consumeTextStream(
   }
   if (pendingFlush) flush();
 
+  resolvedToolCalls = await stream.toolCalls;
+
+  if (resolvedToolCalls.length === 0 && text.trim()) {
+    const fallback = await executeMiniMaxTextToolCallFallback(
+      run,
+      stateMachine,
+      reasoningEffort,
+      text,
+    );
+
+    if (fallback) {
+      fallbackToolCallCount = fallback.toolCallCount;
+      text = fallback.replacementText;
+    }
+  }
+
   // Handle tool-only replies with no text
   if (!text.trim()) {
-    resolvedToolCalls = await stream.toolCalls;
     if (resolvedToolCalls.length > 0) {
       text = `已完成 ${resolvedToolCalls.length} 次工具调用。`;
     }
   }
 
+  const finalContent = getChatContent(true);
+
+  if (assistantMessageId && typeof finalContent === "string") {
+    const updateResult = updateSessionMessage({
+      sessionId: run.sessionId,
+      messageId: assistantMessageId,
+      content: finalContent,
+      eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+    });
+    publishSessionEvent(updateResult.event);
+  }
+
   // Handle late message creation (text appeared after stream end, or tool-only fallback)
-  if (!assistantMessageId && text) {
+  if (!assistantMessageId && finalContent) {
     const messageResult = createSessionMessage({
       sessionId: run.sessionId,
       clientMessageId: assistantClientMessageId,
       deviceId: "runtime-agent",
       role: "assistant",
-      content: sanitizeAssistantTextForChat(text),
+      content: finalContent,
       attachmentIds: [],
-      eventPayload: routedSkillIds.length > 0 ? { skills: routedSkillIds } : undefined,
+      eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
     });
     assistantMessageId = messageResult.message.id;
     for (const event of messageResult.events) {
@@ -841,6 +1220,7 @@ async function consumeTextStream(
 
   return {
     text,
+    assistantMessageId,
     timings: {
       firstTokenMs,
       streamTotalMs: roundMs(nowMs() - requestStartedAt),
@@ -848,7 +1228,7 @@ async function consumeTextStream(
       cacheReadInputTokens,
     },
     diagnostics: {
-      resolvedToolCallCount: Array.isArray(resolvedToolCalls) ? resolvedToolCalls.length : 0,
+      resolvedToolCallCount: Array.isArray(resolvedToolCalls) ? resolvedToolCalls.length + fallbackToolCallCount : fallbackToolCallCount,
       providerMetadataPreview: summarizeUnknown(metadata),
     },
   };
@@ -897,9 +1277,6 @@ function schedulePostProcessing(run: AgentRun, text: string) {
       }
     }
 
-    await refreshSummaryMemory(run.sessionId, latestUserMessage, text, {
-      temporaryItems: distilled.temporary,
-    });
   })().catch(() => {
     // Summary refresh failure should not fail the user-visible turn.
   });

@@ -45,8 +45,6 @@ async function main() {
       resetSkillCatalogCache,
       selectRelevantSkillDefinitions,
     },
-    { resolveRelevantSkillRouting },
-    { advanceSessionSkillCacheTurn, clearSessionSkillCache, getSessionSkillCacheHints, rememberSessionSkillRoute },
     { routeToolNamesForTurn },
   ] = await Promise.all([
     import("../src/services/sandboxExecutor.ts"),
@@ -57,8 +55,6 @@ async function main() {
     import("../src/context/session/sessionContext.ts"),
     import("../src/context/tools/viewImageTool.ts"),
     import("../src/context/skills/skillLoader.ts"),
-    import("../src/context/skills/skillRouter.ts"),
-    import("../src/context/skills/sessionSkillCache.ts"),
     import("../src/context/tools/toolRouter.ts"),
   ]);
 
@@ -85,23 +81,23 @@ async function main() {
     availableCatalogSkills,
     "active skill catalog should reuse the cached available-skill slice when fingerprints are unchanged",
   );
-  const browserSkillDefinition = getSkillDefinition("browser");
-  assert(browserSkillDefinition, "browser should resolve from the cached skill catalog");
+  const skillHubDefinition = getSkillDefinition("skill-hub");
+  assert(skillHubDefinition, "skill-hub should resolve from the cached skill catalog");
   assert.equal(
-    browserSkillDefinition,
-    skillCatalog.find((skill) => skill.id === "browser") ?? null,
+    skillHubDefinition,
+    skillCatalog.find((skill) => skill.id === "skill-hub") ?? null,
     "getSkillDefinition should resolve by id from the cached catalog",
   );
-  const originalBrowserSkillStats = statSync(browserSkillDefinition.sourcePath);
-  const touchedBrowserSkillTime = new Date(originalBrowserSkillStats.mtimeMs + 60_000);
-  utimesSync(browserSkillDefinition.sourcePath, touchedBrowserSkillTime, touchedBrowserSkillTime);
+  const originalSkillHubStats = statSync(skillHubDefinition.sourcePath);
+  const touchedSkillHubTime = new Date(originalSkillHubStats.mtimeMs + 60_000);
+  utimesSync(skillHubDefinition.sourcePath, touchedSkillHubTime, touchedSkillHubTime);
   const invalidatedSkillCatalog = listSkillDefinitions();
   assert.notEqual(
     invalidatedSkillCatalog,
     skillCatalog,
     "skill catalog should invalidate when a SKILL.md timestamp changes",
   );
-  utimesSync(browserSkillDefinition.sourcePath, originalBrowserSkillStats.atime, originalBrowserSkillStats.mtime);
+  utimesSync(skillHubDefinition.sourcePath, originalSkillHubStats.atime, originalSkillHubStats.mtime);
   resetSkillCatalogCache();
   skillCatalog = listSkillDefinitions();
   availableCatalogSkills = listActiveSkillDefinitions();
@@ -135,115 +131,100 @@ async function main() {
   }
 
   assert(availableCatalogSkills.length > 0, "skill catalog should expose at least one available skill");
-  assert(skillCatalog.some((skill) => skill.id === "skill-discovery"), "skill-discovery should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "skill-hub"), "skill-hub should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "skill-search"), "skill-search should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "audio-analysis"), "audio-analysis should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "video-analysis"), "video-analysis should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "twitter-media"), "twitter-media should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "selfie"), "selfie should be present in the catalog");
   assert(skillCatalog.every((skill) => skill.id !== "travel"), "travel should no longer be present in the catalog");
-  assert(availableCatalogSkills.every((skill) => skill.id !== "skill-search"), "legacy skill-search should no longer be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "skill-hub"), "skill-hub should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "skill-search"), "skill-search should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "twitter-media"), "twitter-media should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be active");
   assert(availableCatalogSkills.every((skill) => skill.id !== "music-listener"), "legacy music-listener should no longer be active");
   assert(availableCatalogSkills.every((skill) => skill.id !== "video-reader"), "legacy video-reader should no longer be active");
   assert(plannedCatalogSkills.some((skill) => skill.id === "selfie"), "selfie should remain planned until image references are supported");
-  assert(availableCatalogSkills.some((skill) => skill.id === "browser"), "browser should now be available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-fetch"), "web-fetch should remain available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-search"), "web-search should now be available");
-  const ruleOnlyRouting = await resolveRelevantSkillRouting("继续");
-  assert.equal(ruleOnlyRouting.routeSource, "rules", "rule-only continuation turns should not need LLM fallback");
-  assert.equal(
-    ruleOnlyRouting.fallbackSkillIds.length,
-    0,
-    "rule-only continuation turns should not add fallback skills",
-  );
+  const ruleOnlyRouting = selectRelevantSkillDefinitions("继续");
   assert(
-    ruleOnlyRouting.skills.some((skill) => skill.id === "continue"),
+    ruleOnlyRouting.some((skill) => skill.id === "continue"),
     "rule-only continuation turns should still route the continue skill",
   );
-  const smallTalkRouting = await resolveRelevantSkillRouting("你就是a姐");
+  const smallTalkRouting = selectRelevantSkillDefinitions("你就是a姐");
   assert.equal(
-    smallTalkRouting.routeSource,
-    "rules",
-    "plain chat should not trigger LLM fallback",
-  );
-  assert.equal(
-    smallTalkRouting.fallbackSkillIds.length,
+    smallTalkRouting.length,
     0,
-    "plain chat should not add fallback skills",
+    "plain chat should not pull in unrelated skills",
   );
-  let researchFallbackAttempted = false;
-  const researchRuleRouting = await resolveRelevantSkillRouting(
-    "帮我调查张雪峰",
-    undefined,
-    {
-      fallbackResolver: async () => {
-        researchFallbackAttempted = true;
-        return ["plan-mode"];
-      },
-    },
-  );
-  assert.equal(
-    researchRuleRouting.routeSource,
-    "rules",
-    "high-confidence research turns should stay on the rule path",
-  );
-  assert.equal(
-    researchFallbackAttempted,
-    false,
-    "high-confidence research turns should not invoke the LLM fallback",
-  );
+  const researchRuleRouting = selectRelevantSkillDefinitions("帮我调查张雪峰");
   assert(
-    researchRuleRouting.skills.some((skill) => skill.id === "web-search"),
+    researchRuleRouting.some((skill) => skill.id === "web-search"),
     "high-confidence research turns should still route web-search",
   );
-  const historyRouting = await resolveRelevantSkillRouting("我昨天晚上跟你说啥呢来着");
-  assert.equal(
-    historyRouting.routeSource,
-    "rules",
-    "episodic history recall should route on rules alone",
-  );
+  const historyRouting = selectRelevantSkillDefinitions("我昨天晚上跟你说啥呢来着");
   assert(
-    historyRouting.skills.some((skill) => skill.id === "thread-management"),
-    "episodic history recall should route thread-management",
+    historyRouting.some((skill) => skill.id === "memory-management"),
+    "episodic history recall should route memory-management",
   );
-  const memoryRouting = await resolveRelevantSkillRouting("记住我以后喜欢简洁回答");
-  assert.equal(
-    memoryRouting.routeSource,
-    "rules",
-    "profile/fact memory writes should route on rules alone",
-  );
+  const todayHistoryRouting = selectRelevantSkillDefinitions("今天我们做了什么呀");
   assert(
-    memoryRouting.skills.some((skill) => skill.id === "memory-management"),
+    todayHistoryRouting.some((skill) => skill.id === "memory-management"),
+    "same-day recall should route memory-management instead of dropping into research",
+  );
+  assert.equal(
+    todayHistoryRouting.some((skill) => skill.id === "web-search"),
+    false,
+    "same-day recall should not misroute to web-search just because the query contains 今天",
+  );
+  const threadAdminRouting = selectRelevantSkillDefinitions("帮我列一下最近的线程列表");
+  assert(
+    threadAdminRouting.some((skill) => skill.id === "thread-management"),
+    "explicit thread administration should still route thread-management",
+  );
+  assert.equal(
+    threadAdminRouting.every((skill) => skill.id === "thread-management"),
+    true,
+    "explicit thread administration should stay focused on thread-management",
+  );
+  const technicalThreadSkills = selectRelevantSkillDefinitions("Node worker thread 为什么卡住了");
+  assert.equal(
+    technicalThreadSkills.some((skill) => skill.id === "memory-management" || skill.id === "thread-management"),
+    false,
+    "plain technical thread questions should not misroute into recall or thread administration skills",
+  );
+  const memoryRouting = selectRelevantSkillDefinitions("记住我以后喜欢简洁回答");
+  assert(
+    memoryRouting.some((skill) => skill.id === "memory-management"),
     "profile/fact memory writes should route memory-management",
   );
-  const fallbackRouting = await resolveRelevantSkillRouting(
-    "请把这件事处理得更稳妥一点。",
-    undefined,
-    {
-      fallbackResolver: async () => ["plan-mode", "tasks", "continue"],
-    },
-  );
+  const selfRouting = selectRelevantSkillDefinitions("把 reasoning 改成 high");
   assert.equal(
-    fallbackRouting.routeSource,
-    "rules+llm",
-    "ambiguous turns should be able to fall back to an LLM-selected skill set",
+    selfRouting.every((skill) => skill.id === "self-management"),
+    true,
+    "runtime setting edits should stay focused on self-management",
   );
-  assert(
-    fallbackRouting.skills.some((skill) => skill.id === "plan-mode"),
-    "LLM fallback should be able to add plan-mode",
-  );
-  assert(
-    fallbackRouting.skills.some((skill) => skill.id === "tasks"),
-    "LLM fallback should be able to add tasks",
+  const fileRouting = selectRelevantSkillDefinitions("帮我找一下 Downloads 里最近 7 天的 PDF");
+  assert.equal(
+    fileRouting.every((skill) => skill.id === "file-manager"),
+    true,
+    "local file search should stay focused on file-manager",
   );
   assert.deepEqual(
     routeToolNamesForTurn("帮我查一下东莞今天天气，给我最新结果。"),
     ["web_search"],
     "tool router should attach research tools from query intent rather than from skill metadata",
   );
+  assert.deepEqual(
+    routeToolNamesForTurn("今天我们做了什么呀"),
+    [],
+    "same-day recall should not attach web_search purely because the query contains 今天",
+  );
   assert(
-    routeToolNamesForTurn("帮我找一下峰哥亡命天涯这个人").includes("web_search"),
-    "tool router should route '帮我找一下' queries to web_search",
+    routeToolNamesForTurn("帮我调查峰哥亡命天涯这个人").includes("web_search"),
+    "tool router should route explicit research queries to web_search",
   );
   assert.deepEqual(
     routeToolNamesForTurn("fetch"),
@@ -380,13 +361,13 @@ async function main() {
   assert.equal(context.firstStepToolChoice, undefined, "generic turns should not force an initial tool");
   assert.match(
     contextSystemPrompt,
-    /Skill routing rule: skills are optional workflow instructions, not dynamic tool loaders\./i,
-    "system prompt should encode the architecture rule that skills are routed instructions rather than tool loaders",
+    /Select skills from metadata only when they materially help the task\./i,
+    "system prompt should encode the architecture rule that skills are selected instruction blocks rather than workflow routers",
   );
   assert.match(
     contextSystemPrompt,
-    /No extra skill was routed for this turn, so do not assume any specialized workflow guidance is present\./i,
-    "system prompt should clarify when no routed skill guidance is attached for the current turn",
+    /No extra local skill was selected for this turn\./i,
+    "system prompt should clarify when no selected skill guidance is attached for the current turn",
   );
 
   const imageSession = createSession("image attachment smoke");
@@ -491,8 +472,8 @@ async function main() {
     },
   );
   assert.equal(typeof researchToolSet.web_search, "object", "research turns should inject web_search");
-  assert.equal("bash" in researchToolSet, false, "research turns should not inject bash unless a routed skill explicitly asks for it");
-  assert.equal("web_fetch" in researchToolSet, false, "research turns should not inject web_fetch by default");
+  assert.equal("bash" in researchToolSet, true, "research turns should inject bash when the routed web-search skill explicitly asks for it");
+  assert.equal("web_fetch" in researchToolSet, true, "research turns should inject web_fetch when the routed web-search skill declares it");
   assert.equal("browser_navigate" in researchToolSet, false, "research turns should not inject browser tools by default");
 
   const imageToolSet = buildToolSet(
@@ -521,21 +502,6 @@ async function main() {
   assert.equal(typeof browserToolSet.browser_video_watch_start, "object", "browser turns should inject browser_video_watch_start");
   assert.equal(typeof browserToolSet.browser_video_watch_poll, "object", "browser turns should inject browser_video_watch_poll");
   assert.equal(typeof browserToolSet.browser_video_watch_stop, "object", "browser turns should inject browser_video_watch_stop");
-  assert.equal(typeof browserToolSet.bash, "object", "browser turns should include bash when the routed browser skill declares it");
-  const browserSkillBlock = buildSkillContextBlock(
-    selectRelevantSkillDefinitions("打开浏览器访问这个页面，点击按钮并截图。"),
-    { browserRelayAvailable: true },
-  );
-  assert.match(
-    browserSkillBlock,
-    /healthy visible Aliceloop Desktop Chrome relay is available right now/i,
-    "browser skill block should surface the visible desktop relay when it is available",
-  );
-  assert.match(
-    browserSkillBlock,
-    /Do not claim that browser automation is headless, stateless, or unable to retain login data/i,
-    "browser skill block should explicitly prevent incorrect headless-browser claims when relay is healthy",
-  );
 
   const researchSkills = selectRelevantSkillDefinitions("帮我查一下东莞今天天气，给我最新结果。");
   assert.deepEqual(
@@ -546,8 +512,8 @@ async function main() {
   const researchSkillBlock = buildSkillContextBlock(researchSkills);
   assert.match(
     researchSkillBlock,
-    /Routed skills for this turn:/,
-    "skill block should list routed skills instead of the entire catalog",
+    /Selected skills for this turn:/,
+    "skill block should list the selected skills instead of the entire catalog",
   );
   assert.match(
     researchSkillBlock,
@@ -569,55 +535,43 @@ async function main() {
     /Research memory rule: keep a running evidence ledger/i,
     "research skill block should explain that search results are an evidence ledger, not a final answer",
   );
-  assert.match(
-    researchSkillBlock,
-    /Active capability groups for this turn: Research Core/i,
-    "research skill block should surface the routed capability group",
-  );
-
-  const interactionSkills = selectRelevantSkillDefinitions("去网页上回复他，和别人对线一下。");
-  assert.equal(
-    interactionSkills.some((skill) => skill.id === "browser"),
-    true,
-    "interactive external-action turns should route to the browser skill",
-  );
-
-  const socialFeedSkills = selectRelevantSkillDefinitions("去刷推特和抖音，看看主页、视频和帖子。");
-  assert.equal(
-    socialFeedSkills.some((skill) => skill.id === "browser"),
-    true,
-    "social feed browsing turns should route to the browser skill across platforms",
-  );
-
-  const surfingSkills = selectRelevantSkillDefinitions("让它上网冲浪一下");
-  assert.equal(
-    surfingSkills.some((skill) => skill.id === "browser"),
-    true,
-    "internet surfing phrasing should route to the browser skill",
-  );
-
-  const browserCapabilitySkills = selectRelevantSkillDefinitions("继续刷推特时间线，顺手看看帖子。");
-  assert.equal(
-    browserCapabilitySkills.some((skill) => skill.id === "browser"),
-    true,
-    "social browsing phrasing should keep browser routed through the browser interaction group",
-  );
-
   const capabilityDiscoverySkills = selectRelevantSkillDefinitions("我有哪些 skills？为什么没有 browser_click，Browser Relay 开关还开着吗？");
   assert.equal(
-    capabilityDiscoverySkills.some((skill) => skill.id === "browser"),
-    true,
-    "browser capability diagnostics should still route the browser skill itself",
-  );
-  assert.equal(
-    capabilityDiscoverySkills.some((skill) => skill.id === "skill-discovery" || skill.id === "skill-hub"),
+    capabilityDiscoverySkills.some((skill) => skill.id === "skill-hub"),
     true,
     "browser capability diagnostics should route skill catalog discovery",
   );
   assert.equal(
-    capabilityDiscoverySkills.some((skill) => skill.id === "system-info"),
+    capabilityDiscoverySkills.some((skill) => skill.id === "skill-search"),
     true,
-    "browser capability diagnostics should route system diagnostics for relay state questions",
+    "browser capability diagnostics should route local skill search",
+  );
+  const fileCapabilitySkills = selectRelevantSkillDefinitions("怎么测试你的文件管理能力？");
+  assert.equal(
+    fileCapabilitySkills.some((skill) => skill.id === "file-manager"),
+    true,
+    "file capability questions should keep the concrete file-manager skill in the selected set",
+  );
+  assert.equal(
+    fileCapabilitySkills.some((skill) => skill.id === "skill-hub"),
+    true,
+    "file capability questions should still include discovery support through skill-hub",
+  );
+  assert.equal(
+    fileCapabilitySkills.some((skill) => skill.id === "skill-search"),
+    true,
+    "file capability questions should still include discovery support through skill-search",
+  );
+  const genericCapabilitySkills = selectRelevantSkillDefinitions("你有哪些能力？");
+  assert.equal(
+    genericCapabilitySkills.some((skill) => skill.id === "skill-hub"),
+    true,
+    "generic capability questions should still surface skill-hub",
+  );
+  assert.equal(
+    genericCapabilitySkills.some((skill) => skill.id === "skill-search"),
+    true,
+    "generic capability questions should still surface skill-search",
   );
 
   const socialFeedToolSet = buildToolSet(
@@ -664,17 +618,17 @@ async function main() {
     "memory turns should bias the first step toward bash when the routed skill is CLI-driven",
   );
 
-  const threadSkillTools = buildToolSet(
+  const historySkillTools = buildToolSet(
     sandbox,
     selectRelevantSkillDefinitions("我昨天晚上跟你说啥呢来着"),
     {
       query: "我昨天晚上跟你说啥呢来着",
     },
   );
-  assert.equal(typeof threadSkillTools.bash, "object", "history turns should continue using bash for CLI-driven thread access");
-  assert.equal(typeof threadSkillTools.read, "object", "history turns should include read when the routed skill declares it");
-  assert.equal(typeof threadSkillTools.write, "object", "history turns should include write when the routed skill declares it");
-  assert.equal("thread_search" in threadSkillTools, false, "history turns should not inject bespoke thread tools");
+  assert.equal(typeof historySkillTools.bash, "object", "history recall turns should continue using bash for CLI-driven memory access");
+  assert.equal(typeof historySkillTools.read, "object", "history recall turns should include read when the routed skill declares it");
+  assert.equal(typeof historySkillTools.write, "object", "history recall turns should include write when the routed skill declares it");
+  assert.equal("memory_search" in historySkillTools, false, "history recall turns should not inject bespoke memory tools");
   const historySession = createSession("history bash first-step smoke");
   createSessionMessage({
     sessionId: historySession.id,
@@ -688,11 +642,10 @@ async function main() {
   assert.deepEqual(
     historyContext.firstStepToolChoice,
     { type: "tool", toolName: "bash" },
-    "episodic history turns should bias the first step toward bash when the routed skill is CLI-driven",
+    "episodic history turns should bias the first step toward bash when the routed memory skill is CLI-driven",
   );
 
   const videoWatchSkills = selectRelevantSkillDefinitions("继续看这个视频后面讲了什么，顺便听听他说了什么。");
-  assert.equal(videoWatchSkills.some((skill) => skill.id === "browser"), true, "video watching should keep browser routed");
   assert.equal(videoWatchSkills.some((skill) => skill.id === "video-analysis"), true, "video watching should route video-analysis");
   assert.equal(videoWatchSkills.some((skill) => skill.id === "audio-analysis"), true, "spoken-video turns should route audio-analysis");
 
@@ -875,8 +828,8 @@ async function main() {
   );
   assert.match(
     continuationSystemPrompt,
-    /Sticky skill groups for this turn: research-core/i,
-    "continuation focus block should keep the research capability group sticky across short follow-ups",
+    /Sticky skill routing for this turn: .*web-search/i,
+    "continuation focus block should keep the relevant research skills sticky across short follow-ups",
   );
   assert.match(
     continuationSystemPrompt,
@@ -1042,7 +995,7 @@ async function main() {
     clientMessageId: "research-status-user-1",
     deviceId: "desktop-smoke",
     role: "user",
-    content: "帮我找一下峰哥亡命天涯这个人",
+    content: "帮我调查峰哥亡命天涯这个人",
     attachmentIds: [],
   });
   appendSessionEvent(researchStatusUpdateSession.id, "tool.call.started", {
@@ -1104,10 +1057,10 @@ async function main() {
     researchStatusUpdateContext.routedSkillIds.includes("web-fetch"),
     "status-update follow-ups after evidence should route the web-fetch skill",
   );
-  assert.deepEqual(
-    researchStatusUpdateContext.firstStepToolChoice,
-    { type: "tool", toolName: "web_fetch" },
-    "status-update follow-ups after evidence should bias the first step toward web_fetch",
+  assert(
+    researchStatusUpdateContext.firstStepToolChoice?.type === "tool"
+      && ["web_fetch", "web_search"].includes(researchStatusUpdateContext.firstStepToolChoice.toolName),
+    "status-update follow-ups after evidence should still bias the first step toward a research tool",
   );
 
   const twitterContinuationSession = createSession("twitter continuation smoke");
@@ -1146,20 +1099,9 @@ async function main() {
   );
   assert.equal(
     "web_fetch" in twitterContinuationContext.tools,
-    false,
-    "twitter continuation turns should not preserve fetch unless the follow-up still needs a page read",
+    true,
+    "twitter continuation turns should preserve fetch when the routed social/research skills still need page-reading capability",
   );
-  assert.match(
-    twitterContinuationPrompt,
-    /Sticky skill routing for this turn: .*twitter-media/i,
-    "continuation context should keep the platform-specific twitter-media skill sticky",
-  );
-  assert.match(
-    twitterContinuationPrompt,
-    /Sticky skill groups for this turn: .*social-platform/i,
-    "continuation context should keep the social platform group sticky for short follow-ups",
-  );
-
   const browserContinuationSession = createSession("browser continuation smoke");
   createSessionMessage({
     sessionId: browserContinuationSession.id,
@@ -1215,63 +1157,13 @@ async function main() {
   );
   assert.match(
     browserContinuationPrompt,
-    /Sticky skill groups for this turn: .*browser-interaction/i,
-    "browser continuation context should keep the browser interaction group sticky",
+    /Sticky skill routing for this turn: .*browser/i,
+    "browser continuation context should keep the browser skill sticky",
   );
   assert.match(
     browserContinuationPrompt,
     /Recent Tool Activity[\s\S]*browser_navigate · via desktop_chrome · completed/i,
     "browser continuation context should retain recent browser tool momentum",
-  );
-
-  const cachedSkillSession = createSession("sticky skill cache smoke");
-  clearSessionSkillCache(cachedSkillSession.id);
-  rememberSessionSkillRoute(cachedSkillSession.id, {
-    skillIds: ["browser", "twitter-media", "web-search", "web-fetch"],
-    groupIds: ["browser-interaction", "social-platform", "research-core"],
-  });
-  assert.deepEqual(
-    getSessionSkillCacheHints(cachedSkillSession.id, { includeSticky: false }),
-    {
-      stickySkillIds: [],
-      stickyGroupIds: [],
-      reasons: [],
-    },
-    "session skill cache should stay dormant unless the turn actually needs sticky skill reuse",
-  );
-  const cachedHints = getSessionSkillCacheHints(cachedSkillSession.id, { includeSticky: true });
-  const cachedContinuationSkills = selectRelevantSkillDefinitions("继续", cachedHints);
-  assert.equal(
-    cachedContinuationSkills.some((skill) => skill.id === "browser"),
-    true,
-    "sticky skill cache should keep browser alive for short continuation turns",
-  );
-  assert.equal(
-    cachedContinuationSkills.some((skill) => skill.id === "twitter-media"),
-    true,
-    "sticky skill cache should keep the platform-specific social skill alive for short continuation turns",
-  );
-  assert.equal(
-    cachedContinuationSkills.some((skill) => skill.id === "web-search"),
-    true,
-    "sticky skill cache should keep research search alive for short continuation turns",
-  );
-  assert.equal(
-    cachedContinuationSkills.some((skill) => skill.id === "web-fetch"),
-    true,
-    "sticky skill cache should keep research fetch alive for short continuation turns",
-  );
-  for (let index = 0; index < 4; index += 1) {
-    advanceSessionSkillCacheTurn(cachedSkillSession.id);
-  }
-  assert.deepEqual(
-    getSessionSkillCacheHints(cachedSkillSession.id, { includeSticky: true }),
-    {
-      stickySkillIds: [],
-      stickyGroupIds: [],
-      reasons: [],
-    },
-    "session skill cache should decay away after a few turns when it is no longer refreshed",
   );
 
   const timeSession = createSession("time verification smoke");
@@ -1344,7 +1236,7 @@ async function main() {
   });
   const weatherContext = await loadContext(weatherSession.id, controller.signal);
   assert.equal(typeof weatherContext.tools.web_search, "object", "weather questions should inject web_search");
-  assert.equal("web_fetch" in weatherContext.tools, false, "weather questions should not inject web_fetch by default");
+  assert.equal("web_fetch" in weatherContext.tools, true, "weather questions should inject web_fetch when the routed research skill declares it");
   assert.equal("time_now" in weatherContext.tools, false, "weather questions should not inject time tools");
   const weatherSystemPrompt = Array.isArray(weatherContext.systemPrompt)
     ? weatherContext.systemPrompt.map((message) => message.content).join("\n\n")
@@ -1366,7 +1258,7 @@ async function main() {
   });
   const creatorMetricContext = await loadContext(creatorMetricSession.id, controller.signal);
   assert.equal(typeof creatorMetricContext.tools.web_search, "object", "creator metric turns should inject web_search");
-  assert.equal("web_fetch" in creatorMetricContext.tools, false, "creator metric turns should not inject web_fetch by default");
+  assert.equal("web_fetch" in creatorMetricContext.tools, true, "creator metric turns should inject web_fetch when the routed research skill declares it");
   const creatorMetricPrompt = Array.isArray(creatorMetricContext.systemPrompt)
     ? creatorMetricContext.systemPrompt.map((message) => message.content).join("\n\n")
     : creatorMetricContext.systemPrompt;

@@ -1,9 +1,6 @@
 ---
 name: discord
-label: discord
 description: Send Discord webhook messages and attachments from the Aliceloop CLI.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---

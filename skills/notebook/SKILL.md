@@ -1,9 +1,6 @@
 ---
 name: notebook
-label: notebook
 description: Inspect and edit Jupyter notebook cells with bash and JSON-aware tools.
-status: available
-mode: instructional
 allowed-tools:
   - bash
   - read

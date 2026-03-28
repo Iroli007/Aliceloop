@@ -2,19 +2,18 @@ import type { SkillRouteHints } from "../skills/skillRouting";
 import {
   needsAudioAnalysis,
   needsBrowserAutomation,
+  needsCameraCapture,
   needsDocumentIngest,
+  needsFileManagement,
   needsImageAnalysis,
   needsReviewCoach,
+  needsSystemInfo,
   needsWebFetch,
   needsWebResearch,
 } from "../skills/skillRouting";
 
 function hasStickySkill(hints: SkillRouteHints | undefined, skillId: string) {
   return hints?.stickySkillIds.includes(skillId) ?? false;
-}
-
-function hasStickyGroup(hints: SkillRouteHints | undefined, groupId: SkillRouteHints["stickyGroupIds"][number]) {
-  return hints?.stickyGroupIds.includes(groupId) ?? false;
 }
 
 const DEEP_RESEARCH_FOLLOWUP_PATTERN =
@@ -33,8 +32,15 @@ export function routeToolNamesForTurn(
   const toolNames = new Set<string>();
 
   if (
+    needsFileManagement(normalizedQuery)
+    || needsCameraCapture(normalizedQuery)
+    || needsSystemInfo(normalizedQuery)
+  ) {
+    toolNames.add("bash");
+  }
+
+  if (
     needsWebResearch(normalizedQuery)
-    || hasStickyGroup(hints, "research-core")
     || hasStickySkill(hints, "web-search")
   ) {
     toolNames.add("web_search");
@@ -45,7 +51,7 @@ export function routeToolNamesForTurn(
     || hasStickySkill(hints, "web-fetch")
     || (
       needsDeepResearchFollowup(normalizedQuery)
-      && (hasStickyGroup(hints, "research-core") || hasStickySkill(hints, "web-search"))
+      && hasStickySkill(hints, "web-search")
     )
   ) {
     toolNames.add("web_fetch");
@@ -53,7 +59,6 @@ export function routeToolNamesForTurn(
 
   if (
     needsBrowserAutomation(normalizedQuery)
-    || hasStickyGroup(hints, "browser-interaction")
     || hasStickySkill(hints, "browser")
   ) {
     toolNames.add("browser_snapshot");

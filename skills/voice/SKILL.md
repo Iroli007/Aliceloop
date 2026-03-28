@@ -1,9 +1,6 @@
 ---
 name: voice
-label: voice
 description: Synthesize speech and export spoken audio on macOS through the local `say` TTS engine.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---

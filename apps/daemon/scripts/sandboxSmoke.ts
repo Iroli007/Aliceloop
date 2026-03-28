@@ -160,11 +160,111 @@ async function main() {
   });
   assert.equal(bashResult.stdout, "alpha\ngamma\n");
 
+  const whichAliceloopResult = await sandbox.runBash({
+    command: "which",
+    args: ["aliceloop"],
+    cwd: tempDataDir,
+  });
+  assert.equal(whichAliceloopResult.stdout.trim().length > 0, true, "which should find the injected aliceloop shim on PATH");
+
+  const aliceloopConfigResult = await sandbox.runBash({
+    command: "aliceloop",
+    args: ["--help"],
+    cwd: tempDataDir,
+  });
+  assert.match(aliceloopConfigResult.stdout, /^Usage:/m, "aliceloop CLI should be callable inside sandbox bash");
+
+  const shellScriptResult = await sandbox.runBash({
+    command: "",
+    script: "which aliceloop && aliceloop --help | head -1",
+    cwd: tempDataDir,
+  });
+  assert.match(shellScriptResult.stdout, /aliceloop/, "shell script mode should support command chaining");
+  assert.match(shellScriptResult.stdout, /^Usage:/m, "shell script mode should support pipelines");
+
   const lsResult = await sandbox.runBash({
     command: "ls",
-    cwd: "/etc",
+    cwd: tempDataDir,
   });
-  assert(lsResult.stdout.length > 0, "ls should stay standard-allowed even outside the workspace cwd");
+  assert(lsResult.stdout.length > 0, "ls should stay standard-allowed inside the configured cwd roots");
+
+  const grepResult = await sandbox.runBash({
+    command: "grep",
+    args: ["gamma", outputPath],
+    cwd: tempDataDir,
+  });
+  assert.equal(grepResult.stdout.trim(), "gamma", "grep should be allowed for local diagnostic filtering");
+
+  const duResult = await sandbox.runBash({
+    command: "du",
+    args: ["-sh", join(tempDataDir, "artifacts")],
+    cwd: tempDataDir,
+  });
+  assert(duResult.stdout.trim().length > 0, "du should be allowed for disk-usage diagnostics");
+
+  const swVersResult = await sandbox.runBash({
+    command: "sw_vers",
+    cwd: tempDataDir,
+  });
+  assert(swVersResult.stdout.includes("ProductName"), "sw_vers should be allowed for macOS version diagnostics");
+
+  const sysctlResult = await sandbox.runBash({
+    command: "sysctl",
+    args: ["-n", "hw.ncpu"],
+    cwd: tempDataDir,
+  });
+  assert(/^\d+$/.test(sysctlResult.stdout.trim()), "sysctl should be allowed for CPU-count diagnostics");
+
+  const ifconfigResult = await sandbox.runBash({
+    command: "ifconfig",
+    cwd: tempDataDir,
+  });
+  assert(ifconfigResult.stdout.trim().length > 0, "ifconfig should be allowed for network diagnostics");
+
+  const vmStatResult = await sandbox.runBash({
+    command: "vm_stat",
+    cwd: tempDataDir,
+  });
+  assert(vmStatResult.stdout.includes("Mach Virtual Memory Statistics"), "vm_stat should be allowed for memory diagnostics");
+
+  const pmsetResult = await sandbox.runBash({
+    command: "pmset",
+    args: ["-g", "batt"],
+    cwd: tempDataDir,
+  });
+  assert(pmsetResult.stdout.trim().length > 0, "pmset should be allowed for battery diagnostics");
+
+  const networksetupResult = await sandbox.runBash({
+    command: "networksetup",
+    args: ["-listallhardwareports"],
+    cwd: tempDataDir,
+  });
+  assert(networksetupResult.stdout.trim().length > 0, "networksetup should be allowed for network hardware diagnostics");
+
+  const topResult = await sandbox.runBash({
+    command: "top",
+    args: ["-l", "1", "-s", "0", "-n", "0"],
+    cwd: tempDataDir,
+  });
+  assert(topResult.stdout.trim().length > 0, "top should be allowed for quick system overview diagnostics");
+
+  const lsofResult = await sandbox.runBash({
+    command: "lsof",
+    args: ["-p", String(process.pid)],
+    cwd: tempDataDir,
+  });
+  assert(lsofResult.stdout.trim().length > 0, "lsof should be allowed for process and port diagnostics");
+
+  let blockedOutsideCwd = false;
+  try {
+    await sandbox.runBash({
+      command: "ls",
+      cwd: "/etc",
+    });
+  } catch (error) {
+    blockedOutsideCwd = error instanceof SandboxViolationError;
+  }
+  assert.equal(blockedOutsideCwd, true, "bash should block cwd values outside the configured cwd roots");
 
   const originalPath = process.env.PATH;
   process.env.PATH = "";
@@ -260,7 +360,8 @@ async function main() {
   let blockedBash = false;
   try {
     await sandbox.runBash({
-      command: "whoami",
+      command: "osascript",
+      args: ["-e", "display dialog \"hi\""],
       cwd: tempDataDir,
     });
   } catch (error) {
@@ -301,7 +402,7 @@ async function main() {
     cwd: tempDataDir,
   });
   assert(elevatedBashRead.stdout.length > 0, "bash reads outside roots should also require single elevated approval");
-  assert.equal(elevatedApprovalCount, 4, "each elevated read, write, and bash action should require its own approval");
+  assert.equal(elevatedApprovalCount, 3, "out-of-policy read, write, and bash actions should each require their own approval");
 
   let fullAccessApprovalCount = 0;
   const fullAccessSandbox = createPermissionSandboxExecutor({
@@ -325,6 +426,32 @@ async function main() {
   assert.equal(fullAccessBash.stdout.trim(), "full-access-ok");
   assert.equal(fullAccessApprovalCount, 0, "full access should not require per-command bash approval");
 
+  const fullAccessScriptPath = join(tmpdir(), `aliceloop-full-access-script-${Date.now()}.txt`);
+  const fullAccessScriptSandbox = createPermissionSandboxExecutor({
+    label: "sandbox-smoke-full-access-script",
+    permissionProfile: "full-access",
+    workspaceRoot: tempDataDir,
+  });
+  const fullAccessScriptResult = await fullAccessScriptSandbox.runBash({
+    command: "",
+    script: `printf 'full-access-script-ok' > ${fullAccessScriptPath} && cat ${fullAccessScriptPath}`,
+    cwd: externalDir,
+  });
+  assert.equal(
+    fullAccessScriptResult.stdout.trim(),
+    "full-access-script-ok",
+    "full-access script mode should allow redirection and host paths outside the workspace root",
+  );
+  assert.equal(
+    readFileSync(fullAccessScriptPath, "utf8"),
+    "full-access-script-ok",
+    "full-access script mode should write files outside the workspace root when requested",
+  );
+  const fullAccessScriptPolicy = fullAccessScriptSandbox.describePolicy();
+  assert.deepEqual(fullAccessScriptPolicy.allowedReadRoots, ["<all>"], "full access should not keep workspace read boundaries");
+  assert.deepEqual(fullAccessScriptPolicy.allowedWriteRoots, ["<all>"], "full access should not keep workspace write boundaries");
+  assert.deepEqual(fullAccessScriptPolicy.allowedCwdRoots, ["<all>"], "full access should not keep workspace cwd boundaries");
+
   await fullAccessSandbox.deletePath({
     targetPath: manualFilePath,
   });
@@ -335,7 +462,7 @@ async function main() {
   });
   assert.equal(existsSync(nonEmptyDirPath), false, "full access should delete non-empty directories recursively");
 
-  const logs = listSandboxRuns(20);
+  const logs = listSandboxRuns(50);
   assert(logs.some((run) => run.primitive === "read" && run.status === "done"), "read run should be logged");
   assert(logs.some((run) => run.primitive === "write" && run.status === "done"), "write run should be logged");
   assert(logs.some((run) => run.primitive === "edit" && run.status === "done"), "edit run should be logged");

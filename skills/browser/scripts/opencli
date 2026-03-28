@@ -6,14 +6,17 @@ if command -v opencli >/dev/null 2>&1; then
 fi
 
 if command -v npx >/dev/null 2>&1; then
-  exec npx --yes @jackwener/opencli "$@"
+  exec npx -y @jackwener/opencli "$@"
 fi
 
 cat >&2 <<'EOF'
 opencli is not installed and npx is unavailable.
 
-Install it with one of:
+Install OpenCLI with:
   npm install -g @jackwener/opencli
+
+Then install the Browser Bridge extension from the OpenCLI releases page and run:
+  opencli doctor
 EOF
 
 exit 127

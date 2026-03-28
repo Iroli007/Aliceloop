@@ -1,9 +1,7 @@
 ---
 name: selfie
-label: selfie
 description: Planned Alice-native selfie workflow for self-portraits, local album management, and future face-reference generation support.
 status: planned
-mode: instructional
 allowed-tools:
   - bash
   - read
@@ -79,5 +77,5 @@ ls -lt ~/.aliceloop/selfies/generated | head
 ## Guardrails
 
 - Do not claim strong face consistency until the backend can actually use reference images.
-- Keep album paths local to Aliceloop rather than older Alma-specific locations.
+- Keep album paths local to Aliceloop rather than older experimental locations.
 - Treat stored reference photos as private user assets.

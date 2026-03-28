@@ -4350,19 +4350,19 @@ button {
 
 /* ThinkingIndicator */
 .thinking-indicator {
-  margin: 12px 0;
-  padding: 12px 16px;
-  border: 1px solid rgba(79, 70, 229, 0.12);
-  border-radius: 12px;
-  background: rgba(79, 70, 229, 0.06);
+  margin: 12px 0 8px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .thinking-indicator__text {
   display: block;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
   line-height: 1.4;
-  letter-spacing: 0.01em;
-  color: #4338ca;
+  letter-spacing: 0.02em;
+  color: #111111;
 }

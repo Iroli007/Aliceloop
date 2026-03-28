@@ -1,9 +1,6 @@
 ---
 name: music-gen
-label: music-gen
 description: Generate short prompt-driven MIDI music sketches locally from the Aliceloop CLI.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---

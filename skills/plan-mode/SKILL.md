@@ -1,9 +1,6 @@
 ---
 name: plan-mode
-label: plan-mode
 description: Enter a planning-first workflow with structured steps, checkpoints, and explicit approval before execution.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---

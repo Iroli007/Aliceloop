@@ -72,8 +72,22 @@ export interface DeletePathInput {
 export interface RunBashInput {
   command: string;
   args?: string[];
+  script?: string;
   cwd?: string;
   timeoutMs?: number;
+}
+
+export interface ParsedBashCommand {
+  command: string;
+  args: string[];
+}
+
+export interface NormalizedBashPolicyInput {
+  cwd: string;
+  command: string | null;
+  args: string[];
+  script: string | null;
+  scriptCommands: ParsedBashCommand[];
 }
 
 export interface SandboxToolPolicy {

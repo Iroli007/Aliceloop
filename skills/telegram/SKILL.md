@@ -1,9 +1,6 @@
 ---
 name: telegram
-label: telegram
 description: Interact with Telegram chats, files, and bots through the Telegram Bot API from the Aliceloop CLI.
-status: available
-mode: instructional
 allowed-tools:
   - bash
 ---
