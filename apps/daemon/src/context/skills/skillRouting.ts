@@ -89,7 +89,7 @@ export function needsBrowserAutomation(query: string) {
 }
 
 export function needsAudioAnalysis(query: string) {
-  return matches(query, /音频|audio|voice note|语音|播客|录音|旁白|台词|转写|转录|听一下|听听|听懂|念了什么|说了什么|transcribe audio/iu);
+  return matches(query, /音频|audio|voice note|语音|播客|录音|旁白|台词|转写|转录|transcribe audio|音乐|歌曲|song|music|这首歌|这段音频|这个音频|这段录音|这个录音/iu);
 }
 
 export function needsImageAnalysis(query: string) {
@@ -132,10 +132,10 @@ export function inferStickySkillIdsFromContext(query: string) {
     stickySkillIds.add("browser");
   }
   if (needsAudioAnalysis(query)) {
-    stickySkillIds.add("audio-analysis");
+    stickySkillIds.add("music-listener");
   }
-  if (matches(query, /视频|video|片段|clip|播放页|播放器|继续看|视频后面/iu)) {
-    stickySkillIds.add("video-analysis");
+  if (matches(query, /视频文件|video file|本地视频|上传.*视频|发了.*视频|\.mp4\b|\.mov\b|\.mkv\b|\.webm\b|\.avi\b|\.m4v\b|\.3gp\b/iu)) {
+    stickySkillIds.add("video-reader");
   }
   if (matches(query, /(?:\bskills?\b|\bcapabilit(?:y|ies)\b|browser_click|browser_open|browser_type|browser relay|tool(s)?|能力|有哪些工具|哪些工具|缺少.*(?:工具|skills?|tools?|能力|capabilit(?:y|ies))|没有.*(?:工具|skills?|tools?|能力|capabilit(?:y|ies)))/iu)) {
     stickySkillIds.add("skill-hub");

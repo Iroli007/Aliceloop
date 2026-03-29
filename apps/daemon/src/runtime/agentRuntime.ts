@@ -20,7 +20,9 @@ import {
   appendSessionEvent,
   createAttachment,
   createSessionMessage,
+  getSessionWorksetState,
   updateSessionMessage,
+  updateSessionWorksetState,
   upsertSessionJob,
 } from "../repositories/sessionRepository";
 import { createMemory } from "../context/memory/memoryRepository";
@@ -33,6 +35,12 @@ import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
 import { saveStreamCheckpoint, clearStreamCheckpoint } from "./streamCheckpoint";
 import { ToolStateMachine, type ToolCallState } from "./toolStateMachine";
 import { repairTextToolCall } from "./toolCallRepair";
+import { inferSkillIdsForToolCall } from "../context/tools/toolSkillRouting";
+import {
+  cloneWorksetState,
+  type SessionWorksetState,
+  type WorksetEntryState,
+} from "../context/workset/worksetState";
 
 // ---------------------------------------------------------------------------
 // Helpers (unchanged)
@@ -88,6 +96,128 @@ function buildAssistantEventPayload(skills: string[], tools: string[]) {
     payload.tools = tools;
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function createWorksetEntryState(): WorksetEntryState {
+  return {
+    score: 0,
+    idleTurns: 0,
+    active: false,
+    lastAttachedTurn: null,
+    lastUsedTurn: null,
+  };
+}
+
+function normalizeAttachedNames(values: Iterable<string>) {
+  return [...new Set(
+    [...values]
+      .map((value) => value.trim())
+      .filter(Boolean),
+  )];
+}
+
+function isCountedToolCall(state: ToolCallState) {
+  return ![
+    "input-streaming",
+    "input-available",
+    "approval-requested",
+    "approval-responded",
+  ].includes(state.status);
+}
+
+function settleWorksetAfterTurn(input: {
+  sessionId: string;
+  startingState: SessionWorksetState;
+  attachedSkillIds: Iterable<string>;
+  attachedToolNames: Iterable<string>;
+  toolCalls: ToolCallState[];
+}) {
+  const nextState = cloneWorksetState(input.startingState);
+  const turnCounter = nextState.turnCounter + 1;
+  nextState.turnCounter = turnCounter;
+
+  const attachedSkillIds = normalizeAttachedNames(input.attachedSkillIds);
+  const attachedToolNames = normalizeAttachedNames(input.attachedToolNames);
+  const attachedSkillSet = new Set(attachedSkillIds);
+  const attachedToolSet = new Set(attachedToolNames);
+
+  const usedToolCalls = input.toolCalls.filter((state) => isCountedToolCall(state));
+  const usedToolNames = new Set(usedToolCalls.map((state) => state.toolName));
+  const usedSkillIds = new Set<string>();
+
+  for (const call of usedToolCalls) {
+    for (const skillId of inferSkillIdsForToolCall(call.toolName, call.input, attachedSkillSet)) {
+      usedSkillIds.add(skillId);
+    }
+  }
+
+  const settleEntry = (
+    entries: Record<string, WorksetEntryState>,
+    key: string,
+    isAttached: boolean,
+    isUsed: boolean,
+    wasActive: boolean,
+  ) => {
+    const entry = entries[key] ?? createWorksetEntryState();
+    if (isAttached && !wasActive) {
+      entry.idleTurns = 0;
+      entry.score += 2;
+      entry.active = true;
+    }
+
+    if (isAttached) {
+      entry.lastAttachedTurn = turnCounter;
+      if (isUsed) {
+        entry.score += 1;
+        entry.idleTurns = 0;
+        entry.lastUsedTurn = turnCounter;
+      } else {
+        entry.score = Math.max(0, entry.score - 1);
+        entry.idleTurns += 1;
+      }
+
+      if (entry.idleTurns >= 2 || entry.score <= 0) {
+        entry.score = 0;
+        entry.active = false;
+      }
+    }
+
+    entries[key] = entry;
+  };
+
+  const skillKeys = new Set([
+    ...Object.keys(nextState.skills),
+    ...attachedSkillIds,
+    ...usedSkillIds,
+  ]);
+  for (const skillId of skillKeys) {
+    const wasActive = Boolean(input.startingState.skills[skillId]?.active);
+    settleEntry(
+      nextState.skills,
+      skillId,
+      attachedSkillSet.has(skillId),
+      usedSkillIds.has(skillId),
+      wasActive,
+    );
+  }
+
+  const toolKeys = new Set([
+    ...Object.keys(nextState.tools),
+    ...attachedToolNames,
+    ...usedToolNames,
+  ]);
+  for (const toolName of toolKeys) {
+    const wasActive = Boolean(input.startingState.tools[toolName]?.active);
+    settleEntry(
+      nextState.tools,
+      toolName,
+      attachedToolSet.has(toolName),
+      usedToolNames.has(toolName),
+      wasActive,
+    );
+  }
+
+  updateSessionWorksetState(input.sessionId, nextState);
 }
 
 function resolveImageMimeType(filePath: string): string | null {
@@ -252,7 +382,14 @@ function predictToolBackend(sessionId: string, toolName: string): { backend?: st
     return getBrowserToolRuntime(sessionId);
   }
 
-  if (isResearchToolName(toolName)) {
+  if (toolName === "web_search") {
+    return {
+      backend: hasHealthyDesktopRelay() ? "desktop_chrome" : "http_search",
+      tabId: null,
+    };
+  }
+
+  if (toolName === "web_fetch") {
     return {
       backend: hasHealthyDesktopRelay() ? "desktop_chrome" : "http_fetch",
       tabId: null,
@@ -945,7 +1082,7 @@ interface StreamResult {
 async function executeStreamAttempt(
   run: AgentRun,
   existingAssistantMessageId?: string | null,
-): Promise<StreamResult & { assistantMessageId: string | null; attachedToolNames: string[] }> {
+): Promise<StreamResult & { assistantMessageId: string | null; attachedToolNames: string[]; toolCalls: ToolCallState[] }> {
   const requestStartedAt = nowMs();
   const toolCallInputs = new Map<string, unknown>();
   const runtimeSettings = getRuntimeSettings();
@@ -1079,62 +1216,87 @@ async function executeStreamAttempt(
     diagnostics,
     assistantMessageId,
     attachedToolNames: Object.keys(run.context.tools),
+    toolCalls: stateMachine.getAll(),
   };
 }
 
 async function executeStream(run: AgentRun): Promise<StreamResult> {
   let assistantMessageId: string | null = null;
   let lastResult: StreamResult | null = null;
+  let finalResult: StreamResult | null = null;
+  const startingWorksetState = getSessionWorksetState(run.sessionId);
   const accumulatedStickySkillIds = new Set<string>();
   const accumulatedToolNames = new Set<string>();
+  const accumulatedAttachedSkillIds = new Set<string>();
+  const accumulatedAttachedToolNames = new Set<string>();
+  const accumulatedToolCalls: ToolCallState[] = [];
   const attemptedRecoveryReasons = new Set<string>();
   const latestUserMessage = getLatestUserMessage(run.sessionId);
 
-  for (let attempt = 0; attempt < MAX_CAPABILITY_RECOVERY_ATTEMPTS; attempt += 1) {
-    const result = await executeStreamAttempt(run, assistantMessageId);
-    assistantMessageId = result.assistantMessageId;
-    lastResult = {
-      text: result.text,
-      timings: result.timings,
-      diagnostics: result.diagnostics,
-    };
+  try {
+    for (let attempt = 0; attempt < MAX_CAPABILITY_RECOVERY_ATTEMPTS; attempt += 1) {
+      const result = await executeStreamAttempt(run, assistantMessageId);
+      assistantMessageId = result.assistantMessageId;
+      lastResult = {
+        text: result.text,
+        timings: result.timings,
+        diagnostics: result.diagnostics,
+      };
 
-    const recovery = inferCapabilityRecoveryRequest(
-      latestUserMessage,
-      result.text,
-      result.attachedToolNames,
-      result.diagnostics?.resolvedToolCallCount ?? 0,
-    );
-    const isLastAttempt = attempt >= MAX_CAPABILITY_RECOVERY_ATTEMPTS - 1;
-    if (!recovery || attemptedRecoveryReasons.has(recovery.reason) || isLastAttempt) {
-      if (
-        lastResult
-        && (lastResult.diagnostics?.resolvedToolCallCount ?? 0) === 0
-        && looksLikeCapabilitySeekingReply(lastResult.text)
-      ) {
-        lastResult = {
-          ...lastResult,
-          text: buildCapabilityFailureReply(latestUserMessage, result.attachedToolNames),
-        };
+      for (const skillId of run.context.routedSkillIds) {
+        accumulatedAttachedSkillIds.add(skillId);
       }
-      return lastResult;
-    }
+      for (const toolName of result.attachedToolNames) {
+        accumulatedAttachedToolNames.add(toolName);
+      }
+      accumulatedToolCalls.push(...result.toolCalls);
 
-    attemptedRecoveryReasons.add(recovery.reason);
-    for (const skillId of recovery.additionalStickySkillIds) {
-      accumulatedStickySkillIds.add(skillId);
-    }
-    for (const toolName of recovery.additionalToolNames) {
-      accumulatedToolNames.add(toolName);
-    }
+      const recovery = inferCapabilityRecoveryRequest(
+        latestUserMessage,
+        result.text,
+        result.attachedToolNames,
+        result.diagnostics?.resolvedToolCallCount ?? 0,
+      );
+      const isLastAttempt = attempt >= MAX_CAPABILITY_RECOVERY_ATTEMPTS - 1;
+      if (!recovery || attemptedRecoveryReasons.has(recovery.reason) || isLastAttempt) {
+        if (
+          lastResult
+          && (lastResult.diagnostics?.resolvedToolCallCount ?? 0) === 0
+          && looksLikeCapabilitySeekingReply(lastResult.text)
+        ) {
+          lastResult = {
+            ...lastResult,
+            text: buildCapabilityFailureReply(latestUserMessage, result.attachedToolNames),
+          };
+        }
+        finalResult = lastResult;
+        break;
+      }
 
-    run.context = await loadContext(run.sessionId, run.abortController.signal, {
-      additionalStickySkillIds: [...accumulatedStickySkillIds],
-      additionalToolNames: [...accumulatedToolNames],
+      attemptedRecoveryReasons.add(recovery.reason);
+      for (const skillId of recovery.additionalStickySkillIds) {
+        accumulatedStickySkillIds.add(skillId);
+      }
+      for (const toolName of recovery.additionalToolNames) {
+        accumulatedToolNames.add(toolName);
+      }
+
+      run.context = await loadContext(run.sessionId, run.abortController.signal, {
+        additionalStickySkillIds: [...accumulatedStickySkillIds],
+        additionalToolNames: [...accumulatedToolNames],
+      });
+    }
+  } finally {
+    settleWorksetAfterTurn({
+      sessionId: run.sessionId,
+      startingState: startingWorksetState,
+      attachedSkillIds: accumulatedAttachedSkillIds,
+      attachedToolNames: accumulatedAttachedToolNames,
+      toolCalls: accumulatedToolCalls,
     });
   }
 
-  const fallbackResult = lastResult ?? {
+  const fallbackResult = finalResult ?? lastResult ?? {
     text: "",
     timings: {},
     diagnostics: {

@@ -108,6 +108,13 @@ interface ProjectItem {
   sessionCount: number;
 }
 
+interface SkillItem {
+  name: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+}
+
 function sortProjectItems(items: ProjectItem[]) {
   return [...items].sort((left, right) => {
     if (left.kind !== right.kind) {
@@ -354,6 +361,8 @@ function SettingsApp() {
   const [memoryMaxRetrievalInput, setMemoryMaxRetrievalInput] = useState(8);
   const [memorySimilarityThresholdInput, setMemorySimilarityThresholdInput] = useState(0.7);
   const [memoryEmbeddingModelInput, setMemoryEmbeddingModelInput] = useState<MemoryEmbeddingModel>("text-embedding-3-small");
+  const [skillItems, setSkillItems] = useState<SkillItem[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
 
   const activeSection = navItems.find((item) => item.id === activeSectionId) ?? navItems[0];
   const sectionCards = activeSection.id === "project" ? [] : renderSectionCards(activeSection.id);
@@ -409,6 +418,31 @@ function SettingsApp() {
     return payload;
   }
 
+  async function loadSkills() {
+    setSkillsLoading(true);
+    try {
+      const baseUrl = await ensureDaemonBaseUrl();
+      const response = await fetch(`${baseUrl}/api/skills`);
+      if (response.ok) {
+        const skills = await response.json() as Array<{ name: string; label: string; description: string; status: string }>;
+        setSkillItems(skills.map(s => ({
+          name: s.name,
+          label: s.label,
+          description: s.description,
+          enabled: s.status === 'available'
+        })));
+      }
+    } catch {
+      // 忽略错误
+    } finally {
+      setSkillsLoading(false);
+    }
+  }
+
+  async function toggleSkill(skillName: string, enabled: boolean) {
+    setSkillItems(prev => prev.map(s => s.name === skillName ? { ...s, enabled } : s));
+  }
+
   useEffect(() => {
     let cancelled = false;
 
@@ -444,6 +478,12 @@ function SettingsApp() {
       cancelled = true;
     };
   }, [desktopBridge]);
+
+  useEffect(() => {
+    if (activeSectionId === 'skills' && skillItems.length === 0 && !skillsLoading) {
+      void loadSkills();
+    }
+  }, [activeSectionId]);
 
   useEffect(() => {
     if (!daemonBaseUrl) {
@@ -1453,6 +1493,45 @@ function SettingsApp() {
                 </section>
               </div>
             </article>
+          ) : activeSection.id === "skills" ? (
+            <div className="settings-skills">
+              <div style={{ display: "flex", gap: "12px", marginBottom: "16px" }}>
+                <button
+                  type="button"
+                  className="settings-actions__button"
+                  onClick={() => void loadSkills()}
+                  disabled={skillsLoading}
+                >
+                  🔄 Refresh
+                </button>
+                <button
+                  type="button"
+                  className="settings-actions__button"
+                  onClick={() => {
+                    const skillsPath = "/Users/raper/workspace/Projects/Aliceloop/skills";
+                    void desktopBridge.openPath(skillsPath);
+                  }}
+                >
+                  📁 Open Folder
+                </button>
+              </div>
+              {skillsLoading ? (
+                <div className="settings-skills__loading">加载中...</div>
+              ) : skillItems.length === 0 ? (
+                <div className="settings-skills__empty">暂无技能</div>
+              ) : (
+                skillItems.map((skill) => (
+                  <article key={skill.name} className="settings-skills__item">
+                    <div className="settings-skills__item-main">
+                      <div className="settings-skills__item-header">
+                        <strong>{skill.label}</strong>
+                      </div>
+                      <p className="settings-skills__item-description">{skill.description}</p>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
           ) : (
             <div className="settings-window__content-grid">
               {sectionCards.map(([title, body]) => (

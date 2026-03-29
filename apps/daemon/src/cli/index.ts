@@ -7,6 +7,7 @@ import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { generateMusicSketch } from "../services/musicSketchService";
+import { analyzeVideoFile } from "../services/multimodalAnalysisService";
 
 interface CliIO {
   stdout: (message: string) => void;
@@ -275,6 +276,7 @@ function usage() {
     "  aliceloop voice speak <text> [--voice <name>] [--rate <wpm>]",
     "  aliceloop voice save <output> <text> [--voice <name>] [--rate <wpm>]",
     "  aliceloop image generate <prompt> [--provider <id>] [--model <name>] [--size <WxH>] [--output <path>]",
+    "  aliceloop video analyze <path> [prompt] [--keep-artifacts]",
     "  aliceloop telegram me [--token <botToken>]",
     "  aliceloop telegram send <chatId> <message> [--token <botToken>] [--thread <id>]",
     "  aliceloop telegram file <chatId> <path> [caption] [--token <botToken>] [--thread <id>]",
@@ -1486,6 +1488,31 @@ async function handleImage(args: string[]) {
   throw new CliError(`Unknown image command: ${action ?? "(missing)"}\n\n${usage()}`);
 }
 
+async function handleVideo(args: string[]) {
+  const action = args[0];
+
+  if (action === "analyze") {
+    const { positionals, flags } = parseFlagArgs(args.slice(1));
+    const filePath = positionals[0]?.trim();
+    const prompt = positionals.slice(1).join(" ").trim();
+    if (!filePath) {
+      throw new CliError("video analyze requires a file path");
+    }
+
+    try {
+      return await analyzeVideoFile({
+        path: filePath,
+        prompt: prompt || undefined,
+        keepArtifacts: flags["keep-artifacts"] === "true",
+      });
+    } catch (error) {
+      throw new CliError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  throw new CliError(`Unknown video command: ${action ?? "(missing)"}\n\n${usage()}`);
+}
+
 async function handleTelegram(args: string[]) {
   const action = args[0];
 
@@ -1683,6 +1710,9 @@ export async function runCli(args: string[], io: CliIO = defaultIo) {
         break;
       case "image":
         result = await handleImage(args.slice(1));
+        break;
+      case "video":
+        result = await handleVideo(args.slice(1));
         break;
       case "telegram":
         result = await handleTelegram(args.slice(1));

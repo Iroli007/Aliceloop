@@ -262,6 +262,15 @@ async function main() {
     assert(imageGenerate.stdout.includes(imageOutputPath), "image generate should report the output path");
     assert.equal(existsSync(imageOutputPath), true, "image generate should write the output file");
 
+    const fakeVideoPath = join(tempDataDir, "cli-video-smoke.mp4");
+    writeFileSync(fakeVideoPath, "not-a-real-video", "utf8");
+    const videoAnalyzeWithoutGemini = await capture(["video", "analyze", fakeVideoPath, "Describe this video"]);
+    assert.equal(videoAnalyzeWithoutGemini.code, 1, "video analyze should fail cleanly without Gemini");
+    assert(
+      videoAnalyzeWithoutGemini.stderr.includes("Gemini provider is not available"),
+      "video analyze should clearly explain the Gemini requirement",
+    );
+
     const externalFilePath = join(tempDataDir, "cli-external-smoke.txt");
     writeFileSync(externalFilePath, "external smoke payload", "utf8");
 

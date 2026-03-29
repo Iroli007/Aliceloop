@@ -108,6 +108,7 @@ function buildNormalizedInput(toolName: string, attributes: Record<string, unkno
     return {
       query,
       maxResults: pickIntegerAttribute(attributes, "count", "maxResults", "max_results"),
+      includeMarkdown: pickBooleanAttribute(attributes, "includeMarkdown", "include_markdown"),
       domains: [],
     };
   }

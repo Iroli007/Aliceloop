@@ -2,6 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { withDesktopRelayTab, navigateRelayTab, readRelaySearchResults } from "./desktopRelayResearch";
 import { logPerfTrace, nowMs, roundMs } from "../../runtime/perfTrace";
+import { fetchReadableWebContent, summarizeReadableText } from "./webFetchTool";
 
 const DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
 const SEARCH_TIMEOUT_MS = 30_000;
@@ -67,7 +68,7 @@ interface SearchQueryPlan {
 interface SearchLaneResult {
   query: string;
   searchUrl: string;
-  backend: "desktop_chrome" | "http_fetch";
+  backend: "desktop_chrome" | "http_search";
   rawResults: SearchResult[];
   error?: string;
 }
@@ -76,6 +77,11 @@ interface SearchResultPayload {
   title: string;
   url: string;
   snippet: string;
+  summary?: string;
+  fetchedAt?: string;
+  truncated?: boolean;
+  wordCount?: number;
+  markdown?: string;
   domain: string;
   sourceType: SearchSourceType;
   citationIndex?: number;
@@ -348,6 +354,40 @@ function serializeSearchResult(result: SearchResult): SearchResultPayload {
   return payload;
 }
 
+async function enrichSearchResult(
+  sessionId: string,
+  result: SearchResult,
+  includeMarkdown: boolean,
+) {
+  try {
+    const fetched = await fetchReadableWebContent(sessionId, {
+      url: result.url,
+      extractMain: true,
+      maxLength: includeMarkdown ? 4_000 : 1_600,
+      timeoutMs: 8_000,
+      preferRelay: false,
+    });
+
+    return {
+      summary: summarizeReadableText(fetched.content),
+      fetchedAt: fetched.fetchedAt,
+      truncated: fetched.truncated,
+      wordCount: fetched.wordCount,
+      markdown: includeMarkdown ? fetched.content : undefined,
+    };
+  } catch {
+    const fetchedAt = new Date().toISOString();
+    const summary = summarizeReadableText(result.snippet);
+    return {
+      summary,
+      fetchedAt,
+      truncated: false,
+      wordCount: summary ? summary.split(/\s+/u).filter(Boolean).length : 0,
+      markdown: includeMarkdown ? result.snippet : undefined,
+    };
+  }
+}
+
 async function searchLaneViaHttp(
   query: string,
   domains: string[],
@@ -369,7 +409,7 @@ async function searchLaneViaHttp(
       return {
         query,
         searchUrl,
-        backend: "http_fetch",
+        backend: "http_search",
         rawResults: [],
         error: `HTTP ${response.status} ${response.statusText}`,
       };
@@ -385,14 +425,14 @@ async function searchLaneViaHttp(
     return {
       query,
       searchUrl,
-      backend: "http_fetch",
+      backend: "http_search",
       rawResults,
     };
   } catch (error) {
     return {
       query,
       searchUrl,
-      backend: "http_fetch",
+      backend: "http_search",
       rawResults: [],
       error: error instanceof Error ? error.message : String(error),
     };
@@ -671,17 +711,18 @@ export function createWebSearchTool(sessionId = "web_search") {
     web_search: tool({
       description:
         "Search the public web for fresh information and source discovery. " +
-        "This tool only searches and ranks results; it does not fetch result pages. " +
-        "It splits the query into up to three keyword lanes, returns up to 10 ranked results, and appends source links for the agent to synthesize. " +
+        "It splits the query into up to three keyword lanes, returns up to 10 ranked results, and can enrich each result with fetched summaries. " +
         "On Aliceloop Desktop this prefers a temporary visible Chrome relay tab before falling back to the configured HTTP search endpoint. " +
         "Use this before web_fetch when you need current or source-finding work.",
       inputSchema: z.object({
         query: z.string().min(1).describe("Search query"),
         max_results: z.number().int().min(1).max(10).optional().default(10).describe("Maximum results to return"),
         maxResults: z.number().int().min(1).max(10).optional().describe("Compatibility alias for max_results"),
+        include_markdown: z.boolean().optional().default(false).describe("Whether to attach fetched markdown for each result"),
+        includeMarkdown: z.boolean().optional().describe("Compatibility alias for include_markdown"),
         domains: z.array(z.string().min(1)).max(5).optional().describe("Optional domains to scope with site:"),
       }),
-      execute: async ({ query, max_results, maxResults, domains }) => {
+      execute: async ({ query, max_results, maxResults, include_markdown, includeMarkdown, domains }) => {
         const startedAt = nowMs();
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
@@ -689,6 +730,7 @@ export function createWebSearchTool(sessionId = "web_search") {
         const queryPlan = buildSearchQueryPlan(query, intent);
         const normalizedDomains = normalizeScopedDomains(domains, intent);
         const resolvedMaxResults = max_results ?? maxResults ?? 10;
+        const resolvedIncludeMarkdown = include_markdown ?? includeMarkdown ?? false;
         const effectiveQuery = queryPlan.searchQueries[0] ?? query;
 
         try {
@@ -710,12 +752,16 @@ export function createWebSearchTool(sessionId = "web_search") {
 
           const mergedResults = dedupeSearchResults(laneRuns.flatMap((lane) => lane.rawResults));
           const rankedResults = rankAndFilterResults(mergedResults, intent, normalizedDomains, resolvedMaxResults);
-          const results = rankedResults.map((result, index) => {
-            return serializeSearchResult({
+          const enrichedResults = await Promise.all(
+            rankedResults.map((result) => enrichSearchResult(sessionId, result, resolvedIncludeMarkdown)),
+          );
+          const results = rankedResults.map((result, index) => ({
+            ...serializeSearchResult({
               ...result,
               citationIndex: index + 1,
-            });
-          });
+            }),
+            ...enrichedResults[index],
+          }));
           const sources = results.map((result) => ({
             citationIndex: result.citationIndex,
             title: result.title,
@@ -725,7 +771,7 @@ export function createWebSearchTool(sessionId = "web_search") {
           }));
           const backend = laneRuns.find((lane) => lane.backend === "desktop_chrome")?.backend
             ?? laneRuns[0]?.backend
-            ?? "http_fetch";
+            ?? "http_search";
 
           logPerfTrace("web_search", {
             sessionId,

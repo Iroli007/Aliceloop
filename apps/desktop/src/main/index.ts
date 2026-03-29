@@ -459,10 +459,11 @@ ipcMain.handle("dialog:open-file-or-folder", async () => {
 
 ipcMain.handle("path:open", async (_event, targetPath: string) => {
   const normalizedPath = targetPath.startsWith("~/") ? join(homedir(), targetPath.slice(2)) : targetPath;
-  shell.showItemInFolder(normalizedPath);
+  const error = await shell.openPath(normalizedPath);
 
   return {
-    ok: true,
+    ok: !error,
+    error: error || undefined,
   };
 });
 

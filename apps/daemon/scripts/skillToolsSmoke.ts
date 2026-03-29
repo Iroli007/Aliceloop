@@ -133,8 +133,8 @@ async function main() {
   assert(availableCatalogSkills.length > 0, "skill catalog should expose at least one available skill");
   assert(skillCatalog.some((skill) => skill.id === "skill-hub"), "skill-hub should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "skill-search"), "skill-search should be present in the catalog");
-  assert(skillCatalog.some((skill) => skill.id === "audio-analysis"), "audio-analysis should be present in the catalog");
-  assert(skillCatalog.some((skill) => skill.id === "video-analysis"), "video-analysis should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "music-listener"), "music-listener should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "video-reader"), "video-reader should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "twitter-media"), "twitter-media should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "selfie"), "selfie should be present in the catalog");
@@ -143,8 +143,8 @@ async function main() {
   assert(availableCatalogSkills.some((skill) => skill.id === "skill-search"), "skill-search should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "twitter-media"), "twitter-media should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be active");
-  assert(availableCatalogSkills.every((skill) => skill.id !== "music-listener"), "legacy music-listener should no longer be active");
-  assert(availableCatalogSkills.every((skill) => skill.id !== "video-reader"), "legacy video-reader should no longer be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "music-listener"), "music-listener should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "video-reader"), "video-reader should be active");
   assert(plannedCatalogSkills.some((skill) => skill.id === "selfie"), "selfie should remain planned until image references are supported");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-fetch"), "web-fetch should remain available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-search"), "web-search should now be available");
@@ -660,8 +660,9 @@ async function main() {
   );
 
   const videoWatchSkills = selectRelevantSkillDefinitions("继续看这个视频后面讲了什么，顺便听听他说了什么。");
-  assert.equal(videoWatchSkills.some((skill) => skill.id === "video-analysis"), true, "video watching should route video-analysis");
-  assert.equal(videoWatchSkills.some((skill) => skill.id === "audio-analysis"), true, "spoken-video turns should route audio-analysis");
+  assert.equal(videoWatchSkills.some((skill) => skill.id === "browser"), true, "web playback follow-ups should route browser");
+  assert.equal(videoWatchSkills.some((skill) => skill.id === "video-reader"), false, "web playback follow-ups should no longer route file-based video-reader");
+  assert.equal(videoWatchSkills.some((skill) => skill.id === "music-listener"), false, "web playback follow-ups should no longer route file-based music-listener");
 
   const creatorMetricSkills = selectRelevantSkillDefinitions("病院坂saki现在多少粉丝来着");
   assert.deepEqual(

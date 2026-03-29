@@ -1,12 +1,16 @@
-import { readFile, rm } from "node:fs/promises";
-import { extname, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { Output, experimental_transcribe as transcribe, generateText, type ModelMessage } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
 import { createProviderModel } from "../providers/providerModelFactory";
 import { deriveModelCapabilities, type ModelCapabilities } from "../providers/modelCapabilities";
 import { getDataDir } from "../db/client";
-import { getActiveProviderConfig, type StoredProviderConfig } from "../repositories/providerRepository";
+import { getActiveProviderConfig, getStoredProviderConfig, type StoredProviderConfig } from "../repositories/providerRepository";
 import { getSessionProjectBinding, listSessionAttachmentSandboxRoots } from "../repositories/sessionRepository";
 
 const audioSummarySchema = z.object({
@@ -31,6 +35,13 @@ const visualSummarySchema = z.object({
 const rollingVideoSummarySchema = z.object({
   rollingSummary: z.string().trim().min(1).max(1_200),
   observations: z.array(z.string().trim().min(1).max(200)).max(6).default([]),
+});
+
+const videoAnalysisSchema = z.object({
+  answer: z.string().trim().min(1).max(2_000),
+  highlights: z.array(z.string().trim().min(1).max(240)).max(8).default([]),
+  spokenLanguage: z.string().trim().min(1).max(80).nullable().default(null),
+  caveats: z.array(z.string().trim().min(1).max(240)).max(6).default([]),
 });
 
 const visionRefusalPattern = /cannot access|can't access|无法直接访问|无法查看|外部图片|external image|expired url|provide (?:the )?image|图片直接内嵌|请提供.*图片/i;
@@ -71,6 +82,33 @@ export interface RollingVideoSummaryInput {
   audioSummary?: string | null;
   visualSummary?: string | null;
   limitations?: string[];
+}
+
+export interface VideoFileAnalysisResult {
+  path: string;
+  providerId: "gemini";
+  model: string;
+  prompt: string;
+  metadata: {
+    durationSeconds: number | null;
+    width: number | null;
+    height: number | null;
+    videoCodec: string | null;
+    audioCodec: string | null;
+    bitRate: number | null;
+    container: string | null;
+  };
+  visualSummary: string | null;
+  visualObservations: string[];
+  transcript: string | null;
+  answer: string | null;
+  highlights: string[];
+  spokenLanguage: string | null;
+  limitations: string[];
+  artifacts: {
+    gridImagePath: string | null;
+    transcriptPath: string | null;
+  };
 }
 
 function truncate(text: string, maxLength: number) {
@@ -180,6 +218,124 @@ function buildOpenAIProvider(config: StoredProviderConfig) {
     baseURL: normalizeGatewayBaseUrl(config.baseUrl),
     apiKey: config.apiKey ?? "",
   });
+}
+
+function getGeminiProviderConfig() {
+  const config = getStoredProviderConfig("gemini");
+  if (!config.enabled || !config.apiKey) {
+    throw new Error("Gemini provider is not available. Enable the gemini provider with an API key before using `aliceloop video analyze`.");
+  }
+
+  return config;
+}
+
+function runProcess(command: string, args: string[]) {
+  return spawnSync(command, args, {
+    encoding: "utf8",
+  });
+}
+
+function commandExists(command: string) {
+  const result = runProcess("which", [command]);
+  return result.status === 0 && Boolean(result.stdout.trim());
+}
+
+function parseFfprobeMetadata(stdout: string) {
+  const parsed = JSON.parse(stdout) as {
+    format?: { duration?: string; bit_rate?: string; format_name?: string };
+    streams?: Array<{ codec_type?: string; codec_name?: string; width?: number; height?: number }>;
+  };
+  const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
+  const audioStream = parsed.streams?.find((stream) => stream.codec_type === "audio");
+  return {
+    durationSeconds: parsed.format?.duration ? Number(parsed.format.duration) : null,
+    width: videoStream?.width ?? null,
+    height: videoStream?.height ?? null,
+    videoCodec: videoStream?.codec_name ?? null,
+    audioCodec: audioStream?.codec_name ?? null,
+    bitRate: parsed.format?.bit_rate ? Number(parsed.format.bit_rate) : null,
+    container: parsed.format?.format_name ?? null,
+  };
+}
+
+async function transcribeWithWhisper(audioPath: string, outputDir: string) {
+  if (!commandExists("whisper")) {
+    return {
+      transcript: null,
+      transcriptPath: null,
+      limitation: "本机没有安装 whisper，已跳过音频转写。",
+    };
+  }
+
+  const whisper = runProcess("whisper", [
+    audioPath,
+    "--model",
+    "turbo",
+    "--output_format",
+    "txt",
+    "--output_dir",
+    outputDir,
+  ]);
+  if (whisper.status !== 0) {
+    return {
+      transcript: null,
+      transcriptPath: null,
+      limitation: whisper.stderr.trim() || "whisper 转写失败。",
+    };
+  }
+
+  const outputFiles = (await readdir(outputDir)).filter((fileName) => fileName.endsWith(".txt")).sort();
+  const transcriptPath = outputFiles[0] ? join(outputDir, outputFiles[0]) : null;
+  if (!transcriptPath) {
+    return {
+      transcript: null,
+      transcriptPath: null,
+      limitation: "whisper 没有产出 transcript 文件。",
+    };
+  }
+
+  const transcript = (await readFile(transcriptPath, "utf8")).trim() || null;
+  return {
+    transcript,
+    transcriptPath,
+    limitation: transcript ? null : "whisper transcript 为空。",
+  };
+}
+
+async function synthesizeVideoAnswer(
+  provider: StoredProviderConfig,
+  prompt: string,
+  metadata: VideoFileAnalysisResult["metadata"],
+  visualSummary: string | null,
+  visualObservations: string[],
+  transcript: string | null,
+  limitations: string[],
+) {
+  const response = await generateText({
+    model: createProviderModel(provider),
+    temperature: 0.2,
+    output: Output.object({
+      schema: videoAnalysisSchema,
+      name: "video_file_analysis",
+      description: "Structured answer about a local video file based on extracted evidence.",
+    }),
+    prompt: [
+      "You are answering questions about a local video file from extracted evidence only.",
+      "Do not claim direct native video access. Base the answer on metadata, a thumbnail grid summary, and optional transcript evidence.",
+      `User goal: ${prompt}`,
+      "",
+      "Metadata:",
+      JSON.stringify(metadata, null, 2),
+      "",
+      `Visual summary: ${visualSummary ?? "(none)"}`,
+      visualObservations.length > 0 ? `Visual observations:\n- ${visualObservations.join("\n- ")}` : "Visual observations: (none)",
+      "",
+      transcript ? `Transcript excerpt:\n${truncate(transcript, 8_000)}` : "Transcript excerpt: (none)",
+      limitations.length > 0 ? `Known limitations:\n- ${limitations.join("\n- ")}` : "Known limitations: (none)",
+    ].join("\n"),
+  });
+
+  return response.output;
 }
 
 async function summarizeTranscriptWithModel(
@@ -531,4 +687,176 @@ export async function cleanupGeneratedAnalysisFile(filePath: string | null | und
   }
 
   await rm(filePath, { force: true }).catch(() => undefined);
+}
+
+export async function analyzeVideoFile(input: {
+  path: string;
+  prompt?: string;
+  keepArtifacts?: boolean;
+}): Promise<VideoFileAnalysisResult> {
+  const normalizedPath = resolve(input.path);
+  if (!existsSync(normalizedPath)) {
+    throw new Error(`Video file not found: ${normalizedPath}`);
+  }
+
+  const provider = getGeminiProviderConfig();
+  const prompt = input.prompt?.trim() || "Describe what's happening in this video.";
+  const limitations: string[] = [];
+  const metadata: VideoFileAnalysisResult["metadata"] = {
+    durationSeconds: null,
+    width: null,
+    height: null,
+    videoCodec: null,
+    audioCodec: null,
+    bitRate: null,
+    container: null,
+  };
+
+  if (!commandExists("ffprobe")) {
+    throw new Error("`aliceloop video analyze` requires ffprobe. Install ffmpeg/ffprobe first.");
+  }
+  if (!commandExists("ffmpeg")) {
+    throw new Error("`aliceloop video analyze` requires ffmpeg. Install ffmpeg first.");
+  }
+
+  const ffprobe = runProcess("ffprobe", [
+    "-v",
+    "error",
+    "-show_entries",
+    "format=duration,bit_rate,format_name:stream=codec_type,codec_name,width,height",
+    "-of",
+    "json",
+    normalizedPath,
+  ]);
+  if (ffprobe.status !== 0) {
+    throw new Error(ffprobe.stderr.trim() || "ffprobe failed");
+  }
+  Object.assign(metadata, parseFfprobeMetadata(ffprobe.stdout));
+
+  const tempDir = join(tmpdir(), `aliceloop-video-analyze-${randomUUID()}`);
+  const gridImagePath = join(tempDir, "grid.jpg");
+  const audioPath = join(tempDir, "audio.wav");
+  const whisperOutputDir = join(tempDir, "whisper");
+
+  await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  const mkdir = runProcess("mkdir", ["-p", tempDir, whisperOutputDir]);
+  if (mkdir.status !== 0) {
+    throw new Error(mkdir.stderr.trim() || "Failed to create temp directory");
+  }
+
+  let transcript: string | null = null;
+  let transcriptPath: string | null = null;
+  let visualSummary: string | null = null;
+  let visualObservations: string[] = [];
+
+  try {
+    const durationSeconds = metadata.durationSeconds && Number.isFinite(metadata.durationSeconds)
+      ? metadata.durationSeconds
+      : 9;
+    const frameInterval = Math.max(durationSeconds / 9, 1);
+    const grid = runProcess("ffmpeg", [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      normalizedPath,
+      "-vf",
+      `fps=1/${frameInterval.toFixed(2)},scale=320:-1,tile=3x3`,
+      "-frames:v",
+      "1",
+      gridImagePath,
+      "-y",
+    ]);
+    if (grid.status !== 0) {
+      limitations.push(grid.stderr.trim() || "视频缩略图提取失败。");
+    } else {
+      const visual = await describeImageWithModel(
+        provider,
+        gridImagePath,
+        [
+          "You are looking at a thumbnail grid extracted from a video at multiple time points.",
+          "Describe the visible progression, notable scenes, people, actions, and on-screen text if it is readable.",
+          `User goal: ${prompt}`,
+        ].join("\n"),
+      );
+      if (looksLikeVisionRefusal(visual)) {
+        limitations.push("Gemini 的缩略图理解结果不可用。");
+      } else {
+        visualSummary = visual.summary;
+        visualObservations = visual.observations;
+      }
+    }
+
+    const audio = runProcess("ffmpeg", [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      normalizedPath,
+      "-vn",
+      "-acodec",
+      "pcm_s16le",
+      "-ar",
+      "16000",
+      "-ac",
+      "1",
+      audioPath,
+      "-y",
+    ]);
+    if (audio.status !== 0) {
+      limitations.push(audio.stderr.trim() || "视频音频抽取失败。");
+    } else {
+      const whisper = await transcribeWithWhisper(audioPath, whisperOutputDir);
+      transcript = whisper.transcript;
+      transcriptPath = whisper.transcriptPath;
+      if (whisper.limitation) {
+        limitations.push(whisper.limitation);
+      }
+    }
+
+    let answer: string | null = null;
+    let highlights: string[] = [];
+    let spokenLanguage: string | null = null;
+
+    if (visualSummary || transcript) {
+      const synthesized = await synthesizeVideoAnswer(
+        provider,
+        prompt,
+        metadata,
+        visualSummary,
+        visualObservations,
+        transcript,
+        limitations,
+      );
+      answer = synthesized.answer;
+      highlights = synthesized.highlights;
+      spokenLanguage = synthesized.spokenLanguage;
+      limitations.push(...synthesized.caveats.filter((entry) => !limitations.includes(entry)));
+    } else {
+      limitations.push("没有拿到足够的画面或音频证据，无法生成可靠结论。");
+    }
+
+    return {
+      path: normalizedPath,
+      providerId: "gemini",
+      model: provider.model,
+      prompt,
+      metadata,
+      visualSummary,
+      visualObservations,
+      transcript,
+      answer,
+      highlights,
+      spokenLanguage,
+      limitations,
+      artifacts: {
+        gridImagePath: input.keepArtifacts ? gridImagePath : null,
+        transcriptPath: input.keepArtifacts ? transcriptPath : null,
+      },
+    };
+  } finally {
+    if (!input.keepArtifacts) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
 }

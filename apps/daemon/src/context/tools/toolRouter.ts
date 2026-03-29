@@ -91,12 +91,5 @@ export function routeToolNamesForTurn(
     toolNames.add("view_image");
   }
 
-  if (
-    needsAudioAnalysis(normalizedQuery)
-    || hasStickySkill(hints, "audio-analysis")
-  ) {
-    toolNames.add("audio_understand");
-  }
-
   return [...toolNames].sort();
 }
