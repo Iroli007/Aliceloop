@@ -3,6 +3,13 @@ type DesktopMeta = {
   name: string;
   version: string;
   desktopCapabilities?: unknown;
+  publicPaths?: {
+    publicRootDir: string;
+    workspaceDir: string;
+    skillsDir: string;
+    scriptsDir: string;
+    chromeExtensionDir: string;
+  };
 };
 
 type RuntimePing = {

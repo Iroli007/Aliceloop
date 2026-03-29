@@ -63,6 +63,25 @@ const dataDir = process.env.ALICELOOP_DATA_DIR?.trim()
 const uploadsDir = join(dataDir, "uploads");
 const databasePath = join(dataDir, "aliceloop.db");
 
+function resolveNativeBindingPath() {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath?.trim();
+  if (!resourcesPath) {
+    return null;
+  }
+
+  const candidate = join(
+    resourcesPath,
+    "app.asar.unpacked",
+    "node_modules",
+    "better-sqlite3",
+    "build",
+    "Release",
+    "better_sqlite3.node",
+  );
+
+  return existsSync(candidate) ? candidate : null;
+}
+
 type SeedContentBlock = {
   id: string;
   libraryItemId: string;
@@ -783,7 +802,8 @@ export function getDatabase(): Database.Database {
 
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(uploadsDir, { recursive: true });
-  database = new Database(databasePath);
+  const nativeBindingPath = resolveNativeBindingPath();
+  database = new Database(databasePath, nativeBindingPath ? { nativeBinding: nativeBindingPath } : undefined);
   database.pragma("journal_mode = WAL");
   database.pragma("foreign_keys = ON");
   bootstrap(database);

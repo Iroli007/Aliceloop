@@ -1,5 +1,5 @@
 export interface RepairedToolCall {
-  source: "minimax_text_tool_call" | "tool_call_json";
+  source: "minimax_text_tool_call" | "tool_call_json" | "bracket_tool_call";
   rawToolName: string;
   toolName: string;
   input: Record<string, unknown>;
@@ -265,6 +265,67 @@ function decodeHtmlEntities(value: string) {
     .replace(/&amp;/gu, "&");
 }
 
+function parseBracketFlagValue(rawValue: string): unknown {
+  const value = decodeHtmlEntities(rawValue).trim();
+  if (!value) {
+    return "";
+  }
+
+  if (/^-?\d+$/u.test(value)) {
+    return Number(value);
+  }
+
+  if (/^(true|false)$/iu.test(value)) {
+    return value.toLowerCase() === "true";
+  }
+
+  return value;
+}
+
+function parseBracketToolCall(text: string): RepairedToolCall | null {
+  const match = text.match(/\[TOOL_CALL\]\s*([\s\S]*?)\s*\[\/TOOL_CALL\]/iu);
+  if (!match) {
+    return null;
+  }
+
+  const markup = match[0];
+  const body = match[1] ?? "";
+  const toolMatch = body.match(/tool\s*=>\s*"([^"]+)"/u);
+  if (!toolMatch) {
+    return null;
+  }
+
+  const rawToolName = toolMatch[1] ?? "";
+  const toolName = normalizeToolName(rawToolName);
+  if (!toolName) {
+    return null;
+  }
+
+  const attributes: Record<string, unknown> = {};
+  for (const flagMatch of body.matchAll(/--([a-zA-Z][\w-]*)\s+(?:"([^"]*)"|'([^']*)'|([^\n\r\}]+))/gu)) {
+    const [, rawKey = "", doubleQuoted = "", singleQuoted = "", bareValue = ""] = flagMatch;
+    const value = doubleQuoted || singleQuoted || bareValue;
+    if (!rawKey) {
+      continue;
+    }
+
+    attributes[rawKey] = parseBracketFlagValue(value);
+  }
+
+  const input = buildNormalizedInput(toolName, attributes);
+  if (!input) {
+    return null;
+  }
+
+  return {
+    source: "bracket_tool_call",
+    rawToolName,
+    toolName,
+    input,
+    markup,
+  };
+}
+
 function parseJsonToolCall(text: string): RepairedToolCall | null {
   const match = text.match(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/u);
   if (!match) {
@@ -316,5 +377,5 @@ function parseJsonToolCall(text: string): RepairedToolCall | null {
 }
 
 export function repairTextToolCall(text: string): RepairedToolCall | null {
-  return parseJsonToolCall(text) ?? parseMiniMaxTextToolCall(text);
+  return parseJsonToolCall(text) ?? parseMiniMaxTextToolCall(text) ?? parseBracketToolCall(text);
 }

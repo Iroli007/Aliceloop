@@ -1767,7 +1767,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   );
                 })}
 
-                {conversation.isResponding && <ThinkingIndicator thinkingSteps={conversation.thinkingSteps} />}
+                {conversation.isResponding && (
+                  <ThinkingIndicator
+                    thinkingSteps={conversation.thinkingSteps}
+                    currentToolName={conversation.currentToolName}
+                  />
+                )}
 
                 <div ref={messagesEndRef} className="workspace__end-anchor" aria-hidden="true" />
               </div>
@@ -2274,7 +2279,6 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                           {" · "}
                           {skill.allowedTools.length > 0 ? skill.allowedTools.join(" / ") : "no tools listed"}
                         </span>
-                        <span>{skill.sourcePath}</span>
                         {skill.sourceUrl ? (
                           <a href={skill.sourceUrl} target="_blank" rel="noreferrer">
                             source

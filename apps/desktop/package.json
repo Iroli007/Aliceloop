@@ -9,14 +9,16 @@
   "scripts": {
     "build": "electron-vite build",
     "build:web": "vite build --config vite.renderer.config.ts",
-    "dev": "electron-vite dev",
-    "dev:web": "vite --config vite.renderer.config.ts",
+    "dev": "ALICELOOP_DAEMON_URL=http://127.0.0.1:3031 VITE_DAEMON_URL=http://127.0.0.1:3031 electron-vite dev",
+    "dev:web": "VITE_DAEMON_URL=http://127.0.0.1:3031 vite --config vite.renderer.config.ts",
     "package:extension": "node ./scripts/exportChromeRelayExtension.mjs",
     "package:dir": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir && npm run package:extension",
+    "package:dmg": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg && npm run package:extension",
     "package:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir && npm run package:extension",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aliceloop/daemon": "file:../../apps/daemon",
     "@aliceloop/runtime-core": "file:../../packages/runtime-core",
     "bufferutil": "^4.1.0",
     "playwright-core": "^1.58.2",
@@ -42,6 +44,7 @@
     "appId": "com.aliceloop.desktop",
     "productName": "Aliceloop",
     "electronVersion": "37.10.3",
+    "afterPack": "./scripts/afterPack.mjs",
     "asar": true,
     "directories": {
       "buildResources": "resources",
@@ -54,7 +57,19 @@
     "extraResources": [
       {
         "from": "../../chrome-extension",
-        "to": "chrome-extension"
+        "to": "runtime-assets/chrome-extension"
+      },
+      {
+        "from": "../../skills",
+        "to": "runtime-assets/skills"
+      },
+      {
+        "from": "../daemon/runtime-scripts",
+        "to": "runtime-assets/scripts"
+      },
+      {
+        "from": "../daemon/src/context/prompts",
+        "to": "runtime-assets/prompts"
       }
     ],
     "mac": {

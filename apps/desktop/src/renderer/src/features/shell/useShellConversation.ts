@@ -801,6 +801,7 @@ export function useShellConversation(): ShellConversationState {
     const currentSessionId = activeSessionId;
     let disposed = false;
     let retryTimer: number | null = null;
+    let refreshThreadsTimer: number | null = null;
     let source: EventSource | null = null;
     let reconciling = false;
     let reconcileQueued = false;
@@ -814,6 +815,17 @@ export function useShellConversation(): ShellConversationState {
       } catch {
         // Keep the current thread list when a background refresh fails.
       }
+    };
+
+    const scheduleRefreshThreads = () => {
+      if (disposed || refreshThreadsTimer !== null) {
+        return;
+      }
+
+      refreshThreadsTimer = window.setTimeout(() => {
+        refreshThreadsTimer = null;
+        void refreshThreads();
+      }, 120);
     };
 
     const reconcileSnapshot = async () => {
@@ -881,7 +893,7 @@ export function useShellConversation(): ShellConversationState {
           sessionEvent.type === "message.created" ||
           sessionEvent.type === "message.acked"
         ) {
-          void refreshThreads();
+          scheduleRefreshThreads();
         }
       });
 
@@ -913,6 +925,9 @@ export function useShellConversation(): ShellConversationState {
       disposed = true;
       if (retryTimer) {
         window.clearTimeout(retryTimer);
+      }
+      if (refreshThreadsTimer) {
+        window.clearTimeout(refreshThreadsTimer);
       }
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);

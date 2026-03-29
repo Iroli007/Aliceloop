@@ -271,6 +271,15 @@ async function main() {
       "video analyze should clearly explain the Gemini requirement",
     );
 
+    const fakeAudioPath = join(tempDataDir, "cli-audio-smoke.mp3");
+    writeFileSync(fakeAudioPath, "not-a-real-audio", "utf8");
+    const audioAnalyzeWithoutGemini = await capture(["audio", "analyze", fakeAudioPath, "Analyze this song"]);
+    assert.equal(audioAnalyzeWithoutGemini.code, 1, "audio analyze should fail cleanly without Gemini");
+    assert(
+      audioAnalyzeWithoutGemini.stderr.includes("Gemini provider is not available"),
+      "audio analyze should clearly explain the Gemini requirement",
+    );
+
     const externalFilePath = join(tempDataDir, "cli-external-smoke.txt");
     writeFileSync(externalFilePath, "external smoke payload", "utf8");
 

@@ -627,7 +627,9 @@ export function getDefaultSandboxRoots() {
 }
 
 export function getDefaultWorkspaceRoot() {
-  return resolve(getDataDir(), "workspaces", "default");
+  return process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR?.trim()
+    ? resolve(process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR)
+    : resolve(getDataDir(), "workspaces", "default");
 }
 
 export function getSandboxProjectRoot() {

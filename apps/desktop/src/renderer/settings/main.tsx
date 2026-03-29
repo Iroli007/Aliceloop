@@ -109,10 +109,18 @@ interface ProjectItem {
 }
 
 interface SkillItem {
-  name: string;
+  id: string;
   label: string;
   description: string;
   enabled: boolean;
+}
+
+interface PublicPaths {
+  publicRootDir: string;
+  workspaceDir: string;
+  skillsDir: string;
+  scriptsDir: string;
+  chromeExtensionDir: string;
 }
 
 function sortProjectItems(items: ProjectItem[]) {
@@ -335,6 +343,7 @@ function SettingsApp() {
   const memoryConfig = useMemoryConfig();
   const [activeSectionId, setActiveSectionId] = useState<SettingsSectionId>("project");
   const [daemonBaseUrl, setDaemonBaseUrl] = useState<string | null>(null);
+  const [publicPaths, setPublicPaths] = useState<PublicPaths | null>(null);
   const [projectItems, setProjectItems] = useState<ProjectItem[]>([]);
   const [projectStatus, setProjectStatus] = useState<"loading" | "ready" | "error">("loading");
   const [projectPending, setProjectPending] = useState(false);
@@ -363,6 +372,7 @@ function SettingsApp() {
   const [memoryEmbeddingModelInput, setMemoryEmbeddingModelInput] = useState<MemoryEmbeddingModel>("text-embedding-3-small");
   const [skillItems, setSkillItems] = useState<SkillItem[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsNotice, setSkillsNotice] = useState<string | null>(null);
 
   const activeSection = navItems.find((item) => item.id === activeSectionId) ?? navItems[0];
   const sectionCards = activeSection.id === "project" ? [] : renderSectionCards(activeSection.id);
@@ -387,14 +397,20 @@ function SettingsApp() {
     ? providerState.modelCatalogs[activeProvider.id]
     : undefined;
 
+  async function readAppMeta() {
+    const meta = await desktopBridge.getAppMeta();
+    setDaemonBaseUrl(meta.daemonBaseUrl);
+    setPublicPaths(meta.publicPaths ?? null);
+    return meta;
+  }
+
   async function ensureDaemonBaseUrl() {
     if (daemonBaseUrl) {
       return daemonBaseUrl;
     }
 
-    const { daemonBaseUrl: baseUrl } = await desktopBridge.getAppMeta();
-    setDaemonBaseUrl(baseUrl);
-    return baseUrl;
+    const meta = await readAppMeta();
+    return meta.daemonBaseUrl;
   }
 
   async function refreshProjectItems(baseUrlOverride?: string) {
@@ -424,12 +440,12 @@ function SettingsApp() {
       const baseUrl = await ensureDaemonBaseUrl();
       const response = await fetch(`${baseUrl}/api/skills`);
       if (response.ok) {
-        const skills = await response.json() as Array<{ name: string; label: string; description: string; status: string }>;
+        const skills = await response.json() as Array<{ id: string; label: string; description: string; status: string }>;
         setSkillItems(skills.map(s => ({
-          name: s.name,
+          id: s.id,
           label: s.label,
           description: s.description,
-          enabled: s.status === 'available'
+          enabled: s.status === "available"
         })));
       }
     } catch {
@@ -439,8 +455,19 @@ function SettingsApp() {
     }
   }
 
-  async function toggleSkill(skillName: string, enabled: boolean) {
-    setSkillItems(prev => prev.map(s => s.name === skillName ? { ...s, enabled } : s));
+  async function openPublicPath(targetPath: string | undefined, onSuccess: (message: string) => void, onError: (message: string) => void) {
+    if (!targetPath) {
+      onError("路径暂时不可用。");
+      return;
+    }
+
+    const result = await desktopBridge.openPath(targetPath);
+    if (result.ok) {
+      onSuccess(`已打开 ${targetPath}。`);
+      return;
+    }
+
+    onError(result.error ?? "打开目录失败。");
   }
 
   useEffect(() => {
@@ -450,12 +477,10 @@ function SettingsApp() {
       try {
         setProjectStatus("loading");
         setProjectNotice(null);
-        const { daemonBaseUrl: baseUrl } = await desktopBridge.getAppMeta();
+        const { daemonBaseUrl: baseUrl } = await readAppMeta();
         if (cancelled) {
           return;
         }
-
-        setDaemonBaseUrl(baseUrl);
         const nextItems = await fetchProjectItems(baseUrl);
         if (cancelled) {
           return;
@@ -1090,6 +1115,38 @@ function SettingsApp() {
                   <button className="settings-actions__button" type="button" onClick={() => void handleRefreshRelayStatus()}>
                     {relayStatusPending ? "刷新中..." : "刷新"}
                   </button>
+                  <button
+                    className="settings-actions__button"
+                    type="button"
+                    disabled={!publicPaths?.chromeExtensionDir}
+                    onClick={() => void openPublicPath(
+                      publicPaths?.chromeExtensionDir,
+                      (message) => {
+                        setRelayNotice(message);
+                      },
+                      (message) => {
+                        setRelayNotice(message);
+                      },
+                    )}
+                  >
+                    打开扩展目录
+                  </button>
+                  <button
+                    className="settings-actions__button"
+                    type="button"
+                    disabled={!publicPaths?.scriptsDir}
+                    onClick={() => void openPublicPath(
+                      publicPaths?.scriptsDir,
+                      (message) => {
+                        setRelayNotice(message);
+                      },
+                      (message) => {
+                        setRelayNotice(message);
+                      },
+                    )}
+                  >
+                    打开脚本目录
+                  </button>
                 </div>
 
                 <p className="settings-relay__footnote">绿色表示 Google Chrome 扩展已经连上；灰色表示还没连上。</p>
@@ -1507,21 +1564,28 @@ function SettingsApp() {
                 <button
                   type="button"
                   className="settings-actions__button"
-                  onClick={() => {
-                    const skillsPath = "/Users/raper/workspace/Projects/Aliceloop/skills";
-                    void desktopBridge.openPath(skillsPath);
-                  }}
+                  disabled={!publicPaths?.skillsDir}
+                  onClick={() => void openPublicPath(
+                    publicPaths?.skillsDir,
+                    (message) => {
+                      setSkillsNotice(message);
+                    },
+                    (message) => {
+                      setSkillsNotice(message);
+                    },
+                  )}
                 >
                   📁 Open Folder
                 </button>
               </div>
+              {skillsNotice ? <div className="provider-notice">{skillsNotice}</div> : null}
               {skillsLoading ? (
                 <div className="settings-skills__loading">加载中...</div>
               ) : skillItems.length === 0 ? (
                 <div className="settings-skills__empty">暂无技能</div>
               ) : (
                 skillItems.map((skill) => (
-                  <article key={skill.name} className="settings-skills__item">
+                  <article key={skill.id} className="settings-skills__item">
                     <div className="settings-skills__item-main">
                       <div className="settings-skills__item-header">
                         <strong>{skill.label}</strong>

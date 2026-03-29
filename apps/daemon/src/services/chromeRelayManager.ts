@@ -28,6 +28,7 @@ type BrowserStackState = {
 };
 
 let chromeRelayBridgeServer: ChromeRelayBridgeServer | null = null;
+const chromeRelayPort = Number(process.env.ALICELOOP_CHROME_RELAY_PORT ?? 23001);
 
 function collectRelayState() {
   const bridgeStatus = chromeRelayBridgeServer?.getMeta() ?? null;
@@ -42,7 +43,7 @@ function collectRelayState() {
 
 export async function ensureDaemonChromeRelayStarted() {
   if (!chromeRelayBridgeServer) {
-    chromeRelayBridgeServer = new ChromeRelayBridgeServer(23001);
+    chromeRelayBridgeServer = new ChromeRelayBridgeServer(chromeRelayPort);
   }
 
   await chromeRelayBridgeServer.start();

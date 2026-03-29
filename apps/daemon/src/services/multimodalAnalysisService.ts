@@ -44,6 +44,12 @@ const videoAnalysisSchema = z.object({
   caveats: z.array(z.string().trim().min(1).max(240)).max(6).default([]),
 });
 
+const audioAnalysisSchema = z.object({
+  answer: z.string().trim().min(1).max(2_000),
+  highlights: z.array(z.string().trim().min(1).max(240)).max(8).default([]),
+  caveats: z.array(z.string().trim().min(1).max(240)).max(6).default([]),
+});
+
 const visionRefusalPattern = /cannot access|can't access|无法直接访问|无法查看|外部图片|external image|expired url|provide (?:the )?image|图片直接内嵌|请提供.*图片/i;
 
 export interface AudioUnderstandingMoment {
@@ -107,6 +113,31 @@ export interface VideoFileAnalysisResult {
   limitations: string[];
   artifacts: {
     gridImagePath: string | null;
+    transcriptPath: string | null;
+  };
+}
+
+export interface AudioFileAnalysisResult {
+  path: string;
+  providerId: "gemini";
+  model: string;
+  prompt: string;
+  metadata: {
+    durationSeconds: number | null;
+    sampleRate: number | null;
+    channels: number | null;
+    codec: string | null;
+    bitRate: number | null;
+    container: string | null;
+  };
+  spectrogramSummary: string | null;
+  spectrogramObservations: string[];
+  transcript: string | null;
+  answer: string | null;
+  highlights: string[];
+  limitations: string[];
+  artifacts: {
+    spectrogramPath: string | null;
     transcriptPath: string | null;
   };
 }
@@ -187,7 +218,7 @@ function assertReadableSessionPath(sessionId: string, targetPath: string, option
     return;
   }
 
-  throw new Error(`audio_understand cannot access path outside the current session roots: ${targetPath}`);
+  throw new Error(`Audio analysis cannot access path outside the current session roots: ${targetPath}`);
 }
 
 function resolveTranscriptionCandidates(config: StoredProviderConfig) {
@@ -220,10 +251,10 @@ function buildOpenAIProvider(config: StoredProviderConfig) {
   });
 }
 
-function getGeminiProviderConfig() {
+function getGeminiProviderConfig(commandName: string) {
   const config = getStoredProviderConfig("gemini");
-  if (!config.enabled || !config.apiKey) {
-    throw new Error("Gemini provider is not available. Enable the gemini provider with an API key before using `aliceloop video analyze`.");
+  if (!config || !config.enabled || !config.apiKey) {
+    throw new Error(`Gemini provider is not available. Enable the gemini provider with an API key before using \`${commandName}\`.`);
   }
 
   return config;
@@ -253,6 +284,22 @@ function parseFfprobeMetadata(stdout: string) {
     height: videoStream?.height ?? null,
     videoCodec: videoStream?.codec_name ?? null,
     audioCodec: audioStream?.codec_name ?? null,
+    bitRate: parsed.format?.bit_rate ? Number(parsed.format.bit_rate) : null,
+    container: parsed.format?.format_name ?? null,
+  };
+}
+
+function parseAudioFfprobeMetadata(stdout: string) {
+  const parsed = JSON.parse(stdout) as {
+    format?: { duration?: string; bit_rate?: string; format_name?: string };
+    streams?: Array<{ codec_type?: string; codec_name?: string; sample_rate?: string; channels?: number }>;
+  };
+  const audioStream = parsed.streams?.find((stream) => stream.codec_type === "audio");
+  return {
+    durationSeconds: parsed.format?.duration ? Number(parsed.format.duration) : null,
+    sampleRate: audioStream?.sample_rate ? Number(audioStream.sample_rate) : null,
+    channels: audioStream?.channels ?? null,
+    codec: audioStream?.codec_name ?? null,
     bitRate: parsed.format?.bit_rate ? Number(parsed.format.bit_rate) : null,
     container: parsed.format?.format_name ?? null,
   };
@@ -331,6 +378,42 @@ async function synthesizeVideoAnswer(
       visualObservations.length > 0 ? `Visual observations:\n- ${visualObservations.join("\n- ")}` : "Visual observations: (none)",
       "",
       transcript ? `Transcript excerpt:\n${truncate(transcript, 8_000)}` : "Transcript excerpt: (none)",
+      limitations.length > 0 ? `Known limitations:\n- ${limitations.join("\n- ")}` : "Known limitations: (none)",
+    ].join("\n"),
+  });
+
+  return response.output;
+}
+
+async function synthesizeAudioAnswer(
+  provider: StoredProviderConfig,
+  prompt: string,
+  metadata: AudioFileAnalysisResult["metadata"],
+  spectrogramSummary: string | null,
+  spectrogramObservations: string[],
+  transcript: string | null,
+  limitations: string[],
+) {
+  const response = await generateText({
+    model: createProviderModel(provider),
+    temperature: 0.2,
+    output: Output.object({
+      schema: audioAnalysisSchema,
+      name: "audio_file_analysis",
+      description: "Structured answer about a local audio or music file based on extracted evidence.",
+    }),
+    prompt: [
+      "You are answering questions about a local audio or music file from extracted evidence only.",
+      "Base the answer on metadata, a spectrogram summary, and optional transcript evidence.",
+      `User goal: ${prompt}`,
+      "",
+      "Metadata:",
+      JSON.stringify(metadata, null, 2),
+      "",
+      `Spectrogram summary: ${spectrogramSummary ?? "(none)"}`,
+      spectrogramObservations.length > 0 ? `Spectrogram observations:\n- ${spectrogramObservations.join("\n- ")}` : "Spectrogram observations: (none)",
+      "",
+      transcript ? `Transcript / lyrics excerpt:\n${truncate(transcript, 8_000)}` : "Transcript / lyrics excerpt: (none)",
       limitations.length > 0 ? `Known limitations:\n- ${limitations.join("\n- ")}` : "Known limitations: (none)",
     ].join("\n"),
   });
@@ -699,7 +782,7 @@ export async function analyzeVideoFile(input: {
     throw new Error(`Video file not found: ${normalizedPath}`);
   }
 
-  const provider = getGeminiProviderConfig();
+  const provider = getGeminiProviderConfig("aliceloop video analyze");
   const prompt = input.prompt?.trim() || "Describe what's happening in this video.";
   const limitations: string[] = [];
   const metadata: VideoFileAnalysisResult["metadata"] = {
@@ -851,6 +934,169 @@ export async function analyzeVideoFile(input: {
       limitations,
       artifacts: {
         gridImagePath: input.keepArtifacts ? gridImagePath : null,
+        transcriptPath: input.keepArtifacts ? transcriptPath : null,
+      },
+    };
+  } finally {
+    if (!input.keepArtifacts) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+}
+
+export async function analyzeAudioFile(input: {
+  path: string;
+  prompt?: string;
+  keepArtifacts?: boolean;
+}): Promise<AudioFileAnalysisResult> {
+  const normalizedPath = resolve(input.path);
+  if (!existsSync(normalizedPath)) {
+    throw new Error(`Audio file not found: ${normalizedPath}`);
+  }
+
+  const provider = getGeminiProviderConfig("aliceloop audio analyze");
+  const prompt = input.prompt?.trim() || "Analyze this audio file.";
+  const limitations: string[] = [];
+  const metadata: AudioFileAnalysisResult["metadata"] = {
+    durationSeconds: null,
+    sampleRate: null,
+    channels: null,
+    codec: null,
+    bitRate: null,
+    container: null,
+  };
+
+  if (!commandExists("ffprobe")) {
+    throw new Error("`aliceloop audio analyze` requires ffprobe. Install ffmpeg/ffprobe first.");
+  }
+  if (!commandExists("ffmpeg")) {
+    throw new Error("`aliceloop audio analyze` requires ffmpeg. Install ffmpeg first.");
+  }
+
+  const ffprobe = runProcess("ffprobe", [
+    "-v",
+    "error",
+    "-show_entries",
+    "format=duration,bit_rate,format_name:stream=codec_type,codec_name,sample_rate,channels",
+    "-of",
+    "json",
+    normalizedPath,
+  ]);
+  if (ffprobe.status !== 0) {
+    throw new Error(ffprobe.stderr.trim() || "ffprobe failed");
+  }
+  Object.assign(metadata, parseAudioFfprobeMetadata(ffprobe.stdout));
+
+  const tempDir = join(tmpdir(), `aliceloop-audio-analyze-${randomUUID()}`);
+  const spectrogramPath = join(tempDir, "spectrogram.png");
+  const wavPath = join(tempDir, "audio.wav");
+  const whisperOutputDir = join(tempDir, "whisper");
+
+  await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  const mkdir = runProcess("mkdir", ["-p", tempDir, whisperOutputDir]);
+  if (mkdir.status !== 0) {
+    throw new Error(mkdir.stderr.trim() || "Failed to create temp directory");
+  }
+
+  let transcript: string | null = null;
+  let transcriptPath: string | null = null;
+  let spectrogramSummary: string | null = null;
+  let spectrogramObservations: string[] = [];
+
+  try {
+    const spectrogram = runProcess("ffmpeg", [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      normalizedPath,
+      "-lavfi",
+      "showspectrumpic=s=800x200:mode=combined:color=intensity",
+      "-frames:v",
+      "1",
+      spectrogramPath,
+      "-y",
+    ]);
+    if (spectrogram.status !== 0) {
+      limitations.push(spectrogram.stderr.trim() || "音频频谱图生成失败。");
+    } else {
+      const visual = await describeImageWithModel(
+        provider,
+        spectrogramPath,
+        [
+          "You are looking at a spectrogram generated from an audio or music file.",
+          "Describe the apparent energy distribution, density, bass presence, brightness, and rhythmic texture.",
+          `User goal: ${prompt}`,
+        ].join("\n"),
+      );
+      if (looksLikeVisionRefusal(visual)) {
+        limitations.push("Gemini 的频谱图理解结果不可用。");
+      } else {
+        spectrogramSummary = visual.summary;
+        spectrogramObservations = visual.observations;
+      }
+    }
+
+    const wav = runProcess("ffmpeg", [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      normalizedPath,
+      "-acodec",
+      "pcm_s16le",
+      "-ar",
+      "16000",
+      "-ac",
+      "1",
+      wavPath,
+      "-y",
+    ]);
+    if (wav.status !== 0) {
+      limitations.push(wav.stderr.trim() || "音频 wav 转换失败。");
+    } else {
+      const whisper = await transcribeWithWhisper(wavPath, whisperOutputDir);
+      transcript = whisper.transcript;
+      transcriptPath = whisper.transcriptPath;
+      if (whisper.limitation) {
+        limitations.push(whisper.limitation);
+      }
+    }
+
+    let answer: string | null = null;
+    let highlights: string[] = [];
+
+    if (spectrogramSummary || transcript) {
+      const synthesized = await synthesizeAudioAnswer(
+        provider,
+        prompt,
+        metadata,
+        spectrogramSummary,
+        spectrogramObservations,
+        transcript,
+        limitations,
+      );
+      answer = synthesized.answer;
+      highlights = synthesized.highlights;
+      limitations.push(...synthesized.caveats.filter((entry) => !limitations.includes(entry)));
+    } else {
+      limitations.push("没有拿到足够的音频证据，无法生成可靠结论。");
+    }
+
+    return {
+      path: normalizedPath,
+      providerId: "gemini",
+      model: provider.model,
+      prompt,
+      metadata,
+      spectrogramSummary,
+      spectrogramObservations,
+      transcript,
+      answer,
+      highlights,
+      limitations,
+      artifacts: {
+        spectrogramPath: input.keepArtifacts ? spectrogramPath : null,
         transcriptPath: input.keepArtifacts ? transcriptPath : null,
       },
     };

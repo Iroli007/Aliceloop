@@ -281,7 +281,6 @@ async function main() {
 
   const directResolved = resolveSkillTools(
     new Set([
-      "audio_understand",
       "browser_find",
       "browser_navigate",
       "browser_snapshot",
@@ -296,7 +295,6 @@ async function main() {
       "view_image",
     ]),
   );
-  assert.equal(typeof directResolved.audio_understand, "object", "resolveSkillTools should return requested audio_understand");
   assert.equal(typeof directResolved.browser_find, "object", "resolveSkillTools should return requested browser_find");
   assert.equal(typeof directResolved.browser_navigate, "object", "resolveSkillTools should return requested browser_navigate");
   assert.equal(typeof directResolved.browser_snapshot, "object", "resolveSkillTools should return requested browser_snapshot");

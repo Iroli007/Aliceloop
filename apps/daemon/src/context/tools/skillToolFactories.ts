@@ -1,4 +1,3 @@
-import { createAudioUnderstandTool } from "./audioUnderstandTool";
 import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
 import { createChromeRelayTools } from "./chromeRelayTool";
@@ -22,7 +21,6 @@ const cachedBrowserTools = new Map<string, ToolSet>();
 const cachedChromeRelayTools = new Map<string, ToolSet>();
 const cachedWebFetchTools = new Map<string, ToolSet>();
 const cachedWebSearchTools = new Map<string, ToolSet>();
-const cachedAudioUnderstandTools = new Map<string, ToolSet>();
 const cachedViewImageTools = new Map<string, ToolSet>();
 
 interface SkillToolFactoryOptions {
@@ -81,18 +79,6 @@ function getWebSearchToolSet(sessionId?: string) {
   return tools;
 }
 
-function getAudioUnderstandToolSet(sessionId?: string) {
-  const cacheKey = getSessionCacheKey(sessionId);
-  const existing = cachedAudioUnderstandTools.get(cacheKey);
-  if (existing) {
-    return existing;
-  }
-
-  const tools = createAudioUnderstandTool(sessionId);
-  cachedAudioUnderstandTools.set(cacheKey, tools);
-  return tools;
-}
-
 function getViewImageToolSet(sessionId?: string) {
   const cacheKey = getSessionCacheKey(sessionId);
   const existing = cachedViewImageTools.get(cacheKey);
@@ -139,7 +125,6 @@ const CHROME_RELAY_TOOL_NAMES = new Set([
 
 // Tool name -> factory, each factory returns { [toolName]: tool({...}) }
 const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) => ToolSet>([
-  ["audio_understand", (options) => getAudioUnderstandToolSet(options?.sessionId)],
   ["browser_find", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_navigate", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_snapshot", (options) => getBrowserToolSet(options?.sessionId)],
@@ -233,6 +218,5 @@ export function resetSkillToolCache() {
   cachedChromeRelayTools.clear();
   cachedWebFetchTools.clear();
   cachedWebSearchTools.clear();
-  cachedAudioUnderstandTools.clear();
   cachedViewImageTools.clear();
 }

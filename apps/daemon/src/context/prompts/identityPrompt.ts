@@ -7,11 +7,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function resolvePromptRoot() {
   const candidates = [
+    process.env.ALICELOOP_PROMPTS_DIR?.trim(),
     __dirname,
     resolve(__dirname, "../src/context/prompts"),
     resolve(process.cwd(), "src/context/prompts"),
     resolve(process.cwd(), "apps/daemon/src/context/prompts"),
-  ];
+  ].filter((candidate): candidate is string => Boolean(candidate));
 
   for (const candidate of candidates) {
     if (existsSync(join(candidate, "IDENTITY.md"))) {
