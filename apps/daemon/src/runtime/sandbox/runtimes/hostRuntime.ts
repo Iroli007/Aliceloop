@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { lstat, mkdir, readFile, readdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -27,10 +28,25 @@ import {
 } from "../types";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 const projectRoot = getSandboxProjectRoot();
-const tsxCliPath = resolve(projectRoot, "node_modules/tsx/dist/cli.mjs");
-const daemonPackageRoot = resolve(projectRoot, "apps/daemon");
-const daemonDistCliPath = resolve(daemonPackageRoot, "dist/cli/index.js");
+const tsxCliPath = (() => {
+  try {
+    return require.resolve("tsx/dist/cli.mjs");
+  } catch {
+    return resolve(projectRoot, "node_modules/tsx/dist/cli.mjs");
+  }
+})();
+const daemonServerEntryPath = (() => {
+  try {
+    return require.resolve("@aliceloop/daemon/server");
+  } catch {
+    return null;
+  }
+})();
+const daemonDistRoot = daemonServerEntryPath ? dirname(daemonServerEntryPath) : null;
+const daemonPackageRoot = daemonDistRoot ? resolve(daemonDistRoot, "..") : resolve(projectRoot, "apps/daemon");
+const daemonDistCliPath = daemonDistRoot ? resolve(daemonDistRoot, "cli/index.js") : resolve(daemonPackageRoot, "dist/cli/index.js");
 const daemonSourceCliPath = resolve(daemonPackageRoot, "src/cli/index.ts");
 const runtimeBinDir = resolve(getDataDir(), "runtime-bin");
 const aliceloopShimPath = resolve(runtimeBinDir, "aliceloop");
@@ -53,6 +69,11 @@ function pickEnvironment() {
     "ALICELOOP_DAEMON_PORT",
     "ALICELOOP_DAEMON_URL",
     "ALICELOOP_DATA_DIR",
+    "ALICELOOP_DEFAULT_WORKSPACE_DIR",
+    "ALICELOOP_PROMPTS_DIR",
+    "ALICELOOP_RUNTIME_SCRIPTS_DIR",
+    "ALICELOOP_SKILLS_DIR",
+    "ELECTRON_RUN_AS_NODE",
     "HOME",
     "LANG",
     "LC_ALL",
@@ -72,6 +93,10 @@ function pickEnvironment() {
   if (shimDir) {
     const currentPath = env.PATH?.trim();
     env.PATH = currentPath ? `${shimDir}:${currentPath}` : shimDir;
+  }
+
+  if (process.versions.electron && !env.ELECTRON_RUN_AS_NODE) {
+    env.ELECTRON_RUN_AS_NODE = "1";
   }
 
   return env;

@@ -7,7 +7,7 @@ import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { generateMusicSketch } from "../services/musicSketchService";
-import { analyzeVideoFile } from "../services/multimodalAnalysisService";
+import { analyzeAudioFile, analyzeVideoFile } from "../services/multimodalAnalysisService";
 
 interface CliIO {
   stdout: (message: string) => void;
@@ -275,6 +275,7 @@ function usage() {
     "  aliceloop voice list",
     "  aliceloop voice speak <text> [--voice <name>] [--rate <wpm>]",
     "  aliceloop voice save <output> <text> [--voice <name>] [--rate <wpm>]",
+    "  aliceloop audio analyze <path> [prompt] [--keep-artifacts]",
     "  aliceloop image generate <prompt> [--provider <id>] [--model <name>] [--size <WxH>] [--output <path>]",
     "  aliceloop video analyze <path> [prompt] [--keep-artifacts]",
     "  aliceloop telegram me [--token <botToken>]",
@@ -1488,6 +1489,31 @@ async function handleImage(args: string[]) {
   throw new CliError(`Unknown image command: ${action ?? "(missing)"}\n\n${usage()}`);
 }
 
+async function handleAudio(args: string[]) {
+  const action = args[0];
+
+  if (action === "analyze") {
+    const { positionals, flags } = parseFlagArgs(args.slice(1));
+    const filePath = positionals[0]?.trim();
+    const prompt = positionals.slice(1).join(" ").trim();
+    if (!filePath) {
+      throw new CliError("audio analyze requires a file path");
+    }
+
+    try {
+      return await analyzeAudioFile({
+        path: filePath,
+        prompt: prompt || undefined,
+        keepArtifacts: flags["keep-artifacts"] === "true",
+      });
+    } catch (error) {
+      throw new CliError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  throw new CliError(`Unknown audio command: ${action ?? "(missing)"}\n\n${usage()}`);
+}
+
 async function handleVideo(args: string[]) {
   const action = args[0];
 
@@ -1707,6 +1733,9 @@ export async function runCli(args: string[], io: CliIO = defaultIo) {
         break;
       case "voice":
         result = await handleVoice(args.slice(1));
+        break;
+      case "audio":
+        result = await handleAudio(args.slice(1));
         break;
       case "image":
         result = await handleImage(args.slice(1));

@@ -22,6 +22,7 @@ function hasSkillMarkdown(candidate: string) {
 }
 
 const skillsRootDir = [
+  process.env.ALICELOOP_SKILLS_DIR?.trim(),
   resolve(currentDir, "../../../../../skills"),
   resolve(process.cwd(), "skills"),
   resolve(process.cwd(), "../skills"),
@@ -30,7 +31,7 @@ const skillsRootDir = [
   resolve(currentDir, "../src/context/skills"),
   resolve(process.cwd(), "src/context/skills"),
   resolve(process.cwd(), "apps/daemon/src/context/skills"),
-].find(hasSkillMarkdown) ?? currentDir;
+].filter((candidate): candidate is string => Boolean(candidate)).find(hasSkillMarkdown) ?? currentDir;
 
 type FrontmatterValue = string | string[];
 

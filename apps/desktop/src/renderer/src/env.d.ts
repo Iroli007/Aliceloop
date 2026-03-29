@@ -8,6 +8,13 @@ declare global {
         name: string;
         version: string;
         desktopCapabilities?: unknown;
+        publicPaths?: {
+          publicRootDir: string;
+          workspaceDir: string;
+          skillsDir: string;
+          scriptsDir: string;
+          chromeExtensionDir: string;
+        };
       }>;
       pingRuntime(): Promise<{
         ok: boolean;

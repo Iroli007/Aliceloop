@@ -18,9 +18,31 @@ Listen to and appreciate music files. Analyze audio for genre, mood, tempo, and 
 - User asks "what song is this" or "what do you think of this music"
 - User sends a voice note containing music
 
-## Tools Required
+## Primary Method: `aliceloop audio analyze`
 
-- **Bash** (for ffprobe, ffmpeg, whisper)
+### MANDATORY: Use `aliceloop audio analyze` first for local audio and music files.
+
+```bash
+aliceloop audio analyze "/path/to/audio.mp3" "Analyze this song's genre, mood, tempo, and lyrics if possible"
+```
+
+Custom prompts:
+
+```bash
+aliceloop audio analyze "/path/to/audio.mp3" "What genre is this and what does it remind you of?"
+aliceloop audio analyze "/path/to/audio.mp3" "Transcribe the lyrics and summarize the theme"
+aliceloop audio analyze "/path/to/audio.mp3" "Comment on the sonic texture, bass, and rhythm"
+```
+
+This command requires a configured Gemini provider. It extracts metadata, generates a spectrogram, optionally transcribes vocals with Whisper if available, and then synthesizes an answer.
+
+## Manual Fallback
+
+Only drop to manual shell steps if `aliceloop audio analyze` fails and you still need to salvage something.
+
+Tools available:
+
+- **Bash**
 - **Read**
 - `view_image`
 
@@ -62,7 +84,7 @@ Read(targetPath="/tmp/music_whisper/<file>.txt")
 
 Note: Whisper may struggle with singing. That's fine. Partial lyrics are still useful.
 
-### Step 4: Appreciate!
+### Step 4: Appreciate
 
 Combine all the info and share your thoughts naturally:
 
@@ -97,3 +119,4 @@ ffmpeg -i "<audio_file>" -ss 60 -t 120 -acodec pcm_s16le -ar 16000 -ac 1 "/tmp/m
 - The spectrogram tells you a lot: dense low frequencies = bass-heavy, bright high frequencies = crispy/airy, rhythmic patterns = beat structure.
 - Compare to well-known artists/songs when relevant ("reminds me of xxx's style").
 - If the user is sharing their own music, be encouraging but honest.
+- Do not skip `aliceloop audio analyze` and jump straight to manual `ffmpeg` work unless the command has already failed.

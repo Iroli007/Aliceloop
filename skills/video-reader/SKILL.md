@@ -42,7 +42,7 @@ Use this only if `aliceloop video analyze` fails and you still need to salvage s
 ffprobe -v error -show_entries format=duration:stream=codec_name,width,height -of json "$VIDEO_PATH"
 
 # Extract key frames (1 per second, max 12 frames)
-OUTDIR=/tmp/alma-frames-$(date +%s)
+OUTDIR=/tmp/aliceloop-frames-$(date +%s)
 mkdir -p "$OUTDIR"
 DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO_PATH" | cut -d. -f1)
 FPS_RATE=$(echo "scale=2; 12 / $DURATION" | bc 2>/dev/null || echo "1")
@@ -61,17 +61,17 @@ view_image(path="$OUTDIR/grid.jpg")
 
 ```bash
 # Extract audio
-AUDIO_PATH="/tmp/alma-audio-$(date +%s).wav"
+AUDIO_PATH="/tmp/aliceloop-video-audio-$(date +%s).wav"
 ffmpeg -hide_banner -loglevel error -i "$VIDEO_PATH" -vn -acodec pcm_s16le -ar 16000 -ac 1 "$AUDIO_PATH"
 
 # Transcribe
-whisper "$AUDIO_PATH" --model turbo --output_format txt --output_dir /tmp/alma-whisper
+whisper "$AUDIO_PATH" --model turbo --output_format txt --output_dir /tmp/aliceloop-whisper
 ```
 
 Then read the transcript:
 
 ```text
-Read(targetPath="/tmp/alma-whisper/<file>.txt")
+Read(targetPath="/tmp/aliceloop-whisper/<file>.txt")
 ```
 
 ### Thumbnail Grid (quick overview)
@@ -90,7 +90,7 @@ ffmpeg -hide_banner -loglevel error -i "$VIDEO_PATH" \
 4. **Always clean up**:
 
 ```bash
-rm -rf "$OUTDIR" /tmp/alma-whisper "$AUDIO_PATH"
+rm -rf "$OUTDIR" /tmp/aliceloop-whisper "$AUDIO_PATH"
 ```
 
 NEVER skip step 1. If you find yourself writing `ffmpeg` or `ffprobe` for video analysis without first trying `aliceloop video analyze`, you are doing it wrong.

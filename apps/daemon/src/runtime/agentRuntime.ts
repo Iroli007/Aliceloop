@@ -295,12 +295,16 @@ function sanitizeAssistantTextForChat(value: string) {
 
 function getRenderableAssistantText(providerId: string, value: string, final = false) {
   const sanitized = sanitizeAssistantTextForChat(value);
-  if (providerId !== "minimax") {
+  const trimmed = sanitized.trimStart();
+  if (!trimmed) {
     return sanitized;
   }
 
-  const trimmed = sanitized.trimStart();
-  if (!trimmed || final) {
+  if (!final && (/\[TOOL_CALL\]/iu.test(trimmed) || /<tool_call>/iu.test(trimmed))) {
+    return null;
+  }
+
+  if (providerId !== "minimax" || final) {
     return sanitized;
   }
 

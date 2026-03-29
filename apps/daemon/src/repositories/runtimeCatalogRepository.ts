@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -14,18 +15,37 @@ import { getRuntimePresence } from "./sessionRepository";
 import { getQueuedSessionCount } from "../services/sessionRunQueue";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 
-function resolveExistingPath(candidates: string[]) {
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+function resolveExistingPath(candidates: Array<string | undefined>, fallbackPath: string) {
+  return candidates.find((candidate): candidate is string => {
+    if (!candidate) {
+      return false;
+    }
+
+    return existsSync(candidate);
+  })
+    ?? candidates.find((candidate): candidate is string => Boolean(candidate))
+    ?? fallbackPath;
 }
 
 const runtimeScriptsDir = resolveExistingPath([
+  process.env.ALICELOOP_RUNTIME_SCRIPTS_DIR?.trim(),
   resolve(currentDir, "../../runtime-scripts"),
   resolve(currentDir, "../runtime-scripts"),
-]);
+], currentDir);
 const daemonRoot = dirname(runtimeScriptsDir);
 const workspaceRoot = resolve(daemonRoot, "../..");
-const tsxCliPath = resolve(workspaceRoot, "node_modules/tsx/dist/cli.mjs");
+const defaultWorkspaceRoot = process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR?.trim()
+  ? resolve(process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR)
+  : workspaceRoot;
+const tsxCliPath = (() => {
+  try {
+    return require.resolve("tsx/dist/cli.mjs");
+  } catch {
+    return resolve(workspaceRoot, "node_modules/tsx/dist/cli.mjs");
+  }
+})();
 
 interface StoredRuntimeScriptDefinition extends RuntimeScriptDefinition {
   entryPath: string;
@@ -44,7 +64,7 @@ const runtimeScripts: StoredRuntimeScriptDefinition[] = [
     usesSandbox: true,
     defaultArgs: [],
     entryPath: join(runtimeScriptsDir, "runtime-overview.ts"),
-    defaultCwd: workspaceRoot,
+    defaultCwd: defaultWorkspaceRoot,
     launchCommand: "node",
     launchArgsPrefix: [tsxCliPath],
   },
@@ -57,7 +77,7 @@ const runtimeScripts: StoredRuntimeScriptDefinition[] = [
     usesSandbox: true,
     defaultArgs: [],
     entryPath: join(runtimeScriptsDir, "data-dir-scan.ts"),
-    defaultCwd: workspaceRoot,
+    defaultCwd: defaultWorkspaceRoot,
     launchCommand: "node",
     launchArgsPrefix: [tsxCliPath],
   },

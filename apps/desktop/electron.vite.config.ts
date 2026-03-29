@@ -7,7 +7,7 @@ export default defineConfig({
     build: {
       outDir: "dist/main",
       rollupOptions: {
-        external: ["playwright-core"],
+        external: ["bindings", "better-sqlite3", "playwright-core"],
       },
     },
   },

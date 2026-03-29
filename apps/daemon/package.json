@@ -3,13 +3,18 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "exports": {
+    "./server": {
+      "import": "./dist/server.js"
+    }
+  },
   "bin": {
     "aliceloop": "./dist/cli/index.js"
   },
   "description": "Local runtime daemon for Aliceloop.",
   "scripts": {
-    "build": "tsup src/index.ts src/cli/index.ts --dts --format esm --out-dir dist",
-    "dev": "tsx watch src/index.ts",
+    "build": "tsup src/index.ts src/cli/index.ts src/server.ts --dts --format esm --out-dir dist --external ws --external bufferutil --external utf-8-validate --external better-sqlite3 --external bindings",
+    "dev": "ALICELOOP_DAEMON_PORT=3031 ALICELOOP_CHROME_RELAY_PORT=23101 tsx src/index.ts",
     "smoke:all": "npm run smoke:queue && npm run smoke:sandbox && npm run smoke:skills && npm run smoke:cli && npm run smoke:tasks && npm run smoke:tasks:api && npm run smoke:memory",
     "smoke:cli": "tsx scripts/cliSmoke.ts",
     "smoke:desktop-relay": "tsx scripts/desktopChromeRelaySmoke.ts",
@@ -33,6 +38,7 @@
     "ai": "^6.0.116",
     "better-sqlite3": "^12.2.0",
     "fastify": "^5.4.0",
+    "tsx": "^4.20.3",
     "turndown": "^7.2.2",
     "zod": "^4.3.6"
   },
@@ -41,7 +47,6 @@
     "@types/node": "^24.0.10",
     "@types/turndown": "^5.0.6",
     "tsup": "^8.5.0",
-    "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }
 }

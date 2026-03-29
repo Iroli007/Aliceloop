@@ -242,17 +242,10 @@ export function SettingsPanel() {
             <h3 className="settings-section-title" style={{ margin: 0 }}>Skills</h3>
             <button
               className="settings-actions__button"
-              onClick={() => void runtimeCatalogs.refresh()}
+              onClick={() => window.location.reload()}
               style={{ padding: "6px 12px", fontSize: "13px" }}
             >
               🔄 Refresh
-            </button>
-            <button
-              className="settings-actions__button"
-              onClick={() => void desktopBridge.openExternal("file://" + desktopBridge.getSkillsPath?.() ?? "")}
-              style={{ padding: "6px 12px", fontSize: "13px" }}
-            >
-              📁 Open Folder
             </button>
           </div>
           <div className="settings-panel">
@@ -274,7 +267,6 @@ export function SettingsPanel() {
                     {" · "}
                     {skill.allowedTools.length > 0 ? skill.allowedTools.join(" / ") : "no tools listed"}
                   </span>
-                  <span>{skill.sourcePath}</span>
                   {skill.sourceUrl ? (
                     <a href={skill.sourceUrl} target="_blank" rel="noreferrer">
                       source

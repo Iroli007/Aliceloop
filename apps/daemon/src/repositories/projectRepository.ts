@@ -20,12 +20,14 @@ interface ProjectRow {
 }
 
 function getBuiltInProjectDefinitions() {
-  const workspacesRoot = join(getDataDir(), "workspaces");
+  const workspacePath = process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR?.trim()
+    ? resolve(process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR)
+    : join(getDataDir(), "workspaces", "default");
   return [
     {
       id: "workspace-default",
       name: "Default",
-      path: join(workspacesRoot, "default"),
+      path: workspacePath,
       kind: "workspace" as const,
       isDefault: 1,
     },

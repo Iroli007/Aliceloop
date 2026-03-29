@@ -1,18 +1,93 @@
 import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { focusOrCreateSettingsWindow } from "./settingsWindow";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { getDesktopPublicPaths, prepareManagedDesktopRuntime, type DesktopPublicPaths } from "./runtimePaths";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
-const daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? "http://127.0.0.1:3030";
+type ManagedDaemonServer = {
+  close(): Promise<unknown>;
+};
+
+const defaultDaemonPort = app.isPackaged ? 3030 : 3031;
+if (!app.isPackaged) {
+  app.setPath("userData", join(app.getPath("appData"), "@aliceloop/desktop-dev"));
+}
+
+let daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? `http://127.0.0.1:${defaultDaemonPort}`;
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL;
 const debugCaptureEnabled = process.env.ALICELOOP_DEBUG_CAPTURE === "1";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 let desktopHeartbeatTimer: NodeJS.Timeout | null = null;
+let managedDaemonServer: ManagedDaemonServer | null = null;
+let desktopPublicPaths: DesktopPublicPaths = getDesktopPublicPaths();
+
+async function prunePackagedCaches() {
+  if (!app.isPackaged) {
+    return;
+  }
+
+  const userDataDir = app.getPath("userData");
+  const targets = [
+    join(userDataDir, "Cache"),
+    join(userDataDir, "Code Cache"),
+    join(userDataDir, "GPUCache"),
+    join(userDataDir, "DawnGraphiteCache"),
+    join(userDataDir, "DawnWebGPUCache"),
+    join(userDataDir, "browser-screenshots"),
+    join(userDataDir, "chrome-relay-profile", "Safe Browsing"),
+    join(userDataDir, "chrome-relay-profile", "component_crx_cache"),
+    join(userDataDir, "chrome-relay-profile", "optimization_guide_model_store"),
+    join(userDataDir, "chrome-relay-profile", "GraphiteDawnCache"),
+    join(userDataDir, "chrome-relay-profile", "GrShaderCache"),
+    join(userDataDir, "chrome-relay-profile", "ShaderCache"),
+    join(userDataDir, "chrome-relay-profile", "WasmTtsEngine"),
+    join(userDataDir, "chrome-relay-profile", "Default", "GPUCache"),
+    join(userDataDir, "chrome-relay-profile", "Default", "DawnGraphiteCache"),
+    join(userDataDir, "chrome-relay-profile", "Default", "DawnWebGPUCache"),
+    join(userDataDir, "chrome-relay-profile", "Default", "Service Worker"),
+  ];
+
+  await Promise.all(targets.map((target) => rm(target, { recursive: true, force: true })));
+}
+
+async function startManagedDaemonIfNeeded() {
+  if (!app.isPackaged || process.env.ALICELOOP_DAEMON_URL?.trim() || managedDaemonServer) {
+    return;
+  }
+
+  await prunePackagedCaches();
+  const runtimePaths = await prepareManagedDesktopRuntime();
+  desktopPublicPaths = runtimePaths;
+  daemonBaseUrl = runtimePaths.baseUrl;
+  process.env.ALICELOOP_DAEMON_URL = runtimePaths.baseUrl;
+  process.env.ALICELOOP_DAEMON_HOST = "127.0.0.1";
+  process.env.ALICELOOP_DAEMON_PORT = String(defaultDaemonPort);
+  process.env.ALICELOOP_CHROME_RELAY_PORT = "23001";
+  process.env.ALICELOOP_DATA_DIR = runtimePaths.dataDir;
+  process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR = runtimePaths.workspaceDir;
+  process.env.ALICELOOP_SKILLS_DIR = runtimePaths.skillsDir;
+  process.env.ALICELOOP_RUNTIME_SCRIPTS_DIR = runtimePaths.scriptsDir;
+  process.env.ALICELOOP_PROMPTS_DIR = runtimePaths.promptsDir;
+
+  const { createServer } = await import("../../../daemon/src/server");
+  const server = await createServer();
+  await server.listen({
+    host: "127.0.0.1",
+    port: defaultDaemonPort,
+  });
+  managedDaemonServer = server;
+
+  console.info("[aliceloop-desktop] managed daemon started", JSON.stringify({
+    baseUrl: daemonBaseUrl,
+    dataDir: runtimePaths.dataDir,
+    publicRootDir: runtimePaths.publicRootDir,
+  }));
+}
 
 async function getStableDesktopDeviceId() {
   const filePath = join(app.getPath("userData"), "desktop-device-id");
@@ -380,6 +455,7 @@ ipcMain.handle("app:get-meta", () => ({
   daemonBaseUrl,
   name: app.getName(),
   version: app.getVersion(),
+  publicPaths: desktopPublicPaths,
 }));
 
 ipcMain.handle("runtime:ping", async () => {
@@ -498,7 +574,8 @@ ipcMain.handle("window:open-settings", () => {
   focusOrCreateSettingsWindow();
 });
 
-app.whenReady().then(() => {
+void app.whenReady().then(async () => {
+  await startManagedDaemonIfNeeded();
   startDesktopHeartbeatLoop();
   createWindow();
 
@@ -507,6 +584,9 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+}).catch((error) => {
+  console.error("[aliceloop-desktop] failed to initialize", error);
+  app.quit();
 });
 
 app.on("window-all-closed", () => {
@@ -519,5 +599,12 @@ app.on("before-quit", () => {
   if (desktopHeartbeatTimer) {
     clearInterval(desktopHeartbeatTimer);
     desktopHeartbeatTimer = null;
+  }
+
+  if (managedDaemonServer) {
+    void managedDaemonServer.close().catch((error) => {
+      console.error("[aliceloop-desktop] failed to stop managed daemon", error);
+    });
+    managedDaemonServer = null;
   }
 });

@@ -4375,16 +4375,6 @@ button {
   background: transparent;
 }
 
-.thinking-indicator__text {
-  display: block;
-  font-size: 13px;
-  font-weight: 600;
-  font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
-  line-height: 1.4;
-  letter-spacing: 0.02em;
-  color: #111111;
-}
-
 /* Skills Settings */
 .settings-skills {
   display: flex;

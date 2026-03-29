@@ -3,6 +3,7 @@ import "./ThinkingIndicator.css";
 
 interface ThinkingIndicatorProps {
   thinkingSteps?: string[];
+  currentToolName?: string | null;
 }
 
 const toolActivityLabelMap: Record<string, string> = {
@@ -58,15 +59,45 @@ function toThinkingActivity(step: string) {
   return backendLabel ? `${activity} via ${backendLabel}` : activity;
 }
 
-export function ThinkingIndicator({ thinkingSteps = [] }: ThinkingIndicatorProps) {
+export function ThinkingIndicator({ thinkingSteps = [], currentToolName = null }: ThinkingIndicatorProps) {
+  const activities = useMemo(() => {
+    const next = Array.from(new Set(thinkingSteps.map((step) => toThinkingActivity(step))));
+    if (next.length === 0 && currentToolName) {
+      next.push(toolActivityLabelMap[currentToolName] ?? `Using ${humanizeIdentifier(currentToolName)}`);
+    }
+    return next;
+  }, [currentToolName, thinkingSteps]);
+  const [stickyActivities, setStickyActivities] = useState<string[]>(activities);
+
+  useEffect(() => {
+    if (activities.length > 0) {
+      setStickyActivities(activities);
+      return;
+    }
+
+    if (stickyActivities.length === 0) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setStickyActivities([]);
+    }, 1400);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [activities, stickyActivities.length]);
+
   const rotationFrames = useMemo(() => {
-    const activities = Array.from(new Set(thinkingSteps.map((step) => toThinkingActivity(step))));
-    if (activities.length === 0) {
+    if (stickyActivities.length === 0) {
       return ["* Thinking..."];
     }
 
-    return ["* Thinking...", ...activities.map((activity) => `* ${activity}...`)];
-  }, [thinkingSteps]);
+    return [
+      ...stickyActivities.map((activity) => `* ${activity}...`),
+      "* Thinking...",
+    ];
+  }, [stickyActivities]);
   const rotationKey = rotationFrames.join("||");
   const [frameIndex, setFrameIndex] = useState(0);
 
