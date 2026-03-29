@@ -106,10 +106,13 @@ function getViewImageToolSet(sessionId?: string) {
 }
 
 const BROWSER_TOOL_NAMES = new Set([
+  "browser_find",
   "browser_navigate",
   "browser_snapshot",
+  "browser_wait",
   "browser_click",
   "browser_type",
+  "browser_scroll",
   "browser_screenshot",
   "browser_media_probe",
   "browser_video_watch_start",
@@ -136,10 +139,13 @@ const CHROME_RELAY_TOOL_NAMES = new Set([
 // Tool name -> factory, each factory returns { [toolName]: tool({...}) }
 const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) => ToolSet>([
   ["audio_understand", (options) => getAudioUnderstandToolSet(options?.sessionId)],
+  ["browser_find", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_navigate", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_snapshot", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_wait", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_click", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_type", (options) => getBrowserToolSet(options?.sessionId)],
+  ["browser_scroll", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_screenshot", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_media_probe", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_video_watch_start", (options) => getBrowserToolSet(options?.sessionId)],

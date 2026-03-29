@@ -126,8 +126,6 @@ async function main() {
     { createBrowserTools },
     { createWebFetchTool },
     { createWebSearchTool },
-    { getBrowserSession },
-    { playwrightBrowserBackend },
   ] = await Promise.all([
     import("../../desktop/src/main/chromeRelayService.ts"),
     import("../../desktop/src/main/chromeRelayHttpServer.ts"),
@@ -135,8 +133,6 @@ async function main() {
     import("../src/context/tools/browserTool.ts"),
     import("../src/context/tools/webFetchTool.ts"),
     import("../src/context/tools/webSearchTool.ts"),
-    import("../src/context/tools/browserSessionRegistry.ts"),
-    import("../src/context/tools/playwrightBrowserBackend.ts"),
   ]);
 
   const relayUserData = mkdtempSync(join(tmpdir(), "aliceloop-relay-bench-user-"));
@@ -247,51 +243,6 @@ async function main() {
   });
 
   await relayServer.stop();
-
-  const fallbackSession = createSession("fallback relay benchmark");
-  const fallbackBrowserTools = createBrowserTools(fallbackSession.id);
-  const fallbackFetchTool = createWebFetchTool(fallbackSession.id).web_fetch;
-  const fallbackSearchTool = createWebSearchTool(fallbackSession.id).web_search;
-
-  const fallbackColdNavigate = await measure(async () => {
-    const payload = JSON.parse(await fallbackBrowserTools.browser_navigate.execute({ url: formUrl })) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "playwright");
-    return payload;
-  });
-
-  const fallbackWarmNavigate = await repeat(3, async () => {
-    const payload = JSON.parse(await fallbackBrowserTools.browser_navigate.execute({ url: articleUrl })) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "playwright");
-    return payload;
-  });
-
-  const fallbackSnapshotRuns = await repeat(3, async () => {
-    const payload = JSON.parse(await fallbackBrowserTools.browser_snapshot.execute({})) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "playwright");
-    return payload;
-  });
-
-  const fallbackFetchRuns = await repeat(3, async () => {
-    const output = await fallbackFetchTool.execute({
-      url: articleUrl,
-      extractMain: true,
-      maxLength: 5000,
-    });
-    assert.doesNotMatch(output, /Fetch Backend: desktop_chrome/);
-    return output;
-  });
-
-  const fallbackSearchRuns = await repeat(3, async () => {
-    const output = JSON.parse(await fallbackSearchTool.execute({
-      query: "relay benchmark",
-      maxResults: 3,
-      domains: [],
-    })) as SearchPayload;
-    assert.equal(output.backend, "http_fetch");
-    return output;
-  });
-
-  await playwrightBrowserBackend.disposeSession(getBrowserSession(fallbackSession.id));
   await new Promise<void>((resolve, reject) => {
     pageServer.close((error) => {
       if (error) {
@@ -316,15 +267,6 @@ async function main() {
       browserScreenshotWarm: screenshotRuns.summary,
       webFetch: desktopFetchRuns.summary,
       webSearch: desktopSearchRuns.summary,
-    },
-    fallback: {
-      browserBackend: "playwright",
-      researchBackend: "http_fetch",
-      browserNavigateColdMs: fallbackColdNavigate.durationMs,
-      browserNavigateWarm: fallbackWarmNavigate.summary,
-      browserSnapshotWarm: fallbackSnapshotRuns.summary,
-      webFetch: fallbackFetchRuns.summary,
-      webSearch: fallbackSearchRuns.summary,
     },
   }, null, 2));
 }

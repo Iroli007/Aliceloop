@@ -49,7 +49,7 @@ browser_type(ref="...", text="...")
 browser_screenshot()
 ```
 
-The browser skill prefers a visible Aliceloop Desktop Chrome relay with persistent login state when available, and otherwise falls back to local Playwright. For supported structured site adapters, the browser path may also use OpenCLI after the native browser path is ruled out.
+The browser skill prefers a visible Aliceloop Desktop Chrome relay with persistent login state when available, and otherwise falls back to the local browser backend. For supported structured site adapters, the browser path may also use OpenCLI after the native browser path is ruled out.
 
 ## Tips
 

@@ -1,5 +1,5 @@
 import type { BrowserRelayCapability } from "@aliceloop/runtime-core";
-import { getHealthyBrowserRelayDevice } from "../../repositories/sessionRepository";
+import { getDaemonChromeRelayCapability, hasHealthyDaemonChromeRelay } from "../../services/chromeRelayManager";
 
 export interface DesktopRelayReadablePayload {
   url: string;
@@ -28,7 +28,6 @@ export interface DesktopRelaySearchPayload {
 interface ResearchTabRecord {
   tabId: string;
   relayBaseUrl: string;
-  relayToken: string;
   lastUsedAt: number;
 }
 
@@ -36,7 +35,7 @@ const researchTabs = new Map<string, ResearchTabRecord>();
 const RESEARCH_TAB_TTL_MS = 2 * 60 * 1000;
 
 function getHealthyBrowserRelayCapability(): BrowserRelayCapability | null {
-  return getHealthyBrowserRelayDevice()?.capabilities?.browserRelay ?? null;
+  return getDaemonChromeRelayCapability();
 }
 
 async function requestRelay<T>(
@@ -48,7 +47,6 @@ async function requestRelay<T>(
     ...init,
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${relay.token}`,
       ...(init?.headers ?? {}),
     },
   });
@@ -91,15 +89,13 @@ async function closeRelayTab(relay: BrowserRelayCapability, tabId: string) {
 
 async function closeStaleResearchTabs(activeRelay: BrowserRelayCapability | null, now = Date.now()) {
   for (const [sessionId, tab] of researchTabs) {
-    const relayChanged = !activeRelay
-      || tab.relayBaseUrl !== activeRelay.baseUrl
-      || tab.relayToken !== activeRelay.token;
+    const relayChanged = !activeRelay || tab.relayBaseUrl !== activeRelay.baseUrl;
     const stale = now - tab.lastUsedAt > RESEARCH_TAB_TTL_MS;
     if (!relayChanged && !stale) {
       continue;
     }
 
-    if (activeRelay && tab.relayBaseUrl === activeRelay.baseUrl && tab.relayToken === activeRelay.token) {
+    if (activeRelay && tab.relayBaseUrl === activeRelay.baseUrl) {
       await closeRelayTab(activeRelay, tab.tabId);
     }
     researchTabs.delete(sessionId);
@@ -108,7 +104,7 @@ async function closeStaleResearchTabs(activeRelay: BrowserRelayCapability | null
 
 async function ensureResearchTab(sessionId: string, relay: BrowserRelayCapability) {
   const existing = researchTabs.get(sessionId);
-  if (existing && existing.relayBaseUrl === relay.baseUrl && existing.relayToken === relay.token) {
+  if (existing && existing.relayBaseUrl === relay.baseUrl) {
     existing.lastUsedAt = Date.now();
     return existing.tabId;
   }
@@ -117,7 +113,6 @@ async function ensureResearchTab(sessionId: string, relay: BrowserRelayCapabilit
   researchTabs.set(sessionId, {
     tabId,
     relayBaseUrl: relay.baseUrl,
-    relayToken: relay.token,
     lastUsedAt: Date.now(),
   });
   return tabId;
@@ -231,7 +226,7 @@ export async function readRelaySearchResults(
 }
 
 export function hasHealthyDesktopRelay() {
-  return Boolean(getHealthyBrowserRelayCapability());
+  return hasHealthyDaemonChromeRelay();
 }
 
 export async function disposeDesktopRelayResearchTabs() {

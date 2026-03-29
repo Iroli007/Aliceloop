@@ -1,9 +1,10 @@
 ---
 name: web-fetch
-description: Fetch and read a known URL, API response, or document. Use when exact page content matters more than discovery.
+description: Fetch and read web pages, APIs, and online content. Use when users share URLs or ask about web content.
 allowed-tools:
   - Bash
   - WebFetch
+  - ChromeRelayStatus
   - ChromeRelayNavigate
   - ChromeRelayRead
   - ChromeRelayReadDom
@@ -14,54 +15,58 @@ allowed-tools:
   - ChromeRelayEval
 ---
 
-# Web Fetch
+# Web Fetch Skill
 
-Fetch web content using the best available method, in priority order.
+Fetch web content using the best available method, in priority order:
 
-## 1. Chrome Relay (Primary - always try this first)
+## 1. Chrome Relay (Primary — always try this first)
 
-Use the desktop Chrome relay tools for all web fetching when you need authenticated state, live rendering, or explicit tab control.
+Use **Chrome Relay** tools for all web fetching. Chrome Relay controls the user's real Chrome browser with existing sessions, cookies, and logins — critical for sites that require authentication (Twitter/X, GitHub, email, etc.).
 
-```text
-chrome_relay_status()
-chrome_relay_list_tabs()
-chrome_relay_open(url="https://example.com")
-chrome_relay_navigate(url="https://x.com/notifications")
-chrome_relay_read()
-chrome_relay_read_dom()
-chrome_relay_click(ref="...")
-chrome_relay_screenshot()
-chrome_relay_scroll(direction="down")
-chrome_relay_eval(expression="document.title")
+```
+# List open tabs
+ChromeRelayListTabs()
+
+# Navigate to a URL (opens in existing or new tab)
+ChromeRelayNavigate(url="https://x.com/notifications", tabId=<id>)
+
+# Read page content as clean text
+ChromeRelayRead(tabId=<id>)
+
+# Read page DOM structure
+ChromeRelayReadDom(tabId=<id>)
+
+# Take a screenshot
+ChromeRelayScreenshot(tabId=<id>)
+
+# Click elements
+ChromeRelayClick(tabId=<id>, selector="button.load-more")
+
+# Scroll the page
+ChromeRelayScroll(tabId=<id>, direction="down")
 ```
 
-Always start with Chrome relay when the page may depend on:
-
-- authenticated pages such as Twitter/X, GitHub, Google, or webmail
+**Always start with Chrome Relay.** It handles:
+- Authenticated pages (Twitter/X, GitHub, Google, etc.)
 - JavaScript-rendered SPAs
-- pages behind login walls
-- pages that need clicks, screenshots, scrolling, DOM inspection, or multi-step interaction
+- Anti-bot protections (using real Chrome fingerprint)
+- Pages behind login walls
 
-## 2. Web Fetch Tool (Fallback for simple/public pages)
+## 2. WebFetch Tool (Fallback for simple/public pages)
 
-If Chrome relay is unavailable, or the page is simple public content, fall back to `web_fetch`:
+If Chrome Relay is not connected or the page is simple public content, fall back to **WebFetch**:
 
-```text
-web_fetch(url="https://example.com/article")
+```
+WebFetch(url="https://example.com/article", prompt="Extract the main content")
 ```
 
-- Renders public pages into readable text
-- Good for articles, docs, APIs, release notes, and simple public content
-- No login/session capability
-
-## Browser Skill
-
-If the task becomes full browser automation rather than tab reading, switch to the browser skill. That path can use native `browser_*` tools for arbitrary pages or OpenCLI for supported structured site adapters.
+- Renders pages in Electron BrowserWindow with JavaScript
+- Good for public articles, docs, APIs
+- No authentication/login capability
 
 ## Tips
 
-- Chrome relay first when login state or live browser state matters.
-- Check `chrome_relay_list_tabs()` first if you expect an existing relay tab.
-- Use `chrome_relay_read()` for readable text and `chrome_relay_read_dom()` when you need refs or DOM structure.
-- Use `web_fetch` only for simple/public pages when relay is unnecessary or unavailable.
-- If you do not already have a concrete URL, go back to `web_search`.
+- **Chrome Relay first, always.** It has the user's real login sessions.
+- WebFetch only for public pages when Chrome Relay is unavailable.
+- For Twitter/X: ALWAYS use Chrome Relay — WebFetch cannot access authenticated Twitter content.
+- Check `ChromeRelayListTabs()` first to see if Chrome is connected and find existing tabs.

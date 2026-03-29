@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import type { ChromeRelayMeta } from "./chromeRelayTypes";
@@ -30,12 +29,6 @@ function writeJson(response: ServerResponse, statusCode: number, payload: unknow
   response.end(JSON.stringify(payload));
 }
 
-function unauthorized(response: ServerResponse) {
-  writeJson(response, 401, {
-    error: "unauthorized",
-  });
-}
-
 function badRequest(response: ServerResponse, detail: string) {
   writeJson(response, 400, {
     error: "bad_request",
@@ -53,15 +46,15 @@ function internalError(response: ServerResponse, error: unknown) {
 export class ChromeRelayHttpServer {
   private readonly service: ChromeRelayService;
 
-  private token: string;
+  private readonly onActivity?: () => void;
 
   private server: Server | null = null;
 
   private baseUrl: string | null = null;
 
-  constructor(service: ChromeRelayService) {
+  constructor(service: ChromeRelayService, onActivity?: () => void) {
     this.service = service;
-    this.token = randomUUID();
+    this.onActivity = onActivity;
   }
 
   getMeta(): ChromeRelayMeta | null {
@@ -69,7 +62,7 @@ export class ChromeRelayHttpServer {
       return null;
     }
 
-    return this.service.getCapability(this.baseUrl, this.token);
+    return this.service.getCapability(this.baseUrl);
   }
 
   getStatus() {
@@ -79,21 +72,13 @@ export class ChromeRelayHttpServer {
     };
   }
 
-  regenerateToken() {
-    this.token = randomUUID();
-    return this.getStatus();
-  }
-
   async launchChrome() {
     await this.service.launchChrome();
     return this.getStatus();
   }
 
-  private isAuthorized(request: IncomingMessage) {
-    return request.headers.authorization === `Bearer ${this.token}`;
-  }
-
   private async handleRequest(request: IncomingMessage, response: ServerResponse) {
+    this.onActivity?.();
     const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
 
     if (requestUrl.pathname === "/health" && request.method === "GET") {
@@ -102,11 +87,6 @@ export class ChromeRelayHttpServer {
         ok: true,
         browserRelay: meta?.browserRelay ?? null,
       });
-      return;
-    }
-
-    if (!this.isAuthorized(request)) {
-      unauthorized(response);
       return;
     }
 

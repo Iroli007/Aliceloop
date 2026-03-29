@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Chrome Relay - Settings</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      color: #1a1a1a;
+      background: #f5f5f5;
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 480px;
+      background: #ffffff;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      padding: 32px;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      color: #666;
+      font-size: 13px;
+      margin-bottom: 28px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: #333;
+      margin-bottom: 6px;
+    }
+
+    .label-hint {
+      font-weight: 400;
+      color: #999;
+      font-size: 12px;
+    }
+
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+      transition: border-color 0.15s;
+      outline: none;
+    }
+
+    input:focus {
+      border-color: #4A90D9;
+      box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .btn-save {
+      padding: 8px 24px;
+      background: #4A90D9;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-save:hover {
+      background: #3a7bc8;
+    }
+
+    .btn-save:active {
+      background: #2e6ab3;
+    }
+
+    .save-status {
+      font-size: 13px;
+      color: #4CAF50;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .save-status.visible {
+      opacity: 1;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid #eee;
+      margin: 24px 0;
+    }
+
+    .info-text {
+      font-size: 12px;
+      color: #999;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Chrome Relay</h1>
+    <p class="subtitle">Configure connection to the Aliceloop desktop app</p>
+
+    <div class="form-group">
+      <label for="port">
+        Relay Port
+        <span class="label-hint">(default: 23001)</span>
+      </label>
+      <input type="number" id="port" value="23001" min="1" max="65535">
+    </div>
+
+    <div class="actions">
+      <button class="btn-save" id="saveBtn">Save</button>
+      <span class="save-status" id="saveStatus">Settings saved</span>
+    </div>
+
+    <hr class="divider">
+
+    <p class="info-text">
+      The relay runs on the local machine. If Aliceloop is running on the same computer, the default port (23001) should work automatically.
+    </p>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

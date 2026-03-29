@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Browser, BrowserContext, Page } from "playwright-core";
@@ -27,6 +28,18 @@ const DEFAULT_AUDIO_CAPTURE_ROOT_NAME = "browser-watch-audio";
 
 function escapeAttributeValue(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function resolveRefLocator(page: Page, ref: string) {
+  const selector = `[data-aliceloop-ref="${escapeAttributeValue(ref)}"]`;
+  for (const frame of page.frames()) {
+    const locator = frame.locator(selector).first();
+    if ((await locator.count()) > 0) {
+      return locator;
+    }
+  }
+
+  return null;
 }
 
 function normalizeWaitUntil(value: string | undefined): BrowserWaitUntil {
@@ -62,10 +75,95 @@ async function collectSnapshot(
         return String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, limit);
       }
 
+      function getFrameElementForWindow(view) {
+        try {
+          return view && view.frameElement instanceof Element ? view.frameElement : null;
+        } catch {
+          return null;
+        }
+      }
+
       function isVisible(element) {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+        let currentElement = element;
+        while (currentElement) {
+          const view = currentElement.ownerDocument?.defaultView || window;
+          const style = view.getComputedStyle(currentElement);
+          const rect = currentElement.getBoundingClientRect();
+          if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) {
+            return false;
+          }
+
+          const frameElement = getFrameElementForWindow(view);
+          if (!frameElement) {
+            return true;
+          }
+
+          currentElement = frameElement;
+        }
+
+        return true;
+      }
+
+      function collectAccessibleRoots() {
+        const roots = [];
+        const seenRoots = new Set();
+        const seenDocuments = new Set();
+
+        function visit(root) {
+          if (!root || seenRoots.has(root)) {
+            return;
+          }
+
+          seenRoots.add(root);
+          roots.push(root);
+
+          const descendants = root.querySelectorAll ? Array.from(root.querySelectorAll("*")) : [];
+          for (const element of descendants) {
+            if (element.shadowRoot) {
+              visit(element.shadowRoot);
+            }
+
+            if (element.tagName === "IFRAME" || element.tagName === "FRAME") {
+              try {
+                const nestedDocument = element.contentDocument;
+                if (nestedDocument && !seenDocuments.has(nestedDocument)) {
+                  seenDocuments.add(nestedDocument);
+                  visit(nestedDocument);
+                }
+              } catch {
+                // Cross-origin frame; ignore it.
+              }
+            }
+          }
+        }
+
+        seenDocuments.add(document);
+        visit(document);
+        return roots;
+      }
+
+      function queryAllAcrossRoots(selector) {
+        const results = [];
+        const seenElements = new Set();
+        for (const root of collectAccessibleRoots()) {
+          let matches = [];
+          try {
+            matches = Array.from(root.querySelectorAll(selector));
+          } catch {
+            matches = [];
+          }
+
+          for (const element of matches) {
+            if (seenElements.has(element)) {
+              continue;
+            }
+
+            seenElements.add(element);
+            results.push(element);
+          }
+        }
+
+        return results;
       }
 
       function ensureRef(element) {
@@ -98,7 +196,9 @@ async function collectSnapshot(
         "[role='img']"
       ].join(",");
 
-      const headings = Array.from(document.querySelectorAll("h1,h2,h3"))
+      const roots = collectAccessibleRoots();
+
+      const headings = queryAllAcrossRoots("h1,h2,h3")
         .filter(isVisible)
         .slice(0, 12)
         .map(function (element) {
@@ -111,7 +211,7 @@ async function collectSnapshot(
           return entry.text.length > 0;
         });
 
-      const elements = Array.from(document.querySelectorAll(interactiveSelector))
+      const elements = queryAllAcrossRoots(interactiveSelector)
         .filter(isVisible)
         .slice(0, input.maxElements)
         .map(function (element) {
@@ -147,7 +247,13 @@ async function collectSnapshot(
         title: compact(document.title, 200),
         headings,
         elements,
-        pageText: compact(document.body ? document.body.innerText : "", input.maxTextLength)
+        pageText: compact(roots.map(function (root) {
+          if (root.nodeType === Node.DOCUMENT_NODE) {
+            return root.body ? root.body.innerText : "";
+          }
+
+          return root.textContent || "";
+        }).join("\\n"), input.maxTextLength)
       };
     })()
   `) as SnapshotCore;
@@ -823,14 +929,13 @@ export class ChromeRelayService {
     this.chromeExtensionDir = options.chromeExtensionDir;
   }
 
-  getCapability(baseUrl: string, token: string): ChromeRelayMeta {
+  getCapability(baseUrl: string): ChromeRelayMeta {
     const enabled = existsSync(this.chromeExecutablePath);
     return {
       browserRelay: {
         enabled,
         backend: "desktop_chrome",
         baseUrl,
-        token,
         visible: true,
         healthy: enabled && !this.lastError,
       },
@@ -885,6 +990,15 @@ export class ChromeRelayService {
       return existing;
     }
 
+    const stalePortFile = join(this.profileDir, "DevToolsActivePort");
+    if (existsSync(stalePortFile)) {
+      try {
+        unlinkSync(stalePortFile);
+      } catch {
+        // Ignore stale DevToolsActivePort cleanup failures and continue launching Chrome.
+      }
+    }
+
     const chrome = spawn(
       this.chromeExecutablePath,
       [
@@ -920,9 +1034,10 @@ export class ChromeRelayService {
           this.browser = browser;
           this.markHealthy();
           browser.on("disconnected", () => {
+            this.tabs.clear();
             this.browser = null;
             this.connectionPromise = null;
-            this.markError("Chrome relay disconnected");
+            this.lastError = null;
           });
           return browser;
         })
@@ -1094,9 +1209,8 @@ export class ChromeRelayService {
   async click(tabId: string, ref: string, waitUntil: string | undefined) {
     try {
       const record = await this.getTabRecord(tabId);
-      const selector = `[data-aliceloop-ref="${escapeAttributeValue(ref)}"]`;
-      const locator = record.page.locator(selector).first();
-      if ((await locator.count()) === 0) {
+      const locator = await resolveRefLocator(record.page, ref);
+      if (!locator) {
         throw new Error(`No browser element matches ref ${ref}. Run browser_snapshot again to refresh refs.`);
       }
 
@@ -1113,13 +1227,48 @@ export class ChromeRelayService {
   async type(tabId: string, ref: string, text: string, submit: boolean) {
     try {
       const record = await this.getTabRecord(tabId);
-      const selector = `[data-aliceloop-ref="${escapeAttributeValue(ref)}"]`;
-      const locator = record.page.locator(selector).first();
-      if ((await locator.count()) === 0) {
+      const locator = await resolveRefLocator(record.page, ref);
+      if (!locator) {
         throw new Error(`No browser element matches ref ${ref}. Run browser_snapshot again to refresh refs.`);
       }
 
-      await locator.fill(text, { timeout: 10_000 });
+      const targetMeta = await locator.evaluate((element) => {
+        const htmlElement = element as HTMLElement & {
+          disabled?: boolean;
+          readOnly?: boolean;
+          type?: string;
+          value?: string;
+        };
+
+        return {
+          isContentEditable: htmlElement.isContentEditable,
+          tagName: htmlElement.tagName.toLowerCase(),
+          type: typeof htmlElement.type === "string" ? htmlElement.type.toLowerCase() : "",
+        };
+      });
+
+      if (targetMeta.isContentEditable) {
+        await locator.click({ timeout: 10_000 });
+        await record.page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+        await record.page.keyboard.press("Backspace");
+        if (text) {
+          await record.page.keyboard.type(text, { delay: 20 });
+        }
+        await locator.evaluate((element) => {
+          const target = element as HTMLElement;
+          target.dispatchEvent(new InputEvent("input", {
+            bubbles: true,
+            composed: true,
+            inputType: "insertText",
+          }));
+          target.dispatchEvent(new Event("change", {
+            bubbles: true,
+          }));
+        });
+      } else {
+        await locator.fill(text, { timeout: 10_000 });
+      }
+
       if (submit) {
         await locator.press("Enter", { timeout: 10_000 });
         await this.waitForSettledPage(record.page, "domcontentloaded");
@@ -1139,7 +1288,10 @@ export class ChromeRelayService {
       const targetPath = outputPath?.trim() || join(this.screenshotRoot, `browser-${Date.now()}-${tabId}.png`);
       mkdirSync(dirname(targetPath), { recursive: true });
       if (ref?.trim()) {
-        const locator = record.page.locator(`[data-aliceloop-ref="${escapeAttributeValue(ref.trim())}"]`).first();
+        const locator = await resolveRefLocator(record.page, ref.trim());
+        if (!locator) {
+          throw new Error(`No browser element matches ref ${ref.trim()}. Run browser_snapshot again to refresh refs.`);
+        }
         await locator.waitFor({ state: "visible", timeout: 10_000 });
         await locator.screenshot({
           path: targetPath,
@@ -1381,9 +1533,22 @@ export class ChromeRelayService {
 }
 
 export function createDefaultChromeRelayServiceOptions(userDataDir: string, chromeExtensionDir: string | null = null): ChromeRelayServiceOptions {
+  const defaultChromeProfileDir = (() => {
+    switch (process.platform) {
+      case "darwin":
+        return join(homedir(), "Library/Application Support/Google/Chrome");
+      case "win32":
+        return process.env.LOCALAPPDATA
+          ? join(process.env.LOCALAPPDATA, "Google/Chrome/User Data")
+          : join(homedir(), "AppData/Local/Google/Chrome/User Data");
+      default:
+        return join(homedir(), ".config/google-chrome");
+    }
+  })();
+
   return {
     chromeExecutablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    profileDir: join(userDataDir, "chrome-relay-profile"),
+    profileDir: process.env.ALICELOOP_CHROME_PROFILE_DIR?.trim() || defaultChromeProfileDir,
     screenshotRoot: join(userDataDir, DEFAULT_SCREENSHOT_ROOT_NAME),
     audioCaptureRoot: join(userDataDir, DEFAULT_AUDIO_CAPTURE_ROOT_NAME),
     chromeExtensionDir,

@@ -8,10 +8,13 @@ interface ToolWorkflowCardProps {
 const toolLabelMap: Record<string, string> = {
   bash: "Bash",
   browser_click: "Browser Click",
+  browser_find: "Browser Find",
   browser_navigate: "Browser Navigate",
+  browser_scroll: "Browser Scroll",
   browser_snapshot: "Browser Snapshot",
   browser_screenshot: "Browser Screenshot",
   browser_type: "Browser Type",
+  browser_wait: "Browser Wait",
   edit: "Edit",
   glob: "Glob",
   grep: "Grep",
@@ -79,22 +82,31 @@ function pickFirstString(value: Record<string, unknown>, keys: string[]) {
   return null;
 }
 
+function quoteBashArgument(value: string) {
+  return /^[A-Za-z0-9_./:-]+$/u.test(value) ? value : JSON.stringify(value);
+}
+
 function buildBashCommand(value: Record<string, unknown>) {
   const command = pickFirstString(value, ["command", "cmd"]);
   if (command) {
-    return compactInline(command, 128);
+    const args = Array.isArray(value.args) ? value.args.filter((item): item is string => typeof item === "string") : [];
+    return [command, ...args.map(quoteBashArgument)].join(" ").trim();
   }
 
   const args = Array.isArray(value.args) ? value.args.filter((item): item is string => typeof item === "string") : [];
   if (args.length > 0) {
-    return compactInline(args.join(" "), 128);
+    return args.map(quoteBashArgument).join(" ");
   }
 
   return null;
 }
 
 function buildBashIntentSummary(command: string) {
-  const commandName = command.split(/\s+/, 1)[0]?.toLowerCase();
+  const commandName = command.toLowerCase();
+
+  if (commandName === "aliceloop") {
+    return "运行 Aliceloop 命令";
+  }
 
   switch (commandName) {
     case "rm":
@@ -132,6 +144,218 @@ function buildBashIntentSummary(command: string) {
       return "查看版本";
     default:
       return "执行命令";
+  }
+}
+
+function buildAliceloopIntentSummary(args: string[]) {
+  const first = args[0]?.toLowerCase();
+  const second = args[1]?.toLowerCase();
+
+  if (!first) {
+    return "运行 Aliceloop 命令";
+  }
+
+  if (first === "browser" || first === "chrome" || first === "relay") {
+    switch (second) {
+      case "connect":
+      case "open":
+      case "start":
+        return "连接浏览器";
+      case "disconnect":
+      case "close":
+      case "stop":
+        return "断开浏览器";
+      case "status":
+        return "查看浏览器状态";
+      case "navigate":
+        return "打开页面";
+      case "click":
+        return "点击页面";
+      case "type":
+        return "输入内容";
+      case "snapshot":
+        return "查看页面";
+      case "screenshot":
+        return "截屏页面";
+      case "back":
+        return "返回上一页";
+      case "forward":
+        return "前进页面";
+      case "read":
+      case "read_dom":
+        return "读取页面";
+      default:
+        return "浏览器操作";
+    }
+  }
+
+  switch (first) {
+    case "status":
+      return "查看状态";
+    case "memory":
+      switch (second) {
+        case "list":
+          return "查看记忆";
+        case "search":
+        case "grep":
+          return "搜索记忆";
+        case "archive":
+          return "归档记忆";
+        case "add":
+          return "添加记忆";
+        case "delete":
+          return "删除记忆";
+        default:
+          return "管理记忆";
+      }
+    case "config":
+      switch (second) {
+        case "list":
+        case "get":
+          return "查看配置";
+        case "set":
+          return "修改配置";
+        default:
+          return "管理配置";
+      }
+    case "providers":
+      return "查看提供方";
+    case "threads":
+      return "查看线程";
+    case "thread":
+      switch (second) {
+        case "info":
+          return "查看线程详情";
+        case "new":
+          return "创建线程";
+        case "search":
+          return "搜索线程";
+        case "delete":
+          return "删除线程";
+        default:
+          return "管理线程";
+      }
+    case "tasks":
+      switch (second) {
+        case "list":
+          return "查看任务";
+        case "add":
+          return "新建任务";
+        case "update":
+          return "更新任务";
+        case "done":
+          return "完成任务";
+        case "show":
+          return "查看任务详情";
+        case "delete":
+          return "删除任务";
+        default:
+          return "管理任务";
+      }
+    case "plan":
+      switch (second) {
+        case "list":
+          return "查看计划";
+        case "create":
+          return "新建计划";
+        case "show":
+          return "查看计划详情";
+        case "update":
+          return "更新计划";
+        case "approve":
+          return "批准计划";
+        case "archive":
+          return "归档计划";
+        default:
+          return "管理计划";
+      }
+    case "skills":
+      switch (second) {
+        case "list":
+          return "查看技能";
+        case "show":
+          return "查看技能详情";
+        case "search":
+          return "搜索技能";
+        default:
+          return "管理技能";
+      }
+    case "cron":
+      switch (second) {
+        case "list":
+          return "查看定时任务";
+        case "add":
+          return "新建定时任务";
+        case "remove":
+          return "删除定时任务";
+        default:
+          return "管理定时任务";
+      }
+    case "send":
+      switch (second) {
+        case "file":
+          return "发送文件";
+        case "photo":
+          return "发送图片";
+        default:
+          return "发送内容";
+      }
+    case "screenshot":
+      return "截屏";
+    case "reaction":
+      switch (second) {
+        case "list":
+          return "查看表态";
+        case "add":
+          return "添加表态";
+        case "remove":
+          return "移除表态";
+        default:
+          return "管理表态";
+      }
+    case "voice":
+      switch (second) {
+        case "list":
+          return "查看语音";
+        case "speak":
+          return "朗读文本";
+        case "save":
+          return "保存语音";
+        default:
+          return "处理语音";
+      }
+    case "image":
+      if (second === "generate") {
+        return "生成图片";
+      }
+      return "处理图片";
+    case "telegram":
+      switch (second) {
+        case "me":
+          return "查看 Telegram 身份";
+        case "send":
+          return "发送 Telegram 消息";
+        case "file":
+          return "发送 Telegram 文件";
+        default:
+          return "处理 Telegram";
+      }
+    case "discord":
+      switch (second) {
+        case "send":
+          return "发送 Discord 消息";
+        case "file":
+          return "发送 Discord 文件";
+        default:
+          return "处理 Discord";
+      }
+    case "music":
+      if (second === "generate") {
+        return "生成音乐";
+      }
+      return "处理音乐";
+    default:
+      return "运行 Aliceloop 命令";
   }
 }
 
@@ -211,6 +435,88 @@ function resolveEntryOutput(entry: ToolWorkflowEntry) {
   }
 
   return normalizeStructuredValue(entry.resultPreview);
+}
+
+function isCompoundBashCommand(command: string) {
+  return /[|;&<>`$()\n]/u.test(command);
+}
+
+function formatBashScriptDisplay(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.includes("\n")) {
+    return trimmed;
+  }
+
+  return trimmed
+    .replace(/\s*&&\s*/g, "\n&& ")
+    .replace(/\s*\|\|\s*/g, "\n|| ")
+    .replace(/\s*;\s*/g, ";\n")
+    .replace(/\s+\|\s+/g, "\n| ");
+}
+
+function buildBashDisplay(value: unknown) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const isScript = isCompoundBashCommand(trimmed);
+    const text = isScript ? formatBashScriptDisplay(trimmed) : trimmed;
+    return {
+      label: isScript ? ("脚本" as const) : ("命令" as const),
+      text,
+      summary: text.replace(/\s+/g, " ").trim(),
+    };
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const script = pickFirstString(value, ["script"]);
+  if (script) {
+    const trimmed = script.trim();
+    const text = formatBashScriptDisplay(trimmed);
+    return {
+      label: "脚本" as const,
+      text,
+      summary: text.replace(/\s+/g, " ").trim(),
+    };
+  }
+
+  const command = pickFirstString(value, ["command", "cmd"]);
+  if (command) {
+    if (isCompoundBashCommand(command)) {
+      const trimmed = command.trim();
+      const text = formatBashScriptDisplay(trimmed);
+      return {
+        label: "脚本" as const,
+        text,
+        summary: text.replace(/\s+/g, " ").trim(),
+      };
+    }
+
+    const args = Array.isArray(value.args) ? value.args.filter((item): item is string => typeof item === "string") : [];
+    const text = [command, ...args.map(quoteBashArgument)].join(" ").trim();
+    return {
+      label: "命令" as const,
+      text,
+      summary: text,
+    };
+  }
+
+  const args = Array.isArray(value.args) ? value.args.filter((item): item is string => typeof item === "string") : [];
+  if (args.length > 0) {
+    const text = args.map(quoteBashArgument).join(" ");
+    return {
+      label: "命令" as const,
+      text,
+      summary: text,
+    };
+  }
+
+  return null;
 }
 
 export type ToolSourceLink = SourceLink;
@@ -390,6 +696,13 @@ function formatArgumentsBlock(entry: ToolWorkflowEntry) {
     return entry.inputPreview;
   }
 
+  if (entry.toolName === "bash") {
+    const bashDisplay = buildBashDisplay(resolvedInput);
+    if (bashDisplay) {
+      return bashDisplay.text;
+    }
+  }
+
   const primaryInputValue = getPrimaryInputValue(entry, resolvedInput);
   if (primaryInputValue) {
     return compactInline(primaryInputValue, 128);
@@ -503,14 +816,46 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
   }
 
   if (entry.toolName === "bash") {
-    const bashCommand = isRecord(resolvedInput)
-      ? buildBashCommand(resolvedInput)
-      : typeof resolvedInput === "string"
-        ? resolvedInput.trim()
-        : null;
+    if (typeof resolvedInput === "string") {
+      const trimmed = resolvedInput.trim();
+      if (trimmed) {
+        if (isCompoundBashCommand(trimmed)) {
+          return "运行脚本";
+        }
 
-    if (bashCommand) {
-      return compactInline(bashCommand, 48);
+        const [command, ...args] = trimmed.split(/\s+/);
+        const bashCommand = command === "aliceloop"
+          ? buildAliceloopIntentSummary(args)
+          : buildBashIntentSummary(command);
+        return compactInline(bashCommand, 48);
+      }
+    }
+
+    if (isRecord(resolvedInput)) {
+      const script = pickFirstString(resolvedInput, ["script"]);
+      if (script) {
+        const trimmed = script.trim();
+        if (trimmed) {
+          if (isCompoundBashCommand(trimmed)) {
+            return "运行脚本";
+          }
+
+          const [command, ...args] = trimmed.split(/\s+/);
+          const bashCommand = command === "aliceloop"
+            ? buildAliceloopIntentSummary(args)
+            : buildBashIntentSummary(command);
+          return compactInline(bashCommand, 48);
+        }
+      }
+
+      const command = pickFirstString(resolvedInput, ["command", "cmd"]);
+      if (command) {
+        const args = Array.isArray(resolvedInput.args) ? resolvedInput.args.filter((item): item is string => typeof item === "string") : [];
+        const bashCommand = command === "aliceloop"
+          ? buildAliceloopIntentSummary(args)
+          : buildBashIntentSummary(command);
+        return compactInline(bashCommand, 48);
+      }
     }
   }
 
@@ -529,26 +874,26 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
 function getPrimaryDetailLabel(toolName: string) {
   switch (toolName) {
     case "bash":
-      return "Command";
+      return "命令";
     case "web_search":
-      return "Arguments";
+      return "参数";
     case "web_fetch":
     case "browser_navigate":
-      return "URL";
+      return "地址";
     case "browser_click":
-      return "Target";
+      return "目标";
     case "browser_type":
-      return "Input";
+      return "输入";
     case "glob":
-      return "Pattern";
+      return "模式";
     case "grep":
-      return "Query";
+      return "查询";
     case "read":
     case "write":
     case "edit":
-      return "Path";
+      return "路径";
     default:
-      return "Arguments";
+      return "参数";
   }
 }
 
@@ -556,14 +901,14 @@ function getStatusMeta(entry: ToolWorkflowEntry) {
   if (entry.status === "output-error" || entry.status === "permission-denied" || entry.error) {
     return {
       tone: "error" as const,
-      label: "Error",
+      label: "错误",
     };
   }
 
   if (entry.status === "approval-requested") {
     return {
       tone: "waiting" as const,
-      label: "Approval",
+      label: "待批准",
     };
   }
 
@@ -576,7 +921,7 @@ function getStatusMeta(entry: ToolWorkflowEntry) {
 
   return {
     tone: "running" as const,
-    label: "Running",
+    label: "运行中",
   };
 }
 
@@ -712,16 +1057,15 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
   const sourceLinks = buildToolSourceLinks(entry);
   const durationLabel = formatDurationLabel(entry);
   const primaryDetailLabel = getPrimaryDetailLabel(entry.toolName);
+  const bashDisplay = entry.toolName === "bash" ? buildBashDisplay(resolveEntryInput(entry)) : null;
   const hasDetails = Boolean(argumentsBlock || resultBlock || entry.error || entry.backend || sourceLinks.length > 0);
   const isNetworkTool = entry.toolName === "web_search" || entry.toolName === "web_fetch";
-  const defaultOpen = isBashLikeCommand(entry);
-  const resultDetailLabel = isBashLikeCommand(entry) ? "RESULT" : "Result";
-  const commandDetailLabel = isBashLikeCommand(entry) ? "COMMAND" : primaryDetailLabel;
+  const resultDetailLabel = "结果";
+  const commandDetailLabel = isBashLikeCommand(entry) ? (bashDisplay?.label ?? "命令") : primaryDetailLabel;
 
   return (
     <details
       className={`tool-workflow-card tool-workflow-card--${status.tone}${isNetworkTool ? " tool-workflow-card--network" : ""}${isBashLikeCommand(entry) ? " tool-workflow-card--bash" : ""}`}
-      open={defaultOpen}
     >
       <summary className="tool-workflow-card__summary">
         <span className="tool-workflow-card__main">

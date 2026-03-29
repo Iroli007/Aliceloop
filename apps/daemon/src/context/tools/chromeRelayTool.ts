@@ -15,6 +15,7 @@ import {
   scrollDesktopRelay,
 } from "./desktopChromeRelayBackend";
 import { refreshDesktopRelaySession, resolveDesktopRelaySession } from "./browserSessionRegistry";
+import { ensureDaemonChromeRelayStarted } from "../../services/chromeRelayManager";
 
 const DEFAULT_CHROME_RELAY_SESSION_ID = "default-chrome-relay-session";
 
@@ -22,6 +23,7 @@ async function executeChromeRelayOperation<T>(
   sessionId: string,
   operation: (session: BrowserSessionRecord) => Promise<T>,
 ) {
+  await ensureDaemonChromeRelayStarted();
   const session = resolveDesktopRelaySession(sessionId);
 
   try {
@@ -92,7 +94,7 @@ export function createChromeRelayTools(sessionId = DEFAULT_CHROME_RELAY_SESSION_
     }),
 
     chrome_relay_open: tool({
-      description: "Open a new Aliceloop Desktop Chrome relay tab, optionally navigating to a URL immediately.",
+      description: "Open a new Aliceloop Desktop Chrome relay tab only when you explicitly need a separate page, optionally navigating to a URL immediately.",
       inputSchema: z.object({
         url: z.string().optional().describe("Optional URL to open in the new tab"),
         waitUntil: z
@@ -123,7 +125,7 @@ export function createChromeRelayTools(sessionId = DEFAULT_CHROME_RELAY_SESSION_
     }),
 
     chrome_relay_navigate: tool({
-      description: "Navigate the current or specified relay tab to a URL and return a refreshed DOM snapshot.",
+      description: "Navigate the current or specified relay tab to a URL and return a refreshed DOM snapshot from that same tab.",
       inputSchema: z.object({
         url: z.string().min(1).describe("Target URL"),
         tabId: z.string().optional().describe("Optional relay tab id; defaults to the current session tab"),

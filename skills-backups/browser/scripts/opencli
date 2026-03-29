@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v opencli >/dev/null 2>&1; then
+  exec opencli "$@"
+fi
+
+if command -v npx >/dev/null 2>&1; then
+  exec npx -y @jackwener/opencli "$@"
+fi
+
+cat >&2 <<'EOF'
+opencli is not installed and npx is unavailable.
+
+Install OpenCLI with:
+  npm install -g @jackwener/opencli
+
+Then install the Browser Bridge extension from the OpenCLI releases page and run:
+  opencli doctor
+EOF
+
+exit 127

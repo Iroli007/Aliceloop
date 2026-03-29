@@ -261,7 +261,6 @@ export interface BrowserRelayCapability {
   enabled: boolean;
   backend: "desktop_chrome";
   baseUrl: string;
-  token: string;
   visible: true;
   healthy: boolean;
 }

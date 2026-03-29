@@ -24,6 +24,8 @@ const audioSummarySchema = z.object({
 const visualSummarySchema = z.object({
   summary: z.string().trim().min(1).max(800),
   observations: z.array(z.string().trim().min(1).max(200)).max(6).default([]),
+  actionableTargets: z.array(z.string().trim().min(1).max(200)).max(6).default([]),
+  nextAction: z.string().trim().min(1).max(240).nullable().default(null),
 });
 
 const rollingVideoSummarySchema = z.object({
@@ -54,6 +56,8 @@ export interface AudioUnderstandingResult {
 export interface VisualUnderstandingResult {
   summary: string | null;
   observations: string[];
+  actionableTargets: string[];
+  nextAction: string | null;
   limitations: string[];
   capabilities: ModelCapabilities;
 }
@@ -411,7 +415,9 @@ export async function describeImageFile(
     return {
       summary: null,
       observations: [],
-      limitations: ["当前没有可用的大模型 provider，无法理解截图内容。"],
+        limitations: ["当前没有可用的大模型 provider，无法理解截图内容。"],
+        actionableTargets: [],
+        nextAction: null,
       capabilities,
     };
   }
@@ -420,7 +426,9 @@ export async function describeImageFile(
     return {
       summary: null,
       observations: [],
-      limitations: ["当前 provider 不支持图片理解，已跳过截图分析。"],
+        limitations: ["当前 provider 不支持图片理解，已跳过截图分析。"],
+        actionableTargets: [],
+        nextAction: null,
       capabilities,
     };
   }
@@ -431,6 +439,8 @@ export async function describeImageFile(
       return {
         summary: null,
         observations: [],
+        actionableTargets: [],
+        nextAction: null,
         limitations: ["当前 provider 的图像理解结果不可用，已跳过这一帧画面分析。"],
         capabilities,
       };
@@ -439,6 +449,8 @@ export async function describeImageFile(
     return {
       summary: structured.summary,
       observations: structured.observations,
+      actionableTargets: structured.actionableTargets,
+      nextAction: structured.nextAction,
       limitations: [],
       capabilities,
     };
@@ -446,6 +458,8 @@ export async function describeImageFile(
     return {
       summary: null,
       observations: [],
+      actionableTargets: [],
+      nextAction: null,
       limitations: [
         error instanceof Error
           ? `截图理解失败：${truncate(error.message, 240)}`

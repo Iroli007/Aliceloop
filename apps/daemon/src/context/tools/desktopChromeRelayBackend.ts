@@ -41,12 +41,105 @@ function coerceRelayDetail(payload: unknown, fallback: string) {
   return detail ?? error ?? fallback;
 }
 
+function isBlankRelayTab(url?: string | null) {
+  if (!url) {
+    return true;
+  }
+
+  const normalized = url.trim().toLowerCase();
+  return normalized === "about:blank" || normalized === "chrome://newtab/" || normalized === "chrome://newtab";
+}
+
+function pickPreferredRelayTab(tabs: BrowserRelayTabsPayload) {
+  const activeTab = tabs.tabs.find((tab) => tab.tabId === tabs.activeTabId) ?? null;
+  if (activeTab && !isBlankRelayTab(activeTab.url)) {
+    return activeTab.tabId;
+  }
+
+  const firstRealTab = tabs.tabs.find((tab) => !isBlankRelayTab(tab.url)) ?? null;
+  if (firstRealTab) {
+    return firstRealTab.tabId;
+  }
+
+  return tabs.activeTabId ?? tabs.tabs[0]?.tabId ?? null;
+}
+
+function normalizeRelayTabsPayload(payload: unknown): BrowserRelayTabsPayload {
+  if (Array.isArray(payload)) {
+    const tabs = payload
+      .map((tab) => {
+        if (!isJsonRecord(tab)) {
+          return null;
+        }
+
+        const tabId = typeof tab.id === "number" || typeof tab.id === "string"
+          ? String(tab.id)
+          : typeof tab.tabId === "number" || typeof tab.tabId === "string"
+            ? String(tab.tabId)
+            : null;
+        if (!tabId) {
+          return null;
+        }
+
+        return {
+          tabId,
+          url: typeof tab.url === "string" ? tab.url : "",
+          title: typeof tab.title === "string" ? tab.title : null,
+          active: tab.active === true,
+        };
+      })
+      .filter((tab): tab is BrowserRelayTabsPayload["tabs"][number] => tab !== null);
+
+    const activeTabId = tabs.find((tab) => tab.active)?.tabId ?? null;
+    return {
+      backend: "desktop_chrome",
+      activeTabId,
+      tabs,
+    };
+  }
+
+  if (isJsonRecord(payload) && Array.isArray(payload.tabs)) {
+    const tabs = payload.tabs
+      .map((tab) => {
+        if (!isJsonRecord(tab)) {
+          return null;
+        }
+
+        const tabId = typeof tab.tabId === "number" || typeof tab.tabId === "string"
+          ? String(tab.tabId)
+          : typeof tab.id === "number" || typeof tab.id === "string"
+            ? String(tab.id)
+            : null;
+        if (!tabId) {
+          return null;
+        }
+
+        return {
+          tabId,
+          url: typeof tab.url === "string" ? tab.url : "",
+          title: typeof tab.title === "string" ? tab.title : null,
+          active: tab.active === true,
+        };
+      })
+      .filter((tab): tab is BrowserRelayTabsPayload["tabs"][number] => tab !== null);
+
+    const activeTabId = typeof payload.activeTabId === "string" ? payload.activeTabId : null;
+    return {
+      backend: "desktop_chrome",
+      activeTabId,
+      tabs,
+    };
+  }
+
+  throw new Error("Desktop Chrome relay did not return a usable tab list.");
+}
+
 export async function requestDesktopRelay<T>(
   session: BrowserSessionRecord,
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  if (!session.relayBaseUrl || !session.relayToken) {
+  if (!session.relayBaseUrl) {
     throw new DesktopBrowserUnavailableError("No healthy Aliceloop Desktop Chrome relay is registered.");
   }
 
@@ -56,7 +149,6 @@ export async function requestDesktopRelay<T>(
       ...init,
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${session.relayToken}`,
         ...(init?.headers ?? {}),
       },
     });
@@ -75,10 +167,6 @@ export async function requestDesktopRelay<T>(
     payload = null;
   }
 
-  if (response.status === 401) {
-    throw new DesktopBrowserUnavailableError("Desktop Chrome relay rejected authentication.");
-  }
-
   if (!response.ok) {
     throw new Error(coerceRelayDetail(payload, `Desktop Chrome relay request failed (${response.status})`));
   }
@@ -87,17 +175,20 @@ export async function requestDesktopRelay<T>(
 }
 
 export async function ensureDesktopRelayTab(session: BrowserSessionRecord) {
+  const tabs = normalizeRelayTabsPayload(await requestDesktopRelay<unknown>(session, "/tabs", {
+    method: "GET",
+  }));
+
   if (session.tabId) {
-    return session.tabId;
+    const current = tabs.tabs.find((tab) => tab.tabId === session.tabId) ?? null;
+    if (current && !isBlankRelayTab(current.url)) {
+      return session.tabId;
+    }
   }
 
-  const opened = await requestDesktopRelay<{ tabId?: unknown }>(session, "/tabs/open", {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-  const tabId = typeof opened.tabId === "string" ? opened.tabId : null;
+  const tabId = pickPreferredRelayTab(tabs);
   if (!tabId) {
-    throw new Error("Desktop Chrome relay did not return a tab id.");
+    throw new Error("Desktop Chrome relay did not return an available tab id.");
   }
 
   session.tabId = tabId;
@@ -172,6 +263,13 @@ export const desktopChromeRelayBackend: BrowserBackend = {
     return snapshot;
   },
 
+  async scroll(session, direction, amount) {
+    const tabId = await ensureDesktopRelayTab(session);
+    const snapshot = await scrollDesktopRelay(session, tabId, direction, amount);
+    session.tabId = snapshot.tabId ?? tabId;
+    return snapshot;
+  },
+
   async screenshot(session, outputPath, fullPage, ref) {
     const tabId = await ensureDesktopRelayTab(session);
     const result = await requestDesktopRelay<BrowserScreenshotPayload>(
@@ -230,7 +328,6 @@ export const desktopChromeRelayBackend: BrowserBackend = {
     if (!session.tabId) {
       session.backend = null;
       session.relayBaseUrl = null;
-      session.relayToken = null;
       return;
     }
 
@@ -245,14 +342,13 @@ export const desktopChromeRelayBackend: BrowserBackend = {
     session.tabId = null;
     session.backend = null;
     session.relayBaseUrl = null;
-    session.relayToken = null;
   },
 };
 
 export async function listDesktopRelayTabs(session: BrowserSessionRecord) {
-  return requestDesktopRelay<BrowserRelayTabsPayload>(session, "/tabs", {
+  return normalizeRelayTabsPayload(await requestDesktopRelay<unknown>(session, "/tabs", {
     method: "GET",
-  });
+  }));
 }
 
 export async function readDesktopRelay(session: BrowserSessionRecord, tabId: string, options?: {

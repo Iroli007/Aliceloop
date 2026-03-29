@@ -128,6 +128,11 @@ import {
 import { runManagedTask } from "./services/taskRunner";
 import { startSchedulerService } from "./services/schedulerService";
 import {
+  getDaemonChromeRelayBrowserStackState,
+  launchDaemonChromeRelay,
+  stopDaemonChromeRelay,
+} from "./services/chromeRelayManager";
+import {
   assignSessionProjectAndSync,
   resyncAllProjectSessionHistories,
   resyncProjectSessionHistories,
@@ -710,8 +715,21 @@ export async function createServer() {
   backfillTaskRunsFromJobs();
   await resyncAllProjectSessionHistories();
   const stopScheduler = startSchedulerService();
+  server.addHook("onReady", async () => {
+    try {
+      await launchDaemonChromeRelay();
+    } catch (error) {
+      server.log.error(
+        {
+          err: error,
+        },
+        "failed to start chrome relay",
+      );
+    }
+  });
   server.addHook("onClose", async () => {
     stopScheduler();
+    await stopDaemonChromeRelay().catch(() => undefined);
   });
 
   server.get("/health", async () => ({
@@ -1992,6 +2010,12 @@ export async function createServer() {
   });
 
   server.get("/api/runtime/presence", async () => getRuntimePresence());
+  server.get("/api/runtime/browser-relay/status", async () => getDaemonChromeRelayBrowserStackState());
+  server.post("/api/runtime/browser-relay/launch", async () => launchDaemonChromeRelay());
+  server.post("/api/runtime/browser-relay/stop", async () => {
+    await stopDaemonChromeRelay();
+    return getDaemonChromeRelayBrowserStackState();
+  });
   server.get("/api/runtime/settings", async () => getRuntimeSettings());
   server.put<{ Body: UpdateRuntimeSettingsBody }>("/api/runtime/settings", async (request) => {
     return updateRuntimeSettings({
@@ -2072,7 +2096,8 @@ export async function createServer() {
   });
 
   server.post<{ Body: HeartbeatBody }>("/api/runtime/presence/heartbeat", async (request) => {
-    const sessionId = request.body.sessionId ?? primarySessionId;
+    const sessionId = request.body.sessionId
+      ?? (hasSession(primarySessionId) ? primarySessionId : undefined);
     const label =
       request.body.label ??
       (request.body.deviceType === "desktop" ? "Aliceloop Desktop" : "Aliceloop Mobile");
@@ -2085,12 +2110,14 @@ export async function createServer() {
       capabilities: request.body.capabilities,
     });
 
-    publishSessionEvent(result.event);
+    if (result.event) {
+      publishSessionEvent(result.event);
+    }
 
     return {
       devices: result.devices,
       runtimePresence: result.runtimePresence,
-      lastEventSeq: result.event.seq,
+      lastEventSeq: result.event?.seq ?? null,
     };
   });
 
