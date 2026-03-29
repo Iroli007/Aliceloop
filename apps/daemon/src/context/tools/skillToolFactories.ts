@@ -114,6 +114,7 @@ const BROWSER_TOOL_NAMES = new Set([
   "browser_type",
   "browser_scroll",
   "browser_screenshot",
+  "browser_batch",
   "browser_media_probe",
   "browser_video_watch_start",
   "browser_video_watch_poll",

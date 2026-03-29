@@ -238,7 +238,23 @@ export function SettingsPanel() {
           </div>
 
           {/* ── Skills ── */}
-          <h3 className="settings-section-title">Skills</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+            <h3 className="settings-section-title" style={{ margin: 0 }}>Skills</h3>
+            <button
+              className="settings-actions__button"
+              onClick={() => void runtimeCatalogs.refresh()}
+              style={{ padding: "6px 12px", fontSize: "13px" }}
+            >
+              🔄 Refresh
+            </button>
+            <button
+              className="settings-actions__button"
+              onClick={() => void desktopBridge.openExternal("file://" + desktopBridge.getSkillsPath?.() ?? "")}
+              style={{ padding: "6px 12px", fontSize: "13px" }}
+            >
+              📁 Open Folder
+            </button>
+          </div>
           <div className="settings-panel">
             <div className="settings-panel__heading">
               <span>{runtimeCatalogs.skills.length} 个条目</span>

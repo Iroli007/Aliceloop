@@ -1136,17 +1136,22 @@ button {
 
 .workspace__message-body table {
   width: 100%;
+  max-width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   font-size: 0.95em;
   margin-bottom: 0.14em;
 }
 
 .workspace__message-body th,
 .workspace__message-body td {
+  min-width: 0;
   padding: 0.45em 0.65em;
   border: 1px solid rgba(148, 163, 184, 0.28);
   text-align: left;
   vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .workspace__message-body th {
@@ -4378,4 +4383,96 @@ button {
   line-height: 1.4;
   letter-spacing: 0.02em;
   color: #111111;
+}
+
+/* Skills Settings */
+.settings-skills {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0;
+}
+
+.settings-skills__loading,
+.settings-skills__empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.settings-skills__item {
+  padding: 16px 20px;
+  background: var(--surface-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+}
+
+.settings-skills__item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-skills__item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.settings-skills__item-header strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-skills__item-description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.settings-skills__toggle {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.settings-skills__toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.settings-skills__toggle-slider {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #ccc;
+  border-radius: 24px;
+  transition: 0.3s;
+}
+
+.settings-skills__toggle-slider::before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  border-radius: 50%;
+  transition: 0.3s;
+}
+
+.settings-skills__toggle input:checked + .settings-skills__toggle-slider {
+  background-color: #4a9eff;
+}
+
+.settings-skills__toggle input:checked + .settings-skills__toggle-slider::before {
+  transform: translateX(20px);
 }

@@ -35,7 +35,8 @@ const researchTabs = new Map<string, ResearchTabRecord>();
 const RESEARCH_TAB_TTL_MS = 2 * 60 * 1000;
 
 function getHealthyBrowserRelayCapability(): BrowserRelayCapability | null {
-  return getDaemonChromeRelayCapability();
+  const relay = getDaemonChromeRelayCapability();
+  return relay?.enabled && relay.healthy ? relay : null;
 }
 
 async function requestRelay<T>(

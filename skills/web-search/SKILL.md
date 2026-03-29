@@ -5,11 +5,23 @@ allowed-tools:
   - bash
   - web_search
   - web_fetch
+  - ChromeRelayStatus
 ---
 
 # Web Search Skill
 
 Search the web using the built-in `web_search` tool. On Aliceloop this is the built-in research path for current information, fact-checking, and source discovery.
+
+## Relay Check
+
+Before searching, check whether Chrome Relay is healthy:
+
+```text
+ChromeRelayStatus()
+```
+
+- If relay is healthy, keep it available for follow-up pages that may need authenticated browser access later
+- If relay is not healthy, continue with `web_search` normally; search itself should not block on relay
 
 ## Web Search Tool (Primary)
 

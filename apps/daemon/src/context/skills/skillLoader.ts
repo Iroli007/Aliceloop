@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { SkillDefinition, SkillMode, SkillStatus } from "@aliceloop/runtime-core";
 import {
   type SkillRouteHints,
+  needsBrowserAutomation,
   needsFileManagement,
   inferStickySkillIdsFromContext,
 } from "./skillRouting";
@@ -600,6 +601,7 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
     ...inferStickySkillIdsFromContext(normalizedQuery),
     ...(hints?.stickySkillIds ?? []),
   ]);
+  const browserSceneBlocksLocalMediaSkills = needsBrowserAutomation(normalizedQuery);
 
   if (needsFileManagement(normalizedQuery)) {
     return [...stickySkillIds];
@@ -609,11 +611,12 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
   const scoredSkills = activeSkills
     .map((skill) => ({
       id: skill.id,
+      blocked: browserSceneBlocksLocalMediaSkills && (skill.id === "video-reader" || skill.id === "music-listener"),
       score: stickySkillIds.has(skill.id)
         ? 1000
         : scoreSkillMatch(skill, normalizedQuery, tokenDocumentFrequency, activeSkills.length),
     }))
-    .filter((entry) => entry.score > 0)
+    .filter((entry) => !entry.blocked && entry.score > 0)
     .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
 
   if (scoredSkills.length === 0) {

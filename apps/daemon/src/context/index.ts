@@ -13,6 +13,7 @@ import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import { getDefaultProjectDirectory } from "../repositories/projectRepository";
 import { getDataDir } from "../db/client";
+import { getSessionWorksetState } from "../repositories/sessionRepository";
 import {
   isAliceloopGeneratedFile,
   markGeneratedFileDeleted,
@@ -21,6 +22,10 @@ import {
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
 import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
 import { getSandboxProjectRoot } from "../runtime/sandbox/toolPolicy";
+import {
+  getActiveWorksetSkillIds,
+  getActiveWorksetToolNames,
+} from "./workset/worksetState";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -86,9 +91,22 @@ export async function loadContext(
 
   const userQuery = recentConversationFocus.effectiveUserQuery ?? latestUserQuery;
   timings.effectiveUserQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
+  const sessionWorksetStateStartedAt = nowMs();
+  const sessionWorksetState = getSessionWorksetState(sessionId);
+  timings.sessionWorksetStateMs = roundMs(nowMs() - sessionWorksetStateStartedAt);
+  const activeWorksetSkillIds = getActiveWorksetSkillIds(sessionWorksetState);
+  const activeWorksetToolNames = getActiveWorksetToolNames(sessionWorksetState);
+  timings.sessionWorksetActiveSkillCount = activeWorksetSkillIds.length;
+  timings.sessionWorksetActiveToolCount = activeWorksetToolNames.length;
 
   const routeHints = mergeSkillRouteHints(
     recentConversationFocus.routeHints,
+    activeWorksetSkillIds.length > 0
+      ? {
+          stickySkillIds: activeWorksetSkillIds,
+          reasons: ["session-workset"],
+        }
+      : null,
     (options?.additionalStickySkillIds?.length ?? 0) > 0
       ? {
           stickySkillIds: options?.additionalStickySkillIds ?? [],
@@ -195,7 +213,10 @@ export async function loadContext(
     routeHints,
     hasImageAttachment: latestUserHasImageAttachment,
     browserRelayAvailable,
-    additionalToolNames: options?.additionalToolNames,
+    additionalToolNames: [
+      ...(options?.additionalToolNames ?? []),
+      ...activeWorksetToolNames,
+    ],
   });
   timings.toolsMs = roundMs(nowMs() - toolsStartedAt);
   timings.toolQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
