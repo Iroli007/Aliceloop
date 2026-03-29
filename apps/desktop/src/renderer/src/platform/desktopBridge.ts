@@ -1,12 +1,8 @@
-import type { BrowserRelayCapability } from "@aliceloop/runtime-core";
-
 type DesktopMeta = {
   daemonBaseUrl: string;
   name: string;
   version: string;
-  desktopCapabilities?: {
-    browserRelay?: BrowserRelayCapability;
-  };
+  desktopCapabilities?: unknown;
 };
 
 type RuntimePing = {
@@ -16,11 +12,6 @@ type RuntimePing = {
   timestamp?: string;
   activeSkills?: string[];
   activeSkillAdapters?: string[];
-};
-
-export type ChromeRelayState = {
-  browserRelay: BrowserRelayCapability | null;
-  attachedTabs: number;
 };
 
 export type DesktopPickedFile = {
@@ -64,10 +55,6 @@ type DesktopBridge = {
   minimizeWindow(): Promise<void>;
   toggleFullscreenWindow(): Promise<void>;
   openSettings(): Promise<void>;
-  openChromeRelay(): Promise<void>;
-  getChromeRelayState(): Promise<ChromeRelayState | null>;
-  regenerateChromeRelayToken(): Promise<ChromeRelayState | null>;
-  launchChromeRelay(): Promise<ChromeRelayState | null>;
   mode: "electron" | "web-preview";
 };
 
@@ -129,18 +116,6 @@ function createBrowserBridge(): DesktopBridge {
     },
     async openSettings() {
       return;
-    },
-    async openChromeRelay() {
-      return;
-    },
-    async getChromeRelayState() {
-      return null;
-    },
-    async regenerateChromeRelayToken() {
-      return null;
-    },
-    async launchChromeRelay() {
-      return null;
     },
   };
 }

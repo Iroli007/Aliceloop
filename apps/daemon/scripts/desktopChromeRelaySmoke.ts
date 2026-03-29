@@ -143,11 +143,13 @@ async function main() {
 
   const [
     { createSession, heartbeatDevice, getSessionSnapshot },
+    { setBrowserSessionPreference },
     { createBrowserTools },
     { createWebFetchTool },
     { createWebSearchTool },
   ] = await Promise.all([
     import("../src/repositories/sessionRepository.ts"),
+    import("../src/context/tools/browserSessionRegistry.ts"),
     import("../src/context/tools/browserTool.ts"),
     import("../src/context/tools/webFetchTool.ts"),
     import("../src/context/tools/webSearchTool.ts"),
@@ -165,6 +167,7 @@ async function main() {
   const snapshot = getSessionSnapshot(session.id);
   assert.equal(snapshot.devices[0]?.capabilities?.browserRelay?.backend, "desktop_chrome");
 
+  setBrowserSessionPreference(session.id, "desktop_chrome");
   const browserTools = createBrowserTools(session.id);
   const formUrl = `http://127.0.0.1:${address.port}/form`;
   const navigatePayload = JSON.parse(await browserTools.browser_navigate.execute({ url: formUrl }));

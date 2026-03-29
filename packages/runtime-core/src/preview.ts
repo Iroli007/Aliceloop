@@ -210,7 +210,6 @@ export const previewSessionSnapshot: SessionSnapshot = {
           enabled: true,
           backend: "desktop_chrome",
           baseUrl: "http://127.0.0.1:39999",
-          token: "preview-browser-relay-token",
           visible: true,
           healthy: true,
         },

@@ -1,10 +1,9 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { Page } from "playwright";
 import { getDataDir } from "../../db/client";
 
 export type BrowserWaitUntil = "load" | "domcontentloaded" | "networkidle";
-export type BrowserBackendKind = "desktop_chrome" | "playwright";
+export type BrowserBackendKind = "desktop_chrome" | "pinchtab";
 export type BrowserChallengeKind =
   | "none"
   | "slider_captcha"
@@ -122,9 +121,9 @@ export interface BrowserAudioCapturePayload {
 export interface BrowserSessionRecord {
   sessionId: string;
   backend: BrowserBackendKind | null;
+  preferredBackend: BrowserBackendKind | null;
   tabId: string | null;
   relayBaseUrl: string | null;
-  relayToken: string | null;
 }
 
 type CapturableMediaElement = HTMLMediaElement & {
@@ -143,6 +142,11 @@ export interface BrowserBackend {
   ): Promise<BrowserSnapshotPayload>;
   click(session: BrowserSessionRecord, ref: string, waitUntil: BrowserWaitUntil): Promise<BrowserSnapshotPayload>;
   type(session: BrowserSessionRecord, ref: string, text: string, submit: boolean): Promise<BrowserSnapshotPayload>;
+  scroll(
+    session: BrowserSessionRecord,
+    direction: "up" | "down" | "left" | "right",
+    amount?: number,
+  ): Promise<BrowserSnapshotPayload>;
   screenshot(session: BrowserSessionRecord, outputPath?: string, fullPage?: boolean, ref?: string): Promise<BrowserScreenshotPayload>;
   mediaProbe(session: BrowserSessionRecord, ref?: string): Promise<BrowserMediaProbePayload>;
   captureAudioClip(
@@ -195,13 +199,17 @@ export function escapeAttributeValue(value: string) {
 export function friendlyBrowserError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("Executable doesn't exist")) {
-    return `${message}\nRun \`npx playwright install chromium\` to provision the local browser runtime.`;
+    return `${message}\nThe local browser backend is unavailable. Prefer the visible Chrome relay when it is healthy.`;
   }
 
   return message;
 }
 
 type BrowserSnapshotCore = Omit<BrowserSnapshotPayload, "backend" | "tabId" | "challenge">;
+type BrowserPageLike = {
+  evaluate(script: string): Promise<unknown>;
+  url(): string;
+};
 
 function detectBrowserChallenge(payload: BrowserSnapshotCore): BrowserChallengePayload {
   const joined = [
@@ -316,7 +324,7 @@ function detectBrowserChallenge(payload: BrowserSnapshotCore): BrowserChallengeP
 }
 
 export async function collectSnapshot(
-  page: Page,
+  page: BrowserPageLike,
   backend: BrowserBackendKind,
   tabId: string,
   options?: {
@@ -340,10 +348,95 @@ export async function collectSnapshot(
         return String(value ?? "").replace(/\\s+/g, " ").trim().slice(0, limit);
       }
 
+      function getFrameElementForWindow(view) {
+        try {
+          return view && view.frameElement instanceof Element ? view.frameElement : null;
+        } catch {
+          return null;
+        }
+      }
+
       function isVisible(element) {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+        let currentElement = element;
+        while (currentElement) {
+          const view = currentElement.ownerDocument?.defaultView || window;
+          const style = view.getComputedStyle(currentElement);
+          const rect = currentElement.getBoundingClientRect();
+          if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) {
+            return false;
+          }
+
+          const frameElement = getFrameElementForWindow(view);
+          if (!frameElement) {
+            return true;
+          }
+
+          currentElement = frameElement;
+        }
+
+        return true;
+      }
+
+      function collectAccessibleRoots() {
+        const roots = [];
+        const seenRoots = new Set();
+        const seenDocuments = new Set();
+
+        function visit(root) {
+          if (!root || seenRoots.has(root)) {
+            return;
+          }
+
+          seenRoots.add(root);
+          roots.push(root);
+
+          const descendants = root.querySelectorAll ? Array.from(root.querySelectorAll("*")) : [];
+          for (const element of descendants) {
+            if (element.shadowRoot) {
+              visit(element.shadowRoot);
+            }
+
+            if (element.tagName === "IFRAME" || element.tagName === "FRAME") {
+              try {
+                const nestedDocument = element.contentDocument;
+                if (nestedDocument && !seenDocuments.has(nestedDocument)) {
+                  seenDocuments.add(nestedDocument);
+                  visit(nestedDocument);
+                }
+              } catch {
+                // Cross-origin frame; ignore it.
+              }
+            }
+          }
+        }
+
+        seenDocuments.add(document);
+        visit(document);
+        return roots;
+      }
+
+      function queryAllAcrossRoots(selector) {
+        const results = [];
+        const seenElements = new Set();
+        for (const root of collectAccessibleRoots()) {
+          let matches = [];
+          try {
+            matches = Array.from(root.querySelectorAll(selector));
+          } catch {
+            matches = [];
+          }
+
+          for (const element of matches) {
+            if (seenElements.has(element)) {
+              continue;
+            }
+
+            seenElements.add(element);
+            results.push(element);
+          }
+        }
+
+        return results;
       }
 
       function ensureRef(element) {
@@ -376,7 +469,9 @@ export async function collectSnapshot(
         "[role='img']"
       ].join(",");
 
-      const headings = Array.from(document.querySelectorAll("h1,h2,h3"))
+      const roots = collectAccessibleRoots();
+
+      const headings = queryAllAcrossRoots("h1,h2,h3")
         .filter(isVisible)
         .slice(0, 12)
         .map(function (element) {
@@ -389,7 +484,7 @@ export async function collectSnapshot(
           return entry.text.length > 0;
         });
 
-      const elements = Array.from(document.querySelectorAll(interactiveSelector))
+      const elements = queryAllAcrossRoots(interactiveSelector)
         .filter(isVisible)
         .slice(0, input.maxElements)
         .map(function (element) {
@@ -425,11 +520,25 @@ export async function collectSnapshot(
         title: compact(document.title, 200),
         headings,
         elements,
-        pageText: compact(document.body ? document.body.innerText : "", input.maxTextLength)
+        pageText: compact(roots.map(function (root) {
+          if (root.nodeType === Node.DOCUMENT_NODE) {
+            return root.body ? root.body.innerText : "";
+          }
+
+          return root.textContent || "";
+        }).join("\\n"), input.maxTextLength)
       };
     })()
   `) as BrowserSnapshotCore;
 
+  return buildBrowserSnapshotPayload(result, backend, tabId);
+}
+
+export function buildBrowserSnapshotPayload(
+  result: Omit<BrowserSnapshotPayload, "backend" | "tabId" | "challenge">,
+  backend: BrowserBackendKind,
+  tabId: string,
+): BrowserSnapshotPayload {
   return {
     ...result,
     challenge: detectBrowserChallenge(result),
@@ -456,7 +565,7 @@ function writeBase64File(targetPath: string, dataBase64: string) {
   writeFileSync(targetPath, Buffer.from(dataBase64, "base64"));
 }
 
-async function evaluateMediaProbe(page: Page, ref?: string) {
+async function evaluateMediaProbe(page: BrowserPageLike, ref?: string) {
   const payload = JSON.stringify({ ref: ref ?? null });
   return page.evaluate(`
     (() => {
@@ -621,7 +730,7 @@ async function evaluateMediaProbe(page: Page, ref?: string) {
 }
 
 export async function collectMediaProbe(
-  page: Page,
+  page: BrowserPageLike,
   backend: BrowserBackendKind,
   tabId: string,
   ref?: string,
@@ -635,7 +744,7 @@ export async function collectMediaProbe(
 }
 
 export async function captureMediaAudioClip(
-  page: Page,
+  page: BrowserPageLike,
   backend: BrowserBackendKind,
   tabId: string,
   options?: {

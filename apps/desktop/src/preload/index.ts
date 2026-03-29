@@ -9,8 +9,4 @@ contextBridge.exposeInMainWorld("aliceloopDesktop", {
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
   toggleFullscreenWindow: () => ipcRenderer.invoke("window:toggle-fullscreen"),
   openSettings: () => ipcRenderer.invoke("window:open-settings"),
-  openChromeRelay: () => ipcRenderer.invoke("window:open-chrome-relay"),
-  getChromeRelayState: () => ipcRenderer.invoke("chrome-relay:get-status"),
-  regenerateChromeRelayToken: () => ipcRenderer.invoke("chrome-relay:regenerate-token"),
-  launchChromeRelay: () => ipcRenderer.invoke("chrome-relay:launch"),
 });

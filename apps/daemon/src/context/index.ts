@@ -194,6 +194,7 @@ export async function loadContext(
     query: userQuery,
     routeHints,
     hasImageAttachment: latestUserHasImageAttachment,
+    browserRelayAvailable,
     additionalToolNames: options?.additionalToolNames,
   });
   timings.toolsMs = roundMs(nowMs() - toolsStartedAt);

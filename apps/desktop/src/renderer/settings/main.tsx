@@ -25,7 +25,7 @@ const navItems = [
     id: "relay",
     label: "网络机器人",
     title: "网络机器人",
-    description: "把网络机器人和扩展配好，后面的浏览器任务就能复用真实登录态。",
+    description: "看 Google Chrome 有没有连上，只信任本机 relay。",
   },
   {
     id: "memory",
@@ -67,6 +67,9 @@ const providerDescriptions: Record<string, string> = {
   anthropic: "Claude 官方直连入口，也可以接任意 Anthropic-compatible 中转站。",
   openrouter: "OpenRouter 聚合多家模型，默认走 OpenAI-compatible 接口。",
 };
+
+const desktopDeviceStorageKey = "aliceloop-desktop-device-id";
+const HEARTBEAT_INTERVAL_MS = 10_000;
 
 const embeddingModelDefinitions: Array<{
   id: MemoryEmbeddingModel;
@@ -158,6 +161,21 @@ function getErrorMessage(error: unknown, fallbackMessage: string) {
   return error instanceof Error ? error.message : fallbackMessage;
 }
 
+function getStableDesktopDeviceId() {
+  if (typeof window === "undefined") {
+    return "desktop-server";
+  }
+
+  const existing = window.localStorage.getItem(desktopDeviceStorageKey);
+  if (existing) {
+    return existing;
+  }
+
+  const next = `desktop-${crypto.randomUUID()}`;
+  window.localStorage.setItem(desktopDeviceStorageKey, next);
+  return next;
+}
+
 function formatSimilarityPercent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
@@ -175,6 +193,28 @@ async function fetchProjectItems(baseUrl: string) {
 interface UpdateProjectResponse {
   project: ProjectDirectory;
   migratedSessionCount: number;
+}
+
+type RelayBrowserStackState = {
+  preferredBackend: "opencli" | "pinchtab" | "desktop_chrome" | "none";
+  relay: {
+    bridgeRelay: {
+      enabled: boolean;
+      baseUrl: string;
+      healthy: boolean;
+    } | null;
+    bridgeAttachedTabs: number;
+    runtimeRelay: {
+      enabled: boolean;
+      baseUrl: string;
+      healthy: boolean;
+    } | null;
+    runtimeAttachedTabs: number;
+  };
+};
+
+function StatusDot({ healthy }: { healthy: boolean }) {
+  return <span className={`chrome-relay__status-dot${healthy ? " chrome-relay__status-dot--healthy" : ""}`} aria-hidden="true" />;
 }
 
 function SectionIcon({
@@ -263,9 +303,8 @@ function renderSectionCards(sectionId: SettingsSectionId) {
       ];
     case "relay":
       return [
-        ["打开详细窗口", "这里先带你看一遍流程，真正的 token、状态和启动按钮在详细配置窗口里。"],
-        ["启动 Chrome", "桌面端会先起本地 Relay 服务，再用独立 profile 启动 Chrome。"],
-        ["启用扩展", "Chrome Relay 扩展会自动读取本机配置；如果没连上，就在扩展设置里手动粘贴。"],
+        ["Google Chrome 连接", "这里只看扩展桥有没有连上。"],
+        ["本机信任", "只接受 127.0.0.1 上的 relay，不再额外配置认证信息。"],
       ];
     case "memory":
       return [
@@ -304,6 +343,9 @@ function SettingsApp() {
   const [toolProviderIdInput, setToolProviderIdInput] = useState<ProviderKind | "">("");
   const [toolModelInput, setToolModelInput] = useState("");
   const [toolModelNotice, setToolModelNotice] = useState<string | null>(null);
+  const [relayStatus, setRelayStatus] = useState<RelayBrowserStackState | null>(null);
+  const [relayStatusPending, setRelayStatusPending] = useState(false);
+  const [relayNotice, setRelayNotice] = useState<string | null>(null);
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const [memoryEnabledInput, setMemoryEnabledInput] = useState(true);
   const [memoryAutoRetrievalInput, setMemoryAutoRetrievalInput] = useState(true);
@@ -355,6 +397,18 @@ function SettingsApp() {
     return nextItems;
   }
 
+  async function fetchRelayStatus(baseUrlOverride?: string) {
+    const baseUrl = baseUrlOverride ?? await ensureDaemonBaseUrl();
+    const response = await fetch(`${baseUrl}/api/runtime/browser-relay/status`);
+    if (!response.ok) {
+      throw new Error(`读取 Chrome Relay 状态失败（${response.status}）`);
+    }
+
+    const payload = await response.json() as RelayBrowserStackState;
+    setRelayStatus(payload);
+    return payload;
+  }
+
   useEffect(() => {
     let cancelled = false;
 
@@ -390,6 +444,81 @@ function SettingsApp() {
       cancelled = true;
     };
   }, [desktopBridge]);
+
+  useEffect(() => {
+    if (!daemonBaseUrl) {
+      return;
+    }
+
+    const deviceId = getStableDesktopDeviceId();
+    const label = desktopBridge.mode === "electron" ? "Aliceloop Desktop" : "Aliceloop Web Preview";
+
+    const heartbeat = async () => {
+      try {
+        const meta = await desktopBridge.getAppMeta();
+        await fetch(`${daemonBaseUrl}/api/runtime/presence/heartbeat`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            deviceId,
+            deviceType: "desktop",
+            label,
+            capabilities: meta.desktopCapabilities,
+          }),
+        });
+      } catch {
+        // Keep settings usable even when daemon heartbeat fails.
+      }
+    };
+
+    void heartbeat();
+    const timer = window.setInterval(() => {
+      void heartbeat();
+    }, HEARTBEAT_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [daemonBaseUrl, desktopBridge]);
+
+  useEffect(() => {
+    if (activeSectionId !== "relay") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncRelayStatus = async () => {
+      try {
+        const next = await fetchRelayStatus();
+        if (cancelled) {
+          return;
+        }
+        setRelayStatus(next);
+      } catch (error) {
+        if (!cancelled) {
+          setRelayNotice(getErrorMessage(error, "读取 Chrome Relay 状态失败。"));
+        }
+      } finally {
+        if (!cancelled) {
+          setRelayStatusPending(false);
+        }
+      }
+    };
+
+    setRelayStatusPending(true);
+    void syncRelayStatus();
+    const timer = window.setInterval(() => {
+      void syncRelayStatus();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeSectionId]);
 
   useEffect(() => {
     if (providers.length === 0) {
@@ -465,6 +594,18 @@ function SettingsApp() {
       setProjectError(getErrorMessage(error, "更新默认项目失败。"));
     } finally {
       setProjectPending(false);
+    }
+  }
+
+  async function handleRefreshRelayStatus() {
+    try {
+      setRelayStatusPending(true);
+      setRelayNotice(null);
+      await fetchRelayStatus();
+    } catch (error) {
+      setRelayNotice(getErrorMessage(error, "刷新 Chrome Relay 状态失败。"));
+    } finally {
+      setRelayStatusPending(false);
     }
   }
 
@@ -870,15 +1011,8 @@ function SettingsApp() {
               <div className="settings-relay__panel">
                 <div className="settings-relay__header">
                   <div className="settings-relay__intro">
-                    <p>先把桌面 Relay 和 Chrome 扩展连起来，后面的浏览器任务就能直接复用你的真实登录态。这个流程只需要做一次。</p>
+                    <p>这里直接显示 Google Chrome 扩展有没有连接，以及当前 relay 状态。</p>
                   </div>
-                  <button
-                    type="button"
-                    className="settings-actions__button settings-actions__button--primary"
-                    onClick={() => void desktopBridge.openChromeRelay()}
-                  >
-                    打开详细配置窗口
-                  </button>
                 </div>
 
                 <div className="settings-relay__cards">
@@ -891,7 +1025,34 @@ function SettingsApp() {
                   ))}
                 </div>
 
-                <p className="settings-relay__footnote">如果扩展已经装好，通常只要打开详细窗口并启动 Chrome，几秒钟后就会自动连上。</p>
+                <div className="settings-panel__item chrome-relay__card">
+                  <div className="settings-panel__heading">
+                    <span>连接状态</span>
+                  </div>
+                  <div className="chrome-relay__status-grid">
+                    <span>Google Chrome 扩展</span>
+                    <strong className="chrome-relay__status-value">
+                      <StatusDot healthy={Boolean(relayStatus?.relay.bridgeRelay?.healthy)} />
+                      {relayStatus?.relay.bridgeRelay?.healthy ? "已连接" : "未连接"}
+                    </strong>
+                    <span>扩展桥地址</span>
+                    <strong>{relayStatus?.relay.bridgeRelay?.baseUrl ?? "http://127.0.0.1:23001"}</strong>
+                    <span>Relay 服务</span>
+                    <strong className="chrome-relay__status-value">
+                      <StatusDot healthy={Boolean(relayStatus?.relay.runtimeRelay?.healthy)} />
+                      {relayStatus?.relay.runtimeRelay?.healthy ? "运行中" : "未启动"}
+                    </strong>
+                  </div>
+                  {relayNotice ? <div className="provider-notice">{relayNotice}</div> : null}
+                </div>
+
+                <div className="chrome-relay__launch-row">
+                  <button className="settings-actions__button" type="button" onClick={() => void handleRefreshRelayStatus()}>
+                    {relayStatusPending ? "刷新中..." : "刷新"}
+                  </button>
+                </div>
+
+                <p className="settings-relay__footnote">绿色表示 Google Chrome 扩展已经连上；灰色表示还没连上。</p>
               </div>
             </article>
           ) : activeSection.id === "providers" ? (

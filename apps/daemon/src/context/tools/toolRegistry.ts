@@ -2,6 +2,7 @@ import type { ToolSet } from "ai";
 import type { SkillDefinition } from "@aliceloop/runtime-core";
 import type { createPermissionSandboxExecutor } from "../../services/sandboxExecutor";
 import type { SkillRouteHints } from "../skills/skillRouting";
+import { setBrowserSessionPreference } from "./browserSessionRegistry";
 import { createSandboxTools } from "./sandboxTools";
 import { BASE_TOOL_NAMES, listAvailableToolAdapterNames, listUnresolvedSkillTools, resolveSkillTools } from "./skillToolFactories";
 import { routeToolNamesForTurn } from "./toolRouter";
@@ -14,6 +15,14 @@ interface BuildToolSetOptions {
   routeHints?: SkillRouteHints;
   hasImageAttachment?: boolean;
   additionalToolNames?: string[];
+  browserRelayAvailable?: boolean;
+}
+
+function inferBrowserBackendPreference(
+  _query: string | null | undefined,
+  browserRelayAvailable: boolean | undefined,
+) {
+  return browserRelayAvailable ? "desktop_chrome" as const : "pinchtab" as const;
 }
 
 function collectAllowedTools(activeSkills: SkillDefinition[]) {
@@ -47,9 +56,17 @@ export function buildToolSet(
     ...collectAllowedTools(activeSkills),
   ]);
 
+  if (options?.sessionId && [...requested].some((toolName) => toolName.startsWith("browser_"))) {
+    setBrowserSessionPreference(
+      options.sessionId,
+      inferBrowserBackendPreference(options?.query, options?.browserRelayAvailable),
+    );
+  }
+
   for (const toolName of requested) {
     if (BASE_TOOL_NAMES.has(toolName) && toolName in allSandboxTools) {
-      tools[toolName] = allSandboxTools[toolName];
+      const sandboxToolName = toolName as keyof typeof allSandboxTools;
+      tools[sandboxToolName] = allSandboxTools[sandboxToolName];
     }
   }
 

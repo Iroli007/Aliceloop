@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
+
+try_source_opencli() {
+  local dir="$1"
+  shift
+  if [[ -z "${dir}" ]]; then
+    return 1
+  fi
+
+  if [[ -f "${dir}/dist/main.js" ]]; then
+    exec node "${dir}/dist/main.js" "$@"
+  fi
+
+  return 1
+}
+
+if [[ -n "${OPENCLI_SOURCE_DIR:-}" ]]; then
+  try_source_opencli "${OPENCLI_SOURCE_DIR}" "$@"
+fi
+
+try_source_opencli "${REPO_ROOT}/../opencli" "$@"
+try_source_opencli "${HOME}/opencli" "$@"
+
 if command -v opencli >/dev/null 2>&1; then
   exec opencli "$@"
 fi
@@ -10,13 +34,20 @@ if command -v npx >/dev/null 2>&1; then
 fi
 
 cat >&2 <<'EOF'
-opencli is not installed and npx is unavailable.
+OpenCLI is unavailable.
 
-Install OpenCLI with:
+Preferred developer setup:
+  git clone git@github.com:jackwener/opencli.git
+  cd opencli
+  npm install
+  npm run build
+  npm link
+
+Or point this helper at a local source checkout:
+  OPENCLI_SOURCE_DIR=/path/to/opencli skills/browser/scripts/opencli doctor
+
+Fallback user install:
   npm install -g @jackwener/opencli
-
-Then install the Browser Bridge extension from the OpenCLI releases page and run:
-  opencli doctor
 EOF
 
 exit 127

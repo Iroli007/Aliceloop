@@ -1,17 +1,28 @@
 import type { BrowserRelayCapability } from "@aliceloop/runtime-core";
-import { getHealthyBrowserRelayDevice } from "../../repositories/sessionRepository";
+import { getDaemonChromeRelayCapability } from "../../services/chromeRelayManager";
 import type { BrowserBackendKind, BrowserSessionRecord } from "./browserTypes";
+import { pinchTabAvailable } from "./pinchTabBrowserBackend";
 
 const sessions = new Map<string, BrowserSessionRecord>();
 
 function getHealthyBrowserRelayCapability(): BrowserRelayCapability | null {
-  return getHealthyBrowserRelayDevice()?.capabilities?.browserRelay ?? null;
+  return getDaemonChromeRelayCapability();
 }
 
 function applyRelayCapability(session: BrowserSessionRecord, relay: BrowserRelayCapability) {
   session.backend = "desktop_chrome";
   session.relayBaseUrl = relay.baseUrl;
-  session.relayToken = relay.token;
+}
+
+function applyPinchTabCapability(session: BrowserSessionRecord) {
+  session.backend = "pinchtab";
+  session.relayBaseUrl = null;
+}
+
+function clearResolvedBackend(session: BrowserSessionRecord) {
+  session.backend = null;
+  session.tabId = null;
+  session.relayBaseUrl = null;
 }
 
 export function getBrowserSession(sessionId: string): BrowserSessionRecord {
@@ -20,9 +31,9 @@ export function getBrowserSession(sessionId: string): BrowserSessionRecord {
     session = {
       sessionId,
       backend: null,
+      preferredBackend: null,
       tabId: null,
       relayBaseUrl: null,
-      relayToken: null,
     };
     sessions.set(sessionId, session);
   }
@@ -30,26 +41,45 @@ export function getBrowserSession(sessionId: string): BrowserSessionRecord {
   return session;
 }
 
+export function setBrowserSessionPreference(
+  sessionId: string,
+  preferredBackend: BrowserBackendKind | null,
+) {
+  const session = getBrowserSession(sessionId);
+  if (session.preferredBackend && preferredBackend && session.preferredBackend !== preferredBackend) {
+    clearResolvedBackend(session);
+  }
+  session.preferredBackend = preferredBackend;
+}
+
 export function resolveBrowserSession(sessionId: string): BrowserSessionRecord {
   const session = getBrowserSession(sessionId);
-  if (session.backend === "desktop_chrome" && session.relayBaseUrl && session.relayToken) {
+  if (session.backend === "desktop_chrome" && session.relayBaseUrl) {
     return session;
   }
 
-  if (session.backend === "playwright") {
+  if (session.backend === "pinchtab" && pinchTabAvailable()) {
     return session;
   }
 
   const relay = getHealthyBrowserRelayCapability();
-  if (relay) {
+  const preferredBackend = session.preferredBackend ?? (relay ? "desktop_chrome" : "pinchtab");
+
+  if (preferredBackend === "desktop_chrome" && relay) {
     applyRelayCapability(session, relay);
     return session;
   }
 
-  session.backend = "playwright";
-  session.relayBaseUrl = null;
-  session.relayToken = null;
-  return session;
+  if (pinchTabAvailable()) {
+    applyPinchTabCapability(session);
+    return session;
+  }
+
+  if (preferredBackend === "desktop_chrome") {
+    throw new Error("browser_runtime_unavailable: Aliceloop Desktop Chrome relay is required for this turn but is not ready.");
+  }
+
+  throw new Error("browser_runtime_unavailable: PinchTab is not ready. Chrome relay stays in compatibility mode and must be explicitly requested.");
 }
 
 export function refreshDesktopRelaySession(session: BrowserSessionRecord): BrowserSessionRecord | null {
@@ -64,7 +94,7 @@ export function refreshDesktopRelaySession(session: BrowserSessionRecord): Brows
 
 export function resolveDesktopRelaySession(sessionId: string): BrowserSessionRecord {
   const session = getBrowserSession(sessionId);
-  if (session.backend === "desktop_chrome" && session.relayBaseUrl && session.relayToken) {
+  if (session.backend === "desktop_chrome" && session.relayBaseUrl) {
     return session;
   }
 
@@ -81,23 +111,30 @@ export function previewBrowserRuntime(
   sessionId: string,
 ): { backend: BrowserBackendKind; tabId: string | null } {
   const session = sessions.get(sessionId);
-  if (session?.backend === "desktop_chrome" && session.relayBaseUrl && session.relayToken) {
+  if (session?.backend === "desktop_chrome" && session.relayBaseUrl) {
     return {
       backend: "desktop_chrome",
       tabId: session.tabId,
     };
   }
 
-  if (session?.backend === "playwright") {
+  if (session?.backend === "pinchtab") {
     return {
-      backend: "playwright",
+      backend: "pinchtab",
       tabId: session.tabId,
     };
   }
 
   const relay = getHealthyBrowserRelayCapability();
+  const preferredBackend = session?.preferredBackend ?? (relay ? "desktop_chrome" : "pinchtab");
   return {
-    backend: relay ? "desktop_chrome" : "playwright",
+    backend: preferredBackend === "desktop_chrome"
+      ? relay
+        ? "desktop_chrome"
+        : "pinchtab"
+      : pinchTabAvailable()
+        ? "pinchtab"
+        : (relay ? "desktop_chrome" : "pinchtab"),
     tabId: session?.tabId ?? null,
   };
 }

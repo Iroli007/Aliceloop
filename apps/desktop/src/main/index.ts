@@ -1,30 +1,65 @@
 import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
-import { existsSync } from "node:fs";
 import { focusOrCreateSettingsWindow } from "./settingsWindow";
-import { focusOrCreateChromeRelayWindow } from "./chromeRelayWindow";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { ChromeRelayBridgeServer } from "./chromeRelayBridgeServer";
-import { ChromeRelayHttpServer } from "./chromeRelayHttpServer";
-import { ChromeRelayService, createDefaultChromeRelayServiceOptions } from "./chromeRelayService";
+import { randomUUID } from "node:crypto";
 
 const daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? "http://127.0.0.1:3030";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL;
-let chromeRelayServer: ChromeRelayHttpServer | null = null;
-let chromeRelayBridgeServer: ChromeRelayBridgeServer | null = null;
 const debugCaptureEnabled = process.env.ALICELOOP_DEBUG_CAPTURE === "1";
+const HEARTBEAT_INTERVAL_MS = 10_000;
+let desktopHeartbeatTimer: NodeJS.Timeout | null = null;
 
-function resolveChromeRelayExtensionDir() {
-  const candidates = [
-    join(process.resourcesPath, "chrome-extension"),
-    join(app.getAppPath(), "resources/chrome-extension"),
-  ];
+async function getStableDesktopDeviceId() {
+  const filePath = join(app.getPath("userData"), "desktop-device-id");
 
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+  try {
+    const existing = (await readFile(filePath, "utf8")).trim();
+    if (existing) {
+      return existing;
+    }
+  } catch {
+    // Fall through and create one.
+  }
+
+  const next = `desktop-${randomUUID()}`;
+  await writeFile(filePath, next, "utf8");
+  return next;
+}
+
+async function sendDesktopHeartbeat() {
+  const deviceId = await getStableDesktopDeviceId();
+
+  await fetch(`${daemonBaseUrl}/api/runtime/presence/heartbeat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      deviceId,
+      deviceType: "desktop",
+      label: "Aliceloop Desktop",
+    }),
+  });
+}
+
+function startDesktopHeartbeatLoop() {
+  const tick = async () => {
+    try {
+      await sendDesktopHeartbeat();
+    } catch {
+      // Keep desktop usable even when daemon heartbeat fails.
+    }
+  };
+
+  void tick();
+  desktopHeartbeatTimer = setInterval(() => {
+    void tick();
+  }, HEARTBEAT_INTERVAL_MS);
 }
 
 function escapeHtml(value: string) {
@@ -345,7 +380,6 @@ ipcMain.handle("app:get-meta", () => ({
   daemonBaseUrl,
   name: app.getName(),
   version: app.getVersion(),
-  desktopCapabilities: chromeRelayServer?.getMeta() ?? undefined,
 }));
 
 ipcMain.handle("runtime:ping", async () => {
@@ -463,35 +497,8 @@ ipcMain.handle("window:open-settings", () => {
   focusOrCreateSettingsWindow();
 });
 
-ipcMain.handle("window:open-chrome-relay", () => {
-  focusOrCreateChromeRelayWindow();
-});
-
-ipcMain.handle("chrome-relay:get-status", () => chromeRelayBridgeServer?.getMeta() ?? null);
-
-ipcMain.handle("chrome-relay:regenerate-token", () => chromeRelayBridgeServer?.regenerateToken() ?? null);
-
-ipcMain.handle("chrome-relay:launch", async () => {
-  if (!chromeRelayServer) {
-    return null;
-  }
-
-  return await chromeRelayServer.launchChrome();
-});
-
 app.whenReady().then(() => {
-  const chromeExtensionDir = resolveChromeRelayExtensionDir();
-  const chromeRelayService = new ChromeRelayService(
-    createDefaultChromeRelayServiceOptions(app.getPath("userData"), chromeExtensionDir),
-  );
-  chromeRelayServer = new ChromeRelayHttpServer(chromeRelayService);
-  void chromeRelayServer.start().catch((error) => {
-    console.error("[desktop] Failed to start Chrome relay server", error);
-  });
-  chromeRelayBridgeServer = new ChromeRelayBridgeServer();
-  void chromeRelayBridgeServer.start().catch((error) => {
-    console.error("[desktop] Failed to start Chrome relay bridge server", error);
-  });
+  startDesktopHeartbeatLoop();
   createWindow();
 
   app.on("activate", () => {
@@ -508,6 +515,8 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  void chromeRelayServer?.stop().catch(() => undefined);
-  void chromeRelayBridgeServer?.stop().catch(() => undefined);
+  if (desktopHeartbeatTimer) {
+    clearInterval(desktopHeartbeatTimer);
+    desktopHeartbeatTimer = null;
+  }
 });

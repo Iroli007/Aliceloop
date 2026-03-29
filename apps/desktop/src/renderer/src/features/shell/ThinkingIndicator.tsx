@@ -8,13 +8,16 @@ interface ThinkingIndicatorProps {
 const toolActivityLabelMap: Record<string, string> = {
   web_search: "Searching the web",
   web_fetch: "Fetching a page",
+  browser_find: "Finding elements in the browser",
   browser_navigate: "Navigating the browser",
   browser_click: "Clicking in the browser",
   browser_type: "Typing in the browser",
+  browser_scroll: "Scrolling the page",
   browser_press_key: "Using browser keyboard input",
   browser_snapshot: "Inspecting the page",
   browser_take_screenshot: "Capturing a browser screenshot",
   browser_wait_for: "Waiting for the page",
+  browser_wait: "Waiting for page elements",
   browser_tabs: "Managing browser tabs",
   browser_hover: "Hovering in the browser",
   browser_select_option: "Selecting a browser option",
@@ -32,7 +35,8 @@ const toolActivityLabelMap: Record<string, string> = {
 const backendLabelMap: Record<string, string> = {
   http_fetch: "HTTP fetch",
   browser_relay: "browser relay",
-  playwright: "Playwright",
+  desktop_chrome: "Chrome relay",
+  pinchtab: "PinchTab",
   openai: "OpenAI",
 };
 

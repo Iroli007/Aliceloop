@@ -11,8 +11,9 @@
     "build:web": "vite build --config vite.renderer.config.ts",
     "dev": "electron-vite dev",
     "dev:web": "vite --config vite.renderer.config.ts",
-    "package:dir": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
-    "package:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir",
+    "package:extension": "node ./scripts/exportChromeRelayExtension.mjs",
+    "package:dir": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir && npm run package:extension",
+    "package:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir && npm run package:extension",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -52,7 +53,7 @@
     ],
     "extraResources": [
       {
-        "from": "resources/chrome-extension",
+        "from": "../../chrome-extension",
         "to": "chrome-extension"
       }
     ],

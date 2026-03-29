@@ -5,7 +5,7 @@ import { describeImageFile } from "../../services/multimodalAnalysisService";
 
 const DEFAULT_SESSION_ID = "default-image-session";
 const DEFAULT_IMAGE_PROMPT =
-  "Read and analyze this image faithfully. Focus on visible text, objects, layout, and the user's question. Do not guess unreadable details.";
+  "Read and analyze this image faithfully. Focus on visible text, layout, interactive UI regions, bottom bars, input boxes, send/publish/comment buttons, and the user's question. If this looks like a product screenshot, point out the most likely next click or typing target. Do not guess unreadable details.";
 
 export function createViewImageTool(sessionId = DEFAULT_SESSION_ID): ToolSet {
   return {

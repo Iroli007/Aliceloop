@@ -61,10 +61,14 @@ export function routeToolNamesForTurn(
     needsBrowserAutomation(normalizedQuery)
     || hasStickySkill(hints, "browser")
   ) {
+    toolNames.add("view_image");
+    toolNames.add("browser_find");
     toolNames.add("browser_snapshot");
     toolNames.add("browser_navigate");
+    toolNames.add("browser_wait");
     toolNames.add("browser_click");
     toolNames.add("browser_type");
+    toolNames.add("browser_scroll");
     toolNames.add("browser_screenshot");
     toolNames.add("browser_media_probe");
     toolNames.add("browser_video_watch_start");

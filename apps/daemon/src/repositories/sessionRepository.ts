@@ -159,7 +159,7 @@ interface HeartbeatInput {
   deviceId: string;
   deviceType: DeviceType;
   label: string;
-  sessionId: string;
+  sessionId?: string;
   capabilities?: DeviceCapabilities;
 }
 
@@ -1840,10 +1840,11 @@ export function createAttachment(input: CreateAttachmentInput): {
 export function heartbeatDevice(input: HeartbeatInput): {
   devices: DevicePresence[];
   runtimePresence: RuntimePresence;
-  event: SessionEvent;
+  event: SessionEvent | null;
 } {
   const db = getDatabase();
   const now = new Date().toISOString();
+  const canRecordEvent = typeof input.sessionId === "string" && input.sessionId.trim().length > 0 && hasSession(input.sessionId);
 
   const update = db.transaction(() => {
     db.prepare(
@@ -1870,8 +1871,14 @@ export function heartbeatDevice(input: HeartbeatInput): {
 
     const devices = listDevices(new Date(now).getTime());
     const runtimePresence = buildRuntimePresence(devices);
-    const eventType = runtimePresence.online ? "presence.updated" : "runtime.offline";
-    const event = recordEvent(input.sessionId, eventType, { devices, runtimePresence }, now);
+    const event = canRecordEvent
+      ? recordEvent(
+        input.sessionId!,
+        runtimePresence.online ? "presence.updated" : "runtime.offline",
+        { devices, runtimePresence },
+        now,
+      )
+      : null;
 
     return {
       devices,

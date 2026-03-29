@@ -733,7 +733,9 @@ export async function createMemory(
   };
 
   if (hasFactIdentity(memory)) {
-    const existing = findActiveMemoryByFactIdentity(memory.factKind, memory.factKey, db);
+    const factKind = memory.factKind!;
+    const factKey = memory.factKey!;
+    const existing = findActiveMemoryByFactIdentity(factKind, factKey, db);
     if (existing) {
       if (memory.factState !== "active") {
         db.prepare(

@@ -282,9 +282,12 @@ async function main() {
   const directResolved = resolveSkillTools(
     new Set([
       "audio_understand",
+      "browser_find",
       "browser_navigate",
       "browser_snapshot",
+      "browser_wait",
       "browser_media_probe",
+      "browser_scroll",
       "browser_video_watch_start",
       "browser_video_watch_poll",
       "browser_video_watch_stop",
@@ -294,9 +297,12 @@ async function main() {
     ]),
   );
   assert.equal(typeof directResolved.audio_understand, "object", "resolveSkillTools should return requested audio_understand");
+  assert.equal(typeof directResolved.browser_find, "object", "resolveSkillTools should return requested browser_find");
   assert.equal(typeof directResolved.browser_navigate, "object", "resolveSkillTools should return requested browser_navigate");
   assert.equal(typeof directResolved.browser_snapshot, "object", "resolveSkillTools should return requested browser_snapshot");
+  assert.equal(typeof directResolved.browser_wait, "object", "resolveSkillTools should return requested browser_wait");
   assert.equal(typeof directResolved.browser_media_probe, "object", "resolveSkillTools should return requested browser_media_probe");
+  assert.equal(typeof directResolved.browser_scroll, "object", "resolveSkillTools should return requested browser_scroll");
   assert.equal(typeof directResolved.browser_video_watch_start, "object", "resolveSkillTools should return requested browser_video_watch_start");
   assert.equal(typeof directResolved.browser_video_watch_poll, "object", "resolveSkillTools should return requested browser_video_watch_poll");
   assert.equal(typeof directResolved.browser_video_watch_stop, "object", "resolveSkillTools should return requested browser_video_watch_stop");
@@ -495,8 +501,12 @@ async function main() {
   );
   assert.equal(typeof browserToolSet.browser_navigate, "object", "browser turns should inject browser_navigate");
   assert.equal(typeof browserToolSet.browser_snapshot, "object", "browser turns should inject browser_snapshot");
+  assert.equal(typeof browserToolSet.view_image, "object", "browser turns should inject view_image for screenshot inspection");
+  assert.equal(typeof browserToolSet.browser_find, "object", "browser turns should inject browser_find");
+  assert.equal(typeof browserToolSet.browser_wait, "object", "browser turns should inject browser_wait");
   assert.equal(typeof browserToolSet.browser_click, "object", "browser turns should inject browser_click");
   assert.equal(typeof browserToolSet.browser_type, "object", "browser turns should inject browser_type");
+  assert.equal(typeof browserToolSet.browser_scroll, "object", "browser turns should inject browser_scroll");
   assert.equal(typeof browserToolSet.browser_screenshot, "object", "browser turns should inject browser_screenshot");
   assert.equal(typeof browserToolSet.browser_media_probe, "object", "browser turns should inject browser_media_probe");
   assert.equal(typeof browserToolSet.browser_video_watch_start, "object", "browser turns should inject browser_video_watch_start");
@@ -583,8 +593,12 @@ async function main() {
   );
   assert.equal(typeof socialFeedToolSet.browser_navigate, "object", "social feed turns should inject browser_navigate");
   assert.equal(typeof socialFeedToolSet.browser_snapshot, "object", "social feed turns should inject browser_snapshot");
+  assert.equal(typeof socialFeedToolSet.view_image, "object", "social feed turns should inject view_image for screenshot inspection");
+  assert.equal(typeof socialFeedToolSet.browser_find, "object", "social feed turns should inject browser_find");
+  assert.equal(typeof socialFeedToolSet.browser_wait, "object", "social feed turns should inject browser_wait");
   assert.equal(typeof socialFeedToolSet.browser_click, "object", "social feed turns should inject browser_click");
   assert.equal(typeof socialFeedToolSet.browser_type, "object", "social feed turns should inject browser_type");
+  assert.equal(typeof socialFeedToolSet.browser_scroll, "object", "social feed turns should inject browser_scroll");
   assert.equal(typeof socialFeedToolSet.browser_screenshot, "object", "social feed turns should inject browser_screenshot");
   assert.equal(typeof socialFeedToolSet.browser_media_probe, "object", "social feed turns should inject browser_media_probe");
   assert.equal(typeof socialFeedToolSet.browser_video_watch_start, "object", "social feed turns should inject browser_video_watch_start");

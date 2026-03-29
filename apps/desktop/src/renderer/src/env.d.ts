@@ -1,5 +1,3 @@
-import type { BrowserRelayCapability } from "@aliceloop/runtime-core";
-
 export {};
 
 declare global {
@@ -9,9 +7,7 @@ declare global {
         daemonBaseUrl: string;
         name: string;
         version: string;
-        desktopCapabilities?: {
-          browserRelay?: BrowserRelayCapability;
-        };
+        desktopCapabilities?: unknown;
       }>;
       pingRuntime(): Promise<{
         ok: boolean;
@@ -52,19 +48,6 @@ declare global {
       minimizeWindow(): Promise<void>;
       toggleFullscreenWindow(): Promise<void>;
       openSettings(): Promise<void>;
-      openChromeRelay(): Promise<void>;
-      getChromeRelayState(): Promise<{
-        browserRelay: BrowserRelayCapability | null;
-        attachedTabs: number;
-      } | null>;
-      regenerateChromeRelayToken(): Promise<{
-        browserRelay: BrowserRelayCapability | null;
-        attachedTabs: number;
-      } | null>;
-      launchChromeRelay(): Promise<{
-        browserRelay: BrowserRelayCapability | null;
-        attachedTabs: number;
-      } | null>;
     };
   }
 

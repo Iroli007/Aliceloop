@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { SkillDefinition, SkillMode, SkillStatus } from "@aliceloop/runtime-core";
 import {
   type SkillRouteHints,
+  needsFileManagement,
   inferStickySkillIdsFromContext,
 } from "./skillRouting";
 
@@ -599,6 +600,11 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
     ...inferStickySkillIdsFromContext(normalizedQuery),
     ...(hints?.stickySkillIds ?? []),
   ]);
+
+  if (needsFileManagement(normalizedQuery)) {
+    return [...stickySkillIds];
+  }
+
   const tokenDocumentFrequency = buildTokenDocumentFrequency(activeSkills);
   const scoredSkills = activeSkills
     .map((skill) => ({
@@ -714,10 +720,20 @@ export function buildSkillContextBlock(skills: SkillDefinition[], options?: Buil
   if (routedSkillIds.has("browser")) {
     if (options?.browserRelayAvailable) {
       sections.push("- Browser runtime status for this turn: a healthy visible Aliceloop Desktop Chrome relay is available right now.");
+      sections.push("- Browser backend policy: prefer the Chrome relay for browser tasks when it is healthy, and fall back to PinchTab only if the relay is unavailable.");
       sections.push("- Do not claim that browser automation is headless, stateless, or unable to retain login data when using this relay. Use the visible Chrome path and reuse its persistent login session.");
     } else {
-      sections.push("- Browser runtime status for this turn: no healthy desktop relay is currently registered, so browser automation will fall back to local Playwright.");
+      sections.push("- Browser runtime status for this turn: no healthy desktop relay is currently registered, so browser automation should use PinchTab instead of a local Playwright browser.");
     }
+    sections.push("- Structured site rule: for supported platforms such as Bilibili, Xiaohongshu, and Twitter/X, stay on the browser tools by default instead of detouring through bash wrappers.");
+  }
+
+  if (routedSkillIds.has("twitter-media")) {
+    sections.push("- Twitter/X routing rule: for logged-in timeline/search/bookmarks/profile tasks, prefer the current browser session. Use public-link fetch only when the user only needs a tweet's public content.");
+  }
+
+  if (routedSkillIds.has("xiaohongshu")) {
+    sections.push("- Xiaohongshu routing rule: prefer the current browser session for profile/feed/note tasks, and only switch away when the browser path is unavailable.");
   }
 
   for (const skill of skills) {

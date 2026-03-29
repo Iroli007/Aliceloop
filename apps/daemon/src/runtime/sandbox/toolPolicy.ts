@@ -5,6 +5,7 @@ import { realpathSync } from "node:fs";
 import { normalizeSandboxPermissionProfile } from "@aliceloop/runtime-core";
 import { getDataDir, getUploadsDir } from "../../db/client";
 import {
+  type ParsedBashCommand,
   type NormalizedBashPolicyInput,
   SandboxViolationError,
   type RunBashInput,
@@ -148,6 +149,215 @@ function isPathWithinCommandRoot(targetPath: string, root: string) {
 
 function isSedInPlace(args: string[]) {
   return args.some((arg) => arg === "-i" || arg === "--in-place" || arg.startsWith("-i"));
+}
+
+function assertSupportedShellScript(script: string) {
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index];
+    const next = script[index + 1];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (quote === "'") {
+      if (char === "'") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+
+    if (char === ">" || char === "<" || char === "`" || (char === "$" && next === "(") || char === "&") {
+      if (char === "&" && next === "&") {
+        index += 1;
+        continue;
+      }
+      throw new SandboxViolationError(
+        `bash denied for unsupported shell feature in script: ${char}; use simple commands, pipes, &&, ||, or ; only`,
+        { allowElevatedFallback: false },
+      );
+    }
+
+    if (char === "|" && next === "|") {
+      index += 1;
+    }
+  }
+
+  if (quote !== null) {
+    throw new SandboxViolationError(
+      "bash denied for unterminated quoted string in script",
+      { allowElevatedFallback: false },
+    );
+  }
+}
+
+function splitShellCommands(script: string) {
+  const commands: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+
+  for (let index = 0; index < script.length; index += 1) {
+    const char = script[index];
+    const next = script[index + 1];
+
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+
+    if (quote === "'") {
+      current += char;
+      if (char === "'") {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      current += char;
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+
+    if (char === "\\") {
+      current += char;
+      escape = true;
+      continue;
+    }
+
+    if (char === ";" || char === "\n" || char === "|") {
+      const trimmed = current.trim();
+      if (trimmed) {
+        commands.push(trimmed);
+      }
+      current = "";
+      if (char === "|" && next === "|") {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (char === "&" && next === "&") {
+      const trimmed = current.trim();
+      if (trimmed) {
+        commands.push(trimmed);
+      }
+      current = "";
+      index += 1;
+      continue;
+    }
+
+    current += char;
+  }
+
+  const trimmed = current.trim();
+  if (trimmed) {
+    commands.push(trimmed);
+  }
+
+  return commands;
+}
+
+function tokenizeShellWords(input: string) {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escape = false;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+
+    if (escape) {
+      current += char;
+      escape = false;
+      continue;
+    }
+
+    if (quote === "'") {
+      if (char === "'") {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      if (char === "\\") {
+        escape = true;
+      } else if (char === '"') {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current) {
+    tokens.push(current);
+  }
+
+  return tokens;
 }
 
 function collectPathArguments(command: string, args: string[]): CollectedPathArgument[] {
@@ -396,6 +606,15 @@ export function assertBashExecution(policy: SandboxToolPolicy, input: Normalized
     args: input.args,
     cwd: input.cwd,
   });
+}
+
+export function parseShellScriptCommandsForPolicy(script: string): ParsedBashCommand[] {
+  assertSupportedShellScript(script);
+
+  return splitShellCommands(script)
+    .map((segment) => tokenizeShellWords(segment))
+    .filter((tokens) => tokens.length > 0)
+    .map(([command, ...args]) => ({ command, args }));
 }
 
 export function getDefaultSandboxRoots() {
