@@ -9,11 +9,7 @@ import { getDatabase } from "../../db/client";
 
 const memoryConfigPatchSchema = z.object({
   enabled: z.boolean().optional(),
-  autoRetrieval: z.boolean().optional(),
   queryRewrite: z.boolean().optional(),
-  maxRetrievalCount: z.number().int().min(1).max(50).optional(),
-  similarityThreshold: z.number().min(-1).max(1).optional(),
-  autoSummarize: z.boolean().optional(),
   embeddingModel: z.enum(["text-embedding-3-small", "text-embedding-3-large"]).optional(),
   embeddingDimension: z.number().int().positive().max(3072).optional(),
 }).strict();

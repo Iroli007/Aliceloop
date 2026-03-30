@@ -80,24 +80,6 @@ export const previewShellOverview: ShellOverview = {
       },
     ],
   },
-  memories: [
-    {
-      id: "memory-1",
-      kind: "attention-summary",
-      title: "近期关注重心",
-      content: "用户最近主要围绕 runtime core、provider 接入和多端同步的边界来回切换。",
-      source: "attention-index",
-      updatedAt: "2026-03-17T07:25:00.000Z",
-    },
-    {
-      id: "memory-2",
-      kind: "learning-pattern",
-      title: "稳定混淆点",
-      content: "遇到 runtime 设计问题时，优先给分层图和最小执行边界，而不是先展开大而全的流程图。",
-      source: "behavior-distillation",
-      updatedAt: "2026-03-17T07:25:00.000Z",
-    },
-  ],
   taskRuns: [
     {
       id: "task-1",

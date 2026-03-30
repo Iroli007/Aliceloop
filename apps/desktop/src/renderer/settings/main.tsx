@@ -191,10 +191,6 @@ function getStableDesktopDeviceId() {
   return next;
 }
 
-function formatSimilarityPercent(value: number) {
-  return `${Math.round(value * 100)}%`;
-}
-
 async function fetchProjectItems(baseUrl: string) {
   const response = await fetch(`${baseUrl}/api/projects`);
   if (!response.ok) {
@@ -364,11 +360,7 @@ function SettingsApp() {
   const [relayNotice, setRelayNotice] = useState<string | null>(null);
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const [memoryEnabledInput, setMemoryEnabledInput] = useState(true);
-  const [memoryAutoRetrievalInput, setMemoryAutoRetrievalInput] = useState(true);
   const [memoryQueryRewriteInput, setMemoryQueryRewriteInput] = useState(false);
-  const [memoryAutoSummarizeInput, setMemoryAutoSummarizeInput] = useState(true);
-  const [memoryMaxRetrievalInput, setMemoryMaxRetrievalInput] = useState(8);
-  const [memorySimilarityThresholdInput, setMemorySimilarityThresholdInput] = useState(0.7);
   const [memoryEmbeddingModelInput, setMemoryEmbeddingModelInput] = useState<MemoryEmbeddingModel>("text-embedding-3-small");
   const [skillItems, setSkillItems] = useState<SkillItem[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
@@ -612,11 +604,7 @@ function SettingsApp() {
 
   useEffect(() => {
     setMemoryEnabledInput(memoryConfig.config.enabled);
-    setMemoryAutoRetrievalInput(memoryConfig.config.autoRetrieval);
     setMemoryQueryRewriteInput(memoryConfig.config.queryRewrite);
-    setMemoryAutoSummarizeInput(memoryConfig.config.autoSummarize);
-    setMemoryMaxRetrievalInput(memoryConfig.config.maxRetrievalCount);
-    setMemorySimilarityThresholdInput(memoryConfig.config.similarityThreshold);
     setMemoryEmbeddingModelInput(memoryConfig.config.embeddingModel);
   }, [memoryConfig.config]);
 
@@ -890,11 +878,7 @@ function SettingsApp() {
     const selectedEmbeddingDefinition = embeddingModelDefinitions.find((item) => item.id === memoryEmbeddingModelInput);
     const result = await memoryConfig.save({
       enabled: memoryEnabledInput,
-      autoRetrieval: memoryAutoRetrievalInput,
       queryRewrite: memoryQueryRewriteInput,
-      autoSummarize: memoryAutoSummarizeInput,
-      maxRetrievalCount: memoryMaxRetrievalInput,
-      similarityThreshold: memorySimilarityThresholdInput,
       embeddingModel: memoryEmbeddingModelInput,
       embeddingDimension: selectedEmbeddingDefinition?.dimension,
     });
@@ -1431,7 +1415,7 @@ function SettingsApp() {
                   <div className="settings-memory__card-header">
                     <div>
                       <h3>记忆检索</h3>
-                      <p>先把 embedding model 和检索参数接进来，后面再把这里扩成更完整的 Alma 风格配置面板。</p>
+                      <p>这里只保留已经真正接入产品链路的开关：启用状态、查询重写和 embedding model。</p>
                     </div>
                   </div>
 
@@ -1450,28 +1434,10 @@ function SettingsApp() {
                   <label className="settings-memory__toggle">
                     <input
                       type="checkbox"
-                      checked={memoryAutoRetrievalInput}
-                      onChange={(event) => setMemoryAutoRetrievalInput(event.target.checked)}
-                    />
-                    <span>自动检索记忆</span>
-                  </label>
-
-                  <label className="settings-memory__toggle">
-                    <input
-                      type="checkbox"
                       checked={memoryQueryRewriteInput}
                       onChange={(event) => setMemoryQueryRewriteInput(event.target.checked)}
                     />
                     <span>查询重写</span>
-                  </label>
-
-                  <label className="settings-memory__toggle">
-                    <input
-                      type="checkbox"
-                      checked={memoryAutoSummarizeInput}
-                      onChange={(event) => setMemoryAutoSummarizeInput(event.target.checked)}
-                    />
-                    <span>自动总结对话</span>
                   </label>
 
                   <div className="settings-memory__grid">
@@ -1494,37 +1460,6 @@ function SettingsApp() {
                       <label>维度</label>
                       <div className="provider-field__box provider-field__box--input">
                         {embeddingModelDefinitions.find((definition) => definition.id === memoryEmbeddingModelInput)?.dimension ?? memoryConfig.config.embeddingDimension}
-                      </div>
-                    </div>
-
-                    <div className="provider-field">
-                      <label>最大检索记忆数</label>
-                      <input
-                        className="provider-field__input"
-                        type="number"
-                        min={1}
-                        max={50}
-                        value={memoryMaxRetrievalInput}
-                        onChange={(event) => setMemoryMaxRetrievalInput(Number.parseInt(event.target.value, 10) || 1)}
-                      />
-                    </div>
-
-                    <div className="provider-field">
-                      <label>相似度阈值</label>
-                      <input
-                        className="provider-field__input"
-                        type="number"
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={memorySimilarityThresholdInput}
-                        onChange={(event) => {
-                          const nextValue = Number.parseFloat(event.target.value);
-                          setMemorySimilarityThresholdInput(Number.isFinite(nextValue) ? Math.max(0, Math.min(1, nextValue)) : 0);
-                        }}
-                      />
-                      <div className="provider-field__hint">
-                        当前约等于 {formatSimilarityPercent(memorySimilarityThresholdInput)}
                       </div>
                     </div>
                   </div>

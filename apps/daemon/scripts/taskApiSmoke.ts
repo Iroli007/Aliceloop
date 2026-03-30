@@ -440,12 +440,6 @@ async function main() {
     assert.equal(attentionResponse.status, 200, "attention endpoint should respond");
     const attentionPayload = (await attentionResponse.json()) as { currentLibraryItemId: string | null; concepts: string[] };
 
-    const memoriesResponse = await fetch(`${baseUrl}/api/memories?limit=10`);
-    assert.equal(memoriesResponse.status, 200, "memories endpoint should respond");
-    const memoriesPayload = (await memoriesResponse.json()) as Array<{ id: string; title: string; source: string }>;
-    const memoryDetailResponse = await fetch(`${baseUrl}/api/memories/${encodeURIComponent(memoriesPayload[0]?.id ?? "")}`);
-    assert.equal(memoryDetailResponse.status, 200, "memory detail endpoint should respond");
-    const memoryDetailPayload = (await memoryDetailResponse.json()) as { id: string; source: string };
     const archiveResponse = await fetch(`${baseUrl}/api/memory/archive`, { method: "POST" });
     assert.equal(archiveResponse.status, 200, "memory archive endpoint should respond");
     const archivePayload = (await archiveResponse.json()) as { projectCount: number; sessionCount: number };
@@ -591,9 +585,6 @@ async function main() {
     assert(searchPayload.length > 0, "FTS search should return matching blocks");
     assert.equal(attentionPayload.currentLibraryItemId, ingestPayload.libraryItem.id, "attention should focus the latest ingested library");
     assert(attentionPayload.concepts.length > 0, "attention should expose inferred concepts");
-    assert(memoriesPayload.some((memory) => memory.source === "attention-index"), "ingest should distill an attention memory note");
-    assert(memoriesPayload.some((memory) => memory.source === "review-coach"), "review-coach should create a memory note");
-    assert.equal(memoryDetailPayload.source, "review-coach", "memory detail endpoint should resolve saved memory");
     assert(archivePayload.projectCount >= 1, "memory archive should report project transcript exports");
     assert(archivePayload.sessionCount >= 1, "memory archive should report synced sessions");
     assert(threadSearchPayload.some((thread) => thread.id === recallSessionPayload.id), "thread search should match message body content");

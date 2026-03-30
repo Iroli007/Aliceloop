@@ -18,12 +18,13 @@ import {
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import {
   appendSessionEvent,
-  createAttachment,
-  createSessionMessage,
-  getSessionWorksetState,
-  updateSessionMessage,
-  updateSessionWorksetState,
-  upsertSessionJob,
+    createAttachment,
+    createSessionMessage,
+    getSessionWorksetState,
+    getSessionProjectBinding,
+    updateSessionMessage,
+    updateSessionWorksetState,
+    upsertSessionJob,
 } from "../repositories/sessionRepository";
 import { createMemory } from "../context/memory/memoryRepository";
 import { maybeCreateArtifactFromReply } from "../services/artifactWriter";
@@ -1539,13 +1540,16 @@ function schedulePostProcessing(run: AgentRun, text: string) {
       userMessages,
       assistantResponse: text,
     });
+    const projectBinding = getSessionProjectBinding(run.sessionId);
 
-    for (const memory of distilled.permanent) {
+    for (const memory of distilled) {
       try {
         await createMemory({
           content: memory.content,
           source: "auto",
           durability: "permanent",
+          projectId: projectBinding?.projectId ?? null,
+          sessionId: projectBinding?.projectId ? null : run.sessionId,
           factKind: memory.factKind,
           factKey: memory.factKey,
           relatedTopics: memory.relatedTopics,

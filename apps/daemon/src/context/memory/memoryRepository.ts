@@ -6,7 +6,6 @@ import type {
   MemoryConfig,
   MemoryFactKind,
   MemoryFactState,
-  MemoryNote,
   MemoryStats,
   MemoryWithScore,
   UpdateMemoryInput,
@@ -27,23 +26,17 @@ import {
   recordEmbeddingSuccess,
 } from "./embeddingRuntime";
 import { getMemoryConfig } from "./memoryConfig";
+import { rewriteQuery } from "./queryRewriter";
 import { rankBySimilarity } from "./vectorSearch";
 import { nowMs, roundMs } from "../../runtime/perfTrace";
-
-interface CreateMemoryNoteInput {
-  id: string;
-  kind: MemoryNote["kind"];
-  title: string;
-  content: string;
-  source: string;
-  updatedAt: string;
-}
 
 interface MemoryRow {
   id: string;
   content: string;
   source: Memory["source"];
   durability: Memory["durability"];
+  projectId: string | null;
+  sessionId: string | null;
   factKind: MemoryFactKind | null;
   factKey: string | null;
   factState: MemoryFactState;
@@ -61,6 +54,8 @@ interface MemoryEmbeddingRow {
 
 export type MemorySearchMode = "semantic" | "lexical";
 export const MEMORY_RETRIEVAL_TIMEOUT_REASON = "memory_retrieval_timeout";
+export const DEFAULT_SEMANTIC_MEMORY_RETRIEVAL_LIMIT = 8;
+export const DEFAULT_SEMANTIC_MEMORY_SIMILARITY_THRESHOLD = 0.7;
 export type MemorySearchFallbackReason =
   | "embedding_provider_unavailable"
   | "embedding_circuit_open"
@@ -76,77 +71,10 @@ export interface MemorySearchResult {
   timings: Record<string, number | string | null>;
 }
 
-function getMemoryNoteById(memoryId: string) {
-  const db = getDatabase();
-  const row = db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        WHERE id = ?
-      `,
-    )
-    .get(memoryId) as MemoryNote | undefined;
-
-  return row ?? null;
-}
-
-function buildSearchContent(input: Pick<CreateMemoryNoteInput, "title" | "content">) {
-  return `${input.title}\n${input.content}`.trim();
-}
-
-function syncMemorySearchIndex(input: CreateMemoryNoteInput) {
-  const db = getDatabase();
-  const row = db
-    .prepare(
-      `
-        SELECT rowid
-        FROM memory_notes
-        WHERE id = ?
-      `,
-    )
-    .get(input.id) as { rowid: number } | undefined;
-
-  if (!row) {
-    return;
-  }
-
-  db.prepare(
-    `
-      INSERT OR REPLACE INTO memory_notes_fts (
-        rowid,
-        memory_id,
-        kind,
-        content
-      ) VALUES (
-        @rowid,
-        @memoryId,
-        @kind,
-        @content
-      )
-    `,
-  ).run({
-    rowid: row.rowid,
-    memoryId: input.id,
-    kind: input.kind,
-    content: buildSearchContent(input),
-  });
-}
-
-function normalizeFtsQuery(query: string) {
-  return query
-    .trim()
-    .split(/\s+/)
-    .map((term) => term.replace(/"/g, ""))
-    .filter((term) => term.length > 0)
-    .map((term) => `${term}*`)
-    .join(" ");
+interface MemoryScopeFilter {
+  projectId?: string | null;
+  sessionId?: string | null;
+  includeGlobal?: boolean;
 }
 
 function parseJsonArray(value: string | null | undefined) {
@@ -160,6 +88,81 @@ function parseJsonArray(value: string | null | undefined) {
   } catch {
     return [];
   }
+}
+
+function normalizeScopeId(value: string | null | undefined) {
+  const normalized = value?.trim() ?? "";
+  return normalized ? normalized : null;
+}
+
+function normalizeMemoryScopeFilter(scope?: MemoryScopeFilter) {
+  return {
+    projectId: normalizeScopeId(scope?.projectId),
+    sessionId: normalizeScopeId(scope?.sessionId),
+    includeGlobal: scope?.includeGlobal !== false,
+  };
+}
+
+function qualifyColumn(alias: string | undefined, columnName: string) {
+  return alias ? `${alias}.${columnName}` : columnName;
+}
+
+function buildExactScopeClause(
+  scope: MemoryScopeFilter | undefined,
+  params: Array<string | number>,
+  alias?: string,
+) {
+  const normalized = normalizeMemoryScopeFilter(scope);
+  const projectColumn = qualifyColumn(alias, "project_id");
+  const sessionColumn = qualifyColumn(alias, "session_id");
+  const clauses: string[] = [];
+
+  if (normalized.projectId) {
+    clauses.push(`${projectColumn} = ?`);
+    params.push(normalized.projectId);
+  } else {
+    clauses.push(`${projectColumn} IS NULL`);
+  }
+
+  if (normalized.sessionId) {
+    clauses.push(`${sessionColumn} = ?`);
+    params.push(normalized.sessionId);
+  } else {
+    clauses.push(`${sessionColumn} IS NULL`);
+  }
+
+  return clauses.join(" AND ");
+}
+
+function buildRetrievalScopeClause(
+  scope: MemoryScopeFilter | undefined,
+  params: Array<string | number>,
+  alias?: string,
+) {
+  const normalized = normalizeMemoryScopeFilter(scope);
+  const projectColumn = qualifyColumn(alias, "project_id");
+  const sessionColumn = qualifyColumn(alias, "session_id");
+  const clauses: string[] = [];
+
+  if (normalized.sessionId) {
+    clauses.push(`${sessionColumn} = ?`);
+    params.push(normalized.sessionId);
+  }
+
+  if (normalized.projectId) {
+    clauses.push(`${sessionColumn} IS NULL AND ${projectColumn} = ?`);
+    params.push(normalized.projectId);
+  }
+
+  if (normalized.includeGlobal && (normalized.sessionId || normalized.projectId)) {
+    clauses.push(`${sessionColumn} IS NULL AND ${projectColumn} IS NULL`);
+  }
+
+  if (clauses.length === 0) {
+    return "";
+  }
+
+  return clauses.map((clause) => `(${clause})`).join(" OR ");
 }
 
 function normalizeFactKey(value: string | null | undefined) {
@@ -214,7 +217,42 @@ const lexicalStopWords = new Set([
   "with",
 ]);
 
-function extractLexicalTerms(queryText: string) {
+const cjkPattern = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const maxLexicalTerms = 16;
+const lexicalCoarseCandidateLimitFloor = 24;
+const lexicalStrongCandidateCountFloor = 3;
+const lexicalWeakScoreThreshold = 0.45;
+const lexicalModerateScoreThreshold = 0.6;
+
+function hasCjkCharacters(value: string) {
+  return cjkPattern.test(value);
+}
+
+function buildCjkBigrams(term: string) {
+  if (term.length <= 2) {
+    return [term];
+  }
+
+  const bigrams: string[] = [];
+  for (let index = 0; index < term.length - 1; index += 1) {
+    bigrams.push(term.slice(index, index + 2));
+  }
+  return bigrams;
+}
+
+function buildCjkTrigrams(term: string) {
+  if (term.length <= 3) {
+    return [term];
+  }
+
+  const trigrams: string[] = [];
+  for (let index = 0; index < term.length - 2; index += 1) {
+    trigrams.push(term.slice(index, index + 3));
+  }
+  return trigrams;
+}
+
+function normalizeLexicalSourceTerms(queryText: string) {
   const normalized = queryText
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s_-]+/gu, " ");
@@ -228,12 +266,82 @@ function extractLexicalTerms(queryText: string) {
   return filteredTerms.length > 0 ? filteredTerms : Array.from(new Set(rawTerms));
 }
 
+function extractLexicalTerms(queryText: string) {
+  const sourceTerms = normalizeLexicalSourceTerms(queryText);
+  const expandedTerms = sourceTerms.flatMap((term) => {
+    if (!hasCjkCharacters(term)) {
+      return [term];
+    }
+
+    return term.length <= 6
+      ? [term, ...buildCjkBigrams(term)]
+      : buildCjkBigrams(term);
+  });
+
+  return Array.from(new Set(expandedTerms)).slice(0, maxLexicalTerms);
+}
+
+function extractFtsTerms(queryText: string) {
+  const sourceTerms = normalizeLexicalSourceTerms(queryText);
+  const expandedTerms = sourceTerms.flatMap((term) => {
+    if (hasCjkCharacters(term)) {
+      if (term.length < 3) {
+        return [];
+      }
+
+      return term.length <= 6
+        ? [term, ...buildCjkTrigrams(term)]
+        : buildCjkTrigrams(term);
+    }
+
+    return term.length >= 3 ? [term] : [];
+  });
+
+  return Array.from(new Set(expandedTerms)).slice(0, maxLexicalTerms);
+}
+
+function buildMemorySearchText(memory: Pick<Memory, "content" | "factKind" | "factKey" | "relatedTopics">) {
+  return [
+    memory.content,
+    memory.factKind ?? "",
+    memory.factKey ?? "",
+    memory.relatedTopics.join(" "),
+  ]
+    .join("\n")
+    .trim();
+}
+
+function syncMemorySearchIndex(
+  memory: Pick<Memory, "id" | "content" | "factKind" | "factKey" | "factState" | "relatedTopics">,
+  db: Database.Database = getDatabase(),
+) {
+  db.prepare("DELETE FROM memory_search_fts WHERE memory_id = ?").run(memory.id);
+  if (memory.factState !== "active") {
+    return;
+  }
+
+  db.prepare(
+    `
+      INSERT INTO memory_search_fts (
+        memory_id,
+        search_text
+      ) VALUES (?, ?)
+    `,
+  ).run(memory.id, buildMemorySearchText(memory));
+}
+
+function removeMemorySearchIndex(memoryId: string, db: Database.Database = getDatabase()) {
+  db.prepare("DELETE FROM memory_search_fts WHERE memory_id = ?").run(memoryId);
+}
+
 function mapMemoryRow(row: MemoryRow): Memory {
   return {
     id: row.id,
     content: row.content,
     source: row.source,
     durability: row.durability,
+    projectId: row.projectId,
+    sessionId: row.sessionId,
     factKind: row.factKind,
     factKey: row.factKey,
     factState: row.factState,
@@ -256,6 +364,8 @@ function getMemoryRowById(
           content,
           source,
           durability,
+          project_id AS projectId,
+          session_id AS sessionId,
           fact_kind AS factKind,
           fact_key AS factKey,
           fact_state AS factState,
@@ -303,6 +413,63 @@ function scoreTextMatch(queryText: string, memory: Memory) {
   const exactPhraseBonus = haystack.includes(queryText.trim().toLowerCase()) ? 0.2 : 0;
 
   return Math.min(1, coverage + topicBonus + factKeyBonus + exactPhraseBonus);
+}
+
+function getLexicalCandidateLimit(limit: number) {
+  return Math.max(limit * 4, lexicalCoarseCandidateLimitFloor);
+}
+
+function assessLexicalCandidates(candidates: MemoryWithScore[], limit: number) {
+  const candidateCount = candidates.length;
+  const topScore = candidates[0]?.similarityScore ?? 0;
+  const strongEnoughCount = Math.min(limit, lexicalStrongCandidateCountFloor);
+  const weak = candidateCount === 0
+    || topScore < lexicalWeakScoreThreshold
+    || (candidateCount < strongEnoughCount && topScore < lexicalModerateScoreThreshold);
+
+  return {
+    candidateCount,
+    topScore,
+    weak,
+  };
+}
+
+function loadMemoryEmbeddingRows(
+  embeddingDimension: number,
+  scope: MemoryScopeFilter | undefined,
+  db: Database.Database = getDatabase(),
+  memoryIds?: string[],
+) {
+  if (memoryIds && memoryIds.length === 0) {
+    return [] as MemoryEmbeddingRow[];
+  }
+
+  const params: Array<string | number> = [embeddingDimension];
+  const clauses = ["metadata.embedding_dimension = ?", "m.fact_state = 'active'"];
+  const scopeClause = buildRetrievalScopeClause(scope, params, "m");
+  if (scopeClause) {
+    clauses.push(`(${scopeClause})`);
+  }
+
+  if (memoryIds) {
+    clauses.push(`embeddings.memory_id IN (${memoryIds.map(() => "?").join(", ")})`);
+    params.push(...memoryIds);
+  }
+
+  return db
+    .prepare(
+      `
+        SELECT
+          embeddings.memory_id AS memoryId,
+          embeddings.embedding AS embedding,
+          metadata.embedding_dimension AS embeddingDimension
+        FROM memory_embeddings embeddings
+        JOIN memory_metadata metadata ON metadata.memory_id = embeddings.memory_id
+        JOIN memories m ON m.id = embeddings.memory_id
+        WHERE ${clauses.join("\n          AND ")}
+      `,
+    )
+    .all(...params) as MemoryEmbeddingRow[];
 }
 
 function clearMemoryEmbedding(memoryId: string, db: Database.Database = getDatabase()) {
@@ -356,6 +523,7 @@ function searchMemoriesByText(
   queryText: string,
   limit: number,
   threshold: number,
+  scope: MemoryScopeFilter | undefined,
   db: Database.Database = getDatabase(),
 ) {
   const trimmedQuery = queryText.trim();
@@ -368,37 +536,68 @@ function searchMemoriesByText(
     return [] as MemoryWithScore[];
   }
 
-  const clauses: string[] = [];
+  const normalizedLimit = Math.max(limit * 3, limit);
+  const ftsTerms = extractFtsTerms(trimmedQuery);
   const params: Array<string | number> = [];
-  for (const term of lexicalTerms) {
-    clauses.push("(content LIKE ? OR related_topics LIKE ? OR fact_key LIKE ? OR fact_kind LIKE ?)");
-    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
-  }
-  params.push(Math.max(limit * 3, limit));
+  const scopeClause = buildRetrievalScopeClause(scope, params, "m");
+  let rows: MemoryRow[];
 
-  const rows = db
-    .prepare(
-      `
-        SELECT
-          id,
-          content,
-          source,
-          durability,
-          fact_kind AS factKind,
-          fact_key AS factKey,
-          fact_state AS factState,
-          created_at AS createdAt,
-          updated_at AS updatedAt,
-          access_count AS accessCount,
-          related_topics AS relatedTopics
-        FROM memories
-        WHERE fact_state = 'active'
-          AND (${clauses.join(" OR ")})
-        ORDER BY access_count DESC, updated_at DESC
-        LIMIT ?
-      `,
-    )
-    .all(...params) as MemoryRow[];
+  if (ftsTerms.length > 0) {
+    const ftsQuery = ftsTerms
+      .map((term) => `"${term.replace(/"/g, "\"\"")}"`)
+      .join(" OR ");
+    rows = db
+      .prepare(
+        `
+          SELECT
+            m.id AS id,
+            m.content AS content,
+            m.source AS source,
+            m.durability AS durability,
+            m.project_id AS projectId,
+            m.session_id AS sessionId,
+            m.fact_kind AS factKind,
+            m.fact_key AS factKey,
+            m.fact_state AS factState,
+            m.created_at AS createdAt,
+            m.updated_at AS updatedAt,
+            m.access_count AS accessCount,
+            m.related_topics AS relatedTopics
+          FROM memory_search_fts
+          JOIN memories m ON m.id = memory_search_fts.memory_id
+          WHERE memory_search_fts MATCH ?
+            AND m.fact_state = 'active'
+            ${scopeClause ? `AND (${scopeClause})` : ""}
+          ORDER BY bm25(memory_search_fts), m.access_count DESC, m.updated_at DESC
+          LIMIT ?
+        `,
+      )
+      .all(ftsQuery, ...params, normalizedLimit) as MemoryRow[];
+  } else {
+    rows = db
+      .prepare(
+        `
+          SELECT
+            id,
+            content,
+            source,
+            durability,
+            project_id AS projectId,
+            session_id AS sessionId,
+            fact_kind AS factKind,
+            fact_key AS factKey,
+            fact_state AS factState,
+            created_at AS createdAt,
+            updated_at AS updatedAt,
+            access_count AS accessCount,
+            related_topics AS relatedTopics
+          FROM memories
+          WHERE fact_state = 'active'
+            ${scopeClause ? `AND (${scopeClause})` : ""}
+        `,
+      )
+      .all(...params) as MemoryRow[];
+  }
 
   return rows
     .map((row) => {
@@ -417,9 +616,10 @@ export function searchMemoriesLexically(
   queryText: string,
   limit: number,
   threshold: number,
+  scope: MemoryScopeFilter | undefined,
   db: Database.Database = getDatabase(),
 ) {
-  return searchMemoriesByText(queryText, limit, threshold, db);
+  return searchMemoriesByText(queryText, limit, threshold, scope, db);
 }
 
 export function countSemanticMemoryCandidates(
@@ -439,270 +639,6 @@ export function countSemanticMemoryCandidates(
   return row?.count ?? 0;
 }
 
-export function createMemoryNote(input: CreateMemoryNoteInput) {
-  const db = getDatabase();
-  db.prepare(
-    `
-      INSERT INTO memory_notes (
-        id, kind, title, content, source, updated_at
-      ) VALUES (
-        @id, @kind, @title, @content, @source, @updatedAt
-      )
-    `,
-  ).run(input);
-  syncMemorySearchIndex(input);
-
-  const created = getMemoryNoteById(input.id);
-  if (!created) {
-    throw new Error(`Memory note ${input.id} was not created`);
-  }
-
-  return created;
-}
-
-export function upsertMemoryNote(input: CreateMemoryNoteInput) {
-  const db = getDatabase();
-  db.prepare(
-    `
-      INSERT INTO memory_notes (
-        id, kind, title, content, source, updated_at
-      ) VALUES (
-        @id, @kind, @title, @content, @source, @updatedAt
-      )
-      ON CONFLICT(id) DO UPDATE SET
-        kind = excluded.kind,
-        title = excluded.title,
-        content = excluded.content,
-        source = excluded.source,
-        updated_at = excluded.updated_at
-    `,
-  ).run(input);
-  syncMemorySearchIndex(input);
-
-  const updated = getMemoryNoteById(input.id);
-  if (!updated) {
-    throw new Error(`Memory note ${input.id} was not saved`);
-  }
-
-  return updated;
-}
-
-export function listMemoryNotes(limit = 50, source?: string) {
-  const db = getDatabase();
-  const normalizedLimit = Math.max(1, Math.min(limit, 200));
-
-  if (source?.trim()) {
-    return db
-      .prepare(
-        `
-          SELECT
-            id,
-            kind,
-            title,
-            content,
-            source,
-            updated_at AS updatedAt
-          FROM memory_notes
-          WHERE source = ?
-          ORDER BY updated_at DESC
-          LIMIT ?
-        `,
-      )
-      .all(source.trim(), normalizedLimit) as MemoryNote[];
-  }
-
-  return db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        ORDER BY updated_at DESC
-        LIMIT ?
-      `,
-    )
-    .all(normalizedLimit) as MemoryNote[];
-}
-
-export function listMemoryNotesBySourcePrefix(sourcePrefix: string, limit = 50) {
-  const db = getDatabase();
-  const normalizedPrefix = sourcePrefix.trim();
-  if (!normalizedPrefix) {
-    return [] as MemoryNote[];
-  }
-
-  const normalizedLimit = Math.max(1, Math.min(limit, 200));
-  return db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        WHERE source LIKE ?
-        ORDER BY updated_at DESC
-        LIMIT ?
-      `,
-    )
-    .all(`${normalizedPrefix}%`, normalizedLimit) as MemoryNote[];
-}
-
-export function getMemoryNote(memoryId: string) {
-  return getMemoryNoteById(memoryId);
-}
-
-export function deleteMemoryNote(memoryId: string) {
-  const db = getDatabase();
-  const row = db
-    .prepare(
-      `
-        SELECT rowid
-        FROM memory_notes
-        WHERE id = ?
-      `,
-    )
-    .get(memoryId) as { rowid: number } | undefined;
-
-  if (!row) {
-    return false;
-  }
-
-  db.prepare(
-    `
-      DELETE FROM memory_notes_fts
-      WHERE rowid = ?
-    `,
-  ).run(row.rowid);
-
-  const result = db
-    .prepare(
-      `
-        DELETE FROM memory_notes
-        WHERE id = ?
-      `,
-    )
-    .run(memoryId);
-
-  return result.changes > 0;
-}
-
-export function searchMemoryNotes(query: string, limit = 10, source?: string): MemoryNote[] {
-  const db = getDatabase();
-  const normalizedSource = source?.trim();
-
-  const hasFts = db
-    .prepare(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name='memory_notes_fts'`,
-    )
-    .get();
-
-  if (hasFts && query.trim()) {
-    const normalizedQuery = normalizeFtsQuery(query);
-    if (normalizedQuery) {
-      try {
-        const ftsQuery = normalizedSource
-          ? db
-            .prepare(
-              `
-                SELECT
-                  m.id,
-                  m.kind,
-                  m.title,
-                  m.content,
-                  m.source,
-                  m.updated_at AS updatedAt
-                FROM memory_notes_fts fts
-                JOIN memory_notes m ON m.id = fts.memory_id
-                WHERE memory_notes_fts MATCH ?
-                  AND m.source = ?
-                ORDER BY rank
-                LIMIT ?
-              `,
-            )
-            .all(normalizedQuery, normalizedSource, limit)
-          : db
-            .prepare(
-              `
-                SELECT
-                  m.id,
-                  m.kind,
-                  m.title,
-                  m.content,
-                  m.source,
-                  m.updated_at AS updatedAt
-                FROM memory_notes_fts fts
-                JOIN memory_notes m ON m.id = fts.memory_id
-                WHERE memory_notes_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-              `,
-            )
-            .all(normalizedQuery, limit);
-
-        const ftsResults = ftsQuery as MemoryNote[];
-
-        if (ftsResults.length > 0) {
-          return ftsResults;
-        }
-      } catch {
-        // Fall back to LIKE search when the query cannot be parsed by FTS5.
-      }
-    }
-  }
-
-  if (!query.trim()) {
-    return listMemoryNotes(limit, normalizedSource);
-  }
-
-  if (normalizedSource) {
-    return db
-      .prepare(
-        `
-          SELECT
-            id,
-            kind,
-            title,
-            content,
-            source,
-            updated_at AS updatedAt
-          FROM memory_notes
-          WHERE source = ?
-            AND (content LIKE ? OR title LIKE ?)
-          ORDER BY updated_at DESC
-          LIMIT ?
-        `,
-      )
-      .all(normalizedSource, `%${query}%`, `%${query}%`, limit) as MemoryNote[];
-  }
-
-  return db
-    .prepare(
-      `
-        SELECT
-          id,
-          kind,
-          title,
-          content,
-          source,
-          updated_at AS updatedAt
-        FROM memory_notes
-        WHERE content LIKE ? OR title LIKE ?
-        ORDER BY updated_at DESC
-        LIMIT ?
-      `,
-    )
-    .all(`%${query}%`, `%${query}%`, limit) as MemoryNote[];
-}
-
 export async function createMemory(
   input: CreateMemoryInput,
   db: Database.Database = getDatabase(),
@@ -717,12 +653,16 @@ export async function createMemory(
   const factKind = normalizeFactKind(input.factKind);
   const factKey = normalizeFactKey(input.factKey);
   const factState = normalizeFactState(input.factState);
+  const projectId = normalizeScopeId(input.projectId);
+  const sessionId = normalizeScopeId(input.sessionId);
   const relatedTopics = input.relatedTopics?.map((topic) => topic.trim()).filter(Boolean) ?? [];
   const memory: Memory = {
     id: randomUUID(),
     content,
     source: input.source,
     durability: input.durability,
+    projectId,
+    sessionId,
     factKind,
     factKey,
     factState,
@@ -735,7 +675,10 @@ export async function createMemory(
   if (hasFactIdentity(memory)) {
     const factKind = memory.factKind!;
     const factKey = memory.factKey!;
-    const existing = findActiveMemoryByFactIdentity(factKind, factKey, db);
+    const existing = findActiveMemoryByFactIdentity(factKind, factKey, {
+      projectId: memory.projectId,
+      sessionId: memory.sessionId,
+    }, db);
     if (existing) {
       if (memory.factState !== "active") {
         db.prepare(
@@ -747,6 +690,7 @@ export async function createMemory(
           `,
         ).run(memory.factState, now, existing.id);
         clearMemoryEmbedding(existing.id, db);
+        removeMemorySearchIndex(existing.id, db);
         return getMemoryById(existing.id, db) ?? existing;
       }
 
@@ -763,9 +707,13 @@ export async function createMemory(
         `,
       ).run(now, existing.id);
       clearMemoryEmbedding(existing.id, db);
+      removeMemorySearchIndex(existing.id, db);
     }
   } else {
-    const duplicate = findMemoryByExactContent(content, db);
+    const duplicate = findMemoryByExactContent(content, {
+      projectId: memory.projectId,
+      sessionId: memory.sessionId,
+    }, db);
     if (duplicate) {
       return duplicate;
     }
@@ -778,6 +726,8 @@ export async function createMemory(
         content,
         source,
         durability,
+        project_id,
+        session_id,
         fact_kind,
         fact_key,
         fact_state,
@@ -785,13 +735,15 @@ export async function createMemory(
         updated_at,
         access_count,
         related_topics
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     memory.id,
     memory.content,
     memory.source,
     memory.durability,
+    memory.projectId,
+    memory.sessionId,
     memory.factKind,
     memory.factKey,
     memory.factState,
@@ -802,6 +754,7 @@ export async function createMemory(
   );
 
   if (memory.factState === "active") {
+    syncMemorySearchIndex(memory, db);
     try {
       const config = getMemoryConfig(db);
       await upsertMemoryEmbedding(memory, config, db, abortSignal);
@@ -809,6 +762,7 @@ export async function createMemory(
       console.warn("[memory] Failed to generate embedding for memory creation", error);
     }
   } else {
+    removeMemorySearchIndex(memory.id, db);
     clearMemoryEmbedding(memory.id, db);
   }
 
@@ -819,9 +773,14 @@ export async function searchMemories(
   queryText: string,
   limit: number,
   threshold: number,
-  db: Database.Database = getDatabase(),
-  abortSignal?: AbortSignal,
+  options: {
+    scope?: MemoryScopeFilter;
+    db?: Database.Database;
+    abortSignal?: AbortSignal;
+  } = {},
 ): Promise<MemorySearchResult> {
+  const db = options.db ?? getDatabase();
+  const abortSignal = options.abortSignal;
   const startedAt = nowMs();
   const trimmedQuery = queryText.trim();
   if (!trimmedQuery) {
@@ -837,22 +796,52 @@ export async function searchMemories(
 
   const normalizedLimit = Math.max(1, Math.min(limit, 50));
   const config = getMemoryConfig(db);
+  let retrievalQuery = trimmedQuery;
+  const lexicalCandidateLimit = getLexicalCandidateLimit(normalizedLimit);
+  const lexicalCoarseStartedAt = nowMs();
+  let lexicalCandidates = searchMemoriesByText(retrievalQuery, lexicalCandidateLimit, 0, options.scope, db);
+  let lexicalCoarseMs = roundMs(nowMs() - lexicalCoarseStartedAt);
+  let lexicalSignal = assessLexicalCandidates(lexicalCandidates, normalizedLimit);
+  let queryRewriteMs = 0;
+  let queryRewritten = 0;
+  let queryRewriteTriggered = 0;
+
+  if (config.queryRewrite && lexicalSignal.weak) {
+    const queryRewriteStartedAt = nowMs();
+    queryRewriteTriggered = 1;
+    retrievalQuery = (await rewriteQuery(trimmedQuery, abortSignal)).trim() || trimmedQuery;
+    queryRewriteMs = roundMs(nowMs() - queryRewriteStartedAt);
+    queryRewritten = retrievalQuery !== trimmedQuery ? 1 : 0;
+    if (queryRewritten) {
+      const rewrittenLexicalStartedAt = nowMs();
+      lexicalCandidates = searchMemoriesByText(retrievalQuery, lexicalCandidateLimit, 0, options.scope, db);
+      lexicalCoarseMs = roundMs(lexicalCoarseMs + (nowMs() - rewrittenLexicalStartedAt));
+      lexicalSignal = assessLexicalCandidates(lexicalCandidates, normalizedLimit);
+    }
+  }
 
   if (!hasEmbeddingProvider()) {
     const lexicalStartedAt = nowMs();
-    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    const memories = searchMemoriesByText(retrievalQuery, normalizedLimit, threshold, options.scope, db);
     return {
       memories,
       mode: "lexical" as const,
       fallbackReason: "embedding_provider_unavailable" as const,
       timings: {
+        lexicalCoarseMs,
+        lexicalCandidateCount: lexicalSignal.candidateCount,
+        lexicalTopScore: lexicalSignal.topScore,
+        lexicalWeakSignal: lexicalSignal.weak ? 1 : 0,
+        queryRewriteMs,
+        queryRewritten,
+        queryRewriteTriggered,
         lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
         totalMs: roundMs(nowMs() - startedAt),
       },
     };
   }
 
-  const cachedEmbedding = getCachedQueryEmbedding(trimmedQuery, config.embeddingModel, config.embeddingDimension);
+  const cachedEmbedding = getCachedQueryEmbedding(retrievalQuery, config.embeddingModel, config.embeddingDimension);
   const circuitState = getEmbeddingCircuitState();
 
   let queryEmbedding: Float32Array;
@@ -863,12 +852,19 @@ export async function searchMemories(
     embeddingCacheHit = 1;
   } else if (circuitState.open) {
     const lexicalStartedAt = nowMs();
-    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+    const memories = searchMemoriesByText(retrievalQuery, normalizedLimit, threshold, options.scope, db);
     return {
       memories,
       mode: "lexical" as const,
       fallbackReason: "embedding_circuit_open" as const,
       timings: {
+        lexicalCoarseMs,
+        lexicalCandidateCount: lexicalSignal.candidateCount,
+        lexicalTopScore: lexicalSignal.topScore,
+        lexicalWeakSignal: lexicalSignal.weak ? 1 : 0,
+        queryRewriteMs,
+        queryRewritten,
+        queryRewriteTriggered,
         embeddingCacheHit,
         circuitOpen: 1,
         circuitCooldownRemainingMs: roundMs(circuitState.cooldownRemainingMs),
@@ -881,12 +877,12 @@ export async function searchMemories(
   } else {
     const embeddingStartedAt = nowMs();
     try {
-      queryEmbedding = await generateEmbedding(trimmedQuery, config.embeddingModel, {
+      queryEmbedding = await generateEmbedding(retrievalQuery, config.embeddingModel, {
         abortSignal,
         dimension: config.embeddingDimension,
       });
       embeddingMs = roundMs(nowMs() - embeddingStartedAt);
-      cacheQueryEmbedding(trimmedQuery, config.embeddingModel, config.embeddingDimension, queryEmbedding);
+      cacheQueryEmbedding(retrievalQuery, config.embeddingModel, config.embeddingDimension, queryEmbedding);
       recordEmbeddingSuccess();
     } catch (error) {
       if (abortSignal?.aborted && abortSignal.reason !== MEMORY_RETRIEVAL_TIMEOUT_REASON) {
@@ -901,12 +897,19 @@ export async function searchMemories(
       recordEmbeddingFailure(fallbackReason === "embedding_timeout" ? "timeout" : "error");
       console.warn("[memory] Falling back to lexical memory search", error);
       const lexicalStartedAt = nowMs();
-      const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+      const memories = searchMemoriesByText(retrievalQuery, normalizedLimit, threshold, options.scope, db);
       return {
         memories,
         mode: "lexical" as const,
         fallbackReason,
         timings: {
+          lexicalCoarseMs,
+          lexicalCandidateCount: lexicalSignal.candidateCount,
+          lexicalTopScore: lexicalSignal.topScore,
+          lexicalWeakSignal: lexicalSignal.weak ? 1 : 0,
+          queryRewriteMs,
+          queryRewritten,
+          queryRewriteTriggered,
           embeddingCacheHit,
           embeddingMs: roundMs(nowMs() - embeddingStartedAt),
           lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
@@ -916,69 +919,117 @@ export async function searchMemories(
     }
   }
 
-  const embeddingRowsStartedAt = nowMs();
-  const rows = db
-    .prepare(
-      `
-        SELECT
-          embeddings.memory_id AS memoryId,
-          embeddings.embedding AS embedding,
-          metadata.embedding_dimension AS embeddingDimension
-        FROM memory_embeddings embeddings
-        JOIN memory_metadata metadata ON metadata.memory_id = embeddings.memory_id
-        JOIN memories m ON m.id = embeddings.memory_id
-        WHERE metadata.embedding_dimension = ?
-          AND m.fact_state = 'active'
-      `,
-    )
-    .all(config.embeddingDimension) as MemoryEmbeddingRow[];
-  const embeddingRowsMs = roundMs(nowMs() - embeddingRowsStartedAt);
+  let semanticStrategy = "candidate-rerank";
+  let semanticCandidateEmbeddingRowsMs = 0;
+  let semanticCandidateCount = lexicalCandidates.length;
+  let semanticCandidateVectorRankMs = 0;
+  let semanticFullScanTriggered = 0;
+  let embeddingRowsMs = 0;
+  let vectorRankMs = 0;
+  let scoredMemories = [] as Array<{ memoryId: string; score: number }>;
 
-  if (rows.length === 0) {
-    const lexicalStartedAt = nowMs();
-    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
-    return {
-      memories,
-      mode: "lexical" as const,
-      fallbackReason: "embedding_index_missing" as const,
-      timings: {
-        embeddingCacheHit,
-        embeddingMs,
-        embeddingRowsMs,
-        lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
-        totalMs: roundMs(nowMs() - startedAt),
-      },
-    };
+  if (lexicalCandidates.length > 0) {
+    const candidateRowLookupStartedAt = nowMs();
+    const candidateRows = loadMemoryEmbeddingRows(
+      config.embeddingDimension,
+      options.scope,
+      db,
+      lexicalCandidates.map((memory) => memory.id),
+    );
+    semanticCandidateEmbeddingRowsMs = roundMs(nowMs() - candidateRowLookupStartedAt);
+
+    if (candidateRows.length > 0) {
+      const candidateRankStartedAt = nowMs();
+      scoredMemories = rankBySimilarity(
+        queryEmbedding,
+        candidateRows.map((row) => ({
+          memoryId: row.memoryId,
+          embedding: deserializeEmbedding(row.embedding),
+        })),
+        normalizedLimit,
+        threshold,
+      );
+      semanticCandidateVectorRankMs = roundMs(nowMs() - candidateRankStartedAt);
+    }
   }
 
-  const vectorRankStartedAt = nowMs();
-  const scoredMemories = rankBySimilarity(
-    queryEmbedding,
-    rows.map((row) => ({
-      memoryId: row.memoryId,
-      embedding: deserializeEmbedding(row.embedding),
-    })),
-    normalizedLimit,
-    threshold,
-  );
-  const vectorRankMs = roundMs(nowMs() - vectorRankStartedAt);
+  if (lexicalSignal.weak || scoredMemories.length === 0) {
+    semanticStrategy = "full-scan";
+    semanticFullScanTriggered = 1;
+    const embeddingRowsStartedAt = nowMs();
+    const rows = loadMemoryEmbeddingRows(config.embeddingDimension, options.scope, db);
+    embeddingRowsMs = roundMs(nowMs() - embeddingRowsStartedAt);
 
-  if (scoredMemories.length === 0) {
-    const lexicalStartedAt = nowMs();
-    const memories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
-    return {
-      memories,
-      mode: "lexical" as const,
-      fallbackReason: null,
-      timings: {
-        embeddingCacheHit,
-        embeddingMs,
-        embeddingRowsMs,
-        vectorRankMs,
-        lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
-        totalMs: roundMs(nowMs() - startedAt),
-      },
-    };
+    if (rows.length === 0) {
+      const lexicalStartedAt = nowMs();
+      const memories = searchMemoriesByText(retrievalQuery, normalizedLimit, threshold, options.scope, db);
+      return {
+        memories,
+        mode: "lexical" as const,
+        fallbackReason: "embedding_index_missing" as const,
+        timings: {
+          lexicalCoarseMs,
+          lexicalCandidateCount: lexicalSignal.candidateCount,
+          lexicalTopScore: lexicalSignal.topScore,
+          lexicalWeakSignal: lexicalSignal.weak ? 1 : 0,
+          queryRewriteMs,
+          queryRewritten,
+          queryRewriteTriggered,
+          embeddingCacheHit,
+          embeddingMs,
+          semanticStrategy,
+          semanticCandidateCount,
+          semanticCandidateEmbeddingRowsMs,
+          semanticCandidateVectorRankMs,
+          semanticFullScanTriggered,
+          embeddingRowsMs,
+          lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
+          totalMs: roundMs(nowMs() - startedAt),
+        },
+      };
+    }
+
+    const fullScanRankStartedAt = nowMs();
+    scoredMemories = rankBySimilarity(
+      queryEmbedding,
+      rows.map((row) => ({
+        memoryId: row.memoryId,
+        embedding: deserializeEmbedding(row.embedding),
+      })),
+      normalizedLimit,
+      threshold,
+    );
+    vectorRankMs = roundMs(nowMs() - fullScanRankStartedAt);
+
+    if (scoredMemories.length === 0) {
+      const lexicalStartedAt = nowMs();
+      const memories = searchMemoriesByText(retrievalQuery, normalizedLimit, threshold, options.scope, db);
+      return {
+        memories,
+        mode: "lexical" as const,
+        fallbackReason: null,
+        timings: {
+          lexicalCoarseMs,
+          lexicalCandidateCount: lexicalSignal.candidateCount,
+          lexicalTopScore: lexicalSignal.topScore,
+          lexicalWeakSignal: lexicalSignal.weak ? 1 : 0,
+          queryRewriteMs,
+          queryRewritten,
+          queryRewriteTriggered,
+          embeddingCacheHit,
+          embeddingMs,
+          semanticStrategy,
+          semanticCandidateCount,
+          semanticCandidateEmbeddingRowsMs,
+          semanticCandidateVectorRankMs,
+          semanticFullScanTriggered,
+          embeddingRowsMs,
+          vectorRankMs,
+          lexicalLookupMs: roundMs(nowMs() - lexicalStartedAt),
+          totalMs: roundMs(nowMs() - startedAt),
+        },
+      };
+    }
   }
 
   const hydrateStartedAt = nowMs();
@@ -1002,8 +1053,20 @@ export async function searchMemories(
     mode: "semantic" as const,
     fallbackReason: null,
     timings: {
+      lexicalCoarseMs,
+      lexicalCandidateCount: lexicalSignal.candidateCount,
+      lexicalTopScore: lexicalSignal.topScore,
+      lexicalWeakSignal: lexicalSignal.weak ? 1 : 0,
+      queryRewriteMs,
+      queryRewritten,
+      queryRewriteTriggered,
       embeddingCacheHit,
       embeddingMs,
+      semanticStrategy,
+      semanticCandidateCount,
+      semanticCandidateEmbeddingRowsMs,
+      semanticCandidateVectorRankMs,
+      semanticFullScanTriggered,
       embeddingRowsMs,
       vectorRankMs,
       hydrateMs,
@@ -1016,10 +1079,13 @@ export async function searchMemoriesBySimilarity(
   queryText: string,
   limit: number,
   threshold: number,
-  db: Database.Database = getDatabase(),
-  abortSignal?: AbortSignal,
+  options: {
+    scope?: MemoryScopeFilter;
+    db?: Database.Database;
+    abortSignal?: AbortSignal;
+  } = {},
 ) {
-  const result = await searchMemories(queryText, limit, threshold, db, abortSignal);
+  const result = await searchMemories(queryText, limit, threshold, options);
   return result.memories;
 }
 
@@ -1074,7 +1140,13 @@ export function getMemoryById(memoryId: string, db: Database.Database = getDatab
   return row ? mapMemoryRow(row) : null;
 }
 
-export function findMemoryByExactContent(content: string, db: Database.Database = getDatabase()) {
+export function findMemoryByExactContent(
+  content: string,
+  scope?: MemoryScopeFilter,
+  db: Database.Database = getDatabase(),
+) {
+  const params: Array<string | number> = [content.trim()];
+  const scopeClause = buildExactScopeClause(scope, params);
   const row = db
     .prepare(
       `
@@ -1083,6 +1155,8 @@ export function findMemoryByExactContent(content: string, db: Database.Database 
           content,
           source,
           durability,
+          project_id AS projectId,
+          session_id AS sessionId,
           fact_kind AS factKind,
           fact_key AS factKey,
           fact_state AS factState,
@@ -1092,12 +1166,13 @@ export function findMemoryByExactContent(content: string, db: Database.Database 
           related_topics AS relatedTopics
         FROM memories
         WHERE content = ?
+          AND ${scopeClause}
           AND fact_state = 'active'
         ORDER BY updated_at DESC
         LIMIT 1
       `,
     )
-    .get(content.trim()) as MemoryRow | undefined;
+    .get(...params) as MemoryRow | undefined;
 
   return row ? mapMemoryRow(row) : null;
 }
@@ -1105,8 +1180,11 @@ export function findMemoryByExactContent(content: string, db: Database.Database 
 function findActiveMemoryByFactIdentity(
   factKind: MemoryFactKind,
   factKey: string,
+  scope?: MemoryScopeFilter,
   db: Database.Database = getDatabase(),
 ) {
+  const params: Array<string | number> = [factKind, factKey];
+  const scopeClause = buildExactScopeClause(scope, params);
   const row = db
     .prepare(
       `
@@ -1115,6 +1193,8 @@ function findActiveMemoryByFactIdentity(
           content,
           source,
           durability,
+          project_id AS projectId,
+          session_id AS sessionId,
           fact_kind AS factKind,
           fact_key AS factKey,
           fact_state AS factState,
@@ -1125,12 +1205,13 @@ function findActiveMemoryByFactIdentity(
         FROM memories
         WHERE fact_kind = ?
           AND fact_key = ?
+          AND ${scopeClause}
           AND fact_state = 'active'
         ORDER BY updated_at DESC
         LIMIT 1
       `,
     )
-    .get(factKind, factKey) as MemoryRow | undefined;
+    .get(...params) as MemoryRow | undefined;
 
   return row ? mapMemoryRow(row) : null;
 }
@@ -1160,6 +1241,12 @@ export async function updateMemory(
   const nextUpdatedAt = new Date().toISOString();
 
   if (nextFactState === "active" && nextFactKind && nextFactKey) {
+    const conflictParams: Array<string | number> = [nextFactKind, nextFactKey];
+    const conflictScopeClause = buildExactScopeClause({
+      projectId: current.projectId,
+      sessionId: current.sessionId,
+    }, conflictParams);
+    conflictParams.push(memoryId);
     const conflicting = db
       .prepare(
         `
@@ -1168,6 +1255,8 @@ export async function updateMemory(
             content,
             source,
             durability,
+            project_id AS projectId,
+            session_id AS sessionId,
             fact_kind AS factKind,
             fact_key AS factKey,
             fact_state AS factState,
@@ -1178,13 +1267,14 @@ export async function updateMemory(
           FROM memories
           WHERE fact_kind = ?
             AND fact_key = ?
+            AND ${conflictScopeClause}
             AND fact_state = 'active'
             AND id <> ?
           ORDER BY updated_at DESC
           LIMIT 1
         `,
       )
-      .get(nextFactKind, nextFactKey, memoryId) as MemoryRow | undefined;
+      .get(...conflictParams) as MemoryRow | undefined;
 
     if (conflicting) {
       db.prepare(
@@ -1196,6 +1286,7 @@ export async function updateMemory(
         `,
       ).run(nextUpdatedAt, conflicting.id);
       clearMemoryEmbedding(conflicting.id, db);
+      removeMemorySearchIndex(conflicting.id, db);
     }
   }
 
@@ -1223,11 +1314,27 @@ export async function updateMemory(
     memoryId,
   );
 
-  if (updates.content !== undefined || updates.factKind !== undefined || updates.factKey !== undefined || updates.factState !== undefined) {
+  if (
+    updates.content !== undefined
+    || updates.factKind !== undefined
+    || updates.factKey !== undefined
+    || updates.factState !== undefined
+    || updates.relatedTopics !== undefined
+  ) {
     if (nextFactState !== "active") {
+      removeMemorySearchIndex(memoryId, db);
       clearMemoryEmbedding(memoryId, db);
       return getMemoryById(memoryId, db);
     }
+
+    syncMemorySearchIndex({
+      id: memoryId,
+      content: nextContent,
+      factKind: nextFactKind,
+      factKey: nextFactKey,
+      factState: nextFactState,
+      relatedTopics: nextRelatedTopics,
+    }, db);
 
     try {
       const config = getMemoryConfig(db);
@@ -1257,10 +1364,12 @@ export function deleteMemory(memoryId: string, db: Database.Database = getDataba
         WHERE id = ?
       `,
     ).run(updatedAt, memoryId);
+    removeMemorySearchIndex(memoryId, db);
     clearMemoryEmbedding(memoryId, db);
     return true;
   }
 
+  removeMemorySearchIndex(memoryId, db);
   const result = db
     .prepare(
       `
@@ -1281,6 +1390,7 @@ export function listMemories(
     durability?: Memory["durability"];
     orderBy?: "createdAt" | "updatedAt" | "accessCount";
     order?: "ASC" | "DESC";
+    scope?: MemoryScopeFilter;
   } = {},
   db: Database.Database = getDatabase(),
 ) {
@@ -1291,6 +1401,7 @@ export function listMemories(
     durability,
     orderBy = "createdAt",
     order = "DESC",
+    scope,
   } = options;
 
   const normalizedLimit = Math.max(1, Math.min(limit, 200));
@@ -1303,6 +1414,8 @@ export function listMemories(
       content,
       source,
       durability,
+      project_id AS projectId,
+      session_id AS sessionId,
       fact_kind AS factKind,
       fact_key AS factKey,
       fact_state AS factState,
@@ -1324,6 +1437,11 @@ export function listMemories(
     params.push(durability);
   }
 
+  const scopeClause = buildRetrievalScopeClause(scope, params);
+  if (scopeClause) {
+    query += ` AND (${scopeClause})`;
+  }
+
   query += ` ORDER BY ${getMemoryOrderByColumn(orderBy)} ${normalizedOrder} LIMIT ? OFFSET ?`;
   params.push(normalizedLimit, normalizedOffset);
 
@@ -1332,6 +1450,7 @@ export function listMemories(
 }
 
 export function clearAllMemories(db: Database.Database = getDatabase()) {
+  db.prepare("DELETE FROM memory_search_fts").run();
   db.prepare("DELETE FROM memories").run();
 }
 

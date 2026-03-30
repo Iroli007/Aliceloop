@@ -9,7 +9,6 @@ export type TaskType =
   | "review-coach"
   | "script-runner"
   | "tracked-task";
-export type MemoryKind = "attention-summary" | "learning-pattern" | "postmortem";
 export type BlockKind = "outline" | "paragraph" | "figure-caption" | "table";
 export type DeviceType = "desktop" | "mobile";
 export type DeviceStatus = "online" | "offline";
@@ -125,15 +124,6 @@ export interface AttentionState {
   events: AttentionEvent[];
 }
 
-export interface MemoryNote {
-  id: string;
-  kind: MemoryKind;
-  title: string;
-  content: string;
-  source: string;
-  updatedAt: string;
-}
-
 export interface DocumentStructure {
   id: string;
   libraryItemId: string;
@@ -174,7 +164,6 @@ export interface ShellOverview {
   library: LibraryItem[];
   artifacts: StudyArtifact[];
   attention: AttentionState;
-  memories: MemoryNote[];
   taskRuns: TaskRun[];
 }
 
@@ -619,6 +608,8 @@ export interface Memory {
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
+  projectId: string | null;
+  sessionId: string | null;
   factKind: MemoryFactKind | null;
   factKey: string | null;
   factState: MemoryFactState;
@@ -641,22 +632,14 @@ export interface MemoryMetadata {
 
 export interface MemoryConfig {
   enabled: boolean;
-  autoRetrieval: boolean;
   queryRewrite: boolean;
-  maxRetrievalCount: number;
-  similarityThreshold: number;
-  autoSummarize: boolean;
   embeddingModel: MemoryEmbeddingModel;
   embeddingDimension: number;
 }
 
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   enabled: true,
-  autoRetrieval: true,
   queryRewrite: false,
-  maxRetrievalCount: 8,
-  similarityThreshold: 0.7,
-  autoSummarize: true,
   embeddingModel: "text-embedding-3-small",
   embeddingDimension: 1536,
 };
@@ -677,6 +660,8 @@ export interface CreateMemoryInput {
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
+  projectId?: string | null;
+  sessionId?: string | null;
   factKind?: MemoryFactKind | null;
   factKey?: string | null;
   factState?: MemoryFactState;

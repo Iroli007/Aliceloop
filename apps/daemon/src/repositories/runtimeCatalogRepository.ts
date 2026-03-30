@@ -128,7 +128,7 @@ export function getRuntimeCatalogSnapshot(limit = 10): RuntimeCatalogSnapshot {
       libraryItemCount: countRows("library_items"),
       artifactCount: countRows("study_artifacts"),
       taskRunCount: countRows("task_runs"),
-      memoryCount: countRows("memory_notes"),
+      memoryCount: countRows("memories"),
       sandboxRunCount: countRows("sandbox_runs"),
     },
     providers: listProviderConfigs(),

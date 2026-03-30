@@ -1,4 +1,4 @@
-import { previewShellOverview, type McpServerDefinition, type MemoryNote, type SkillDefinition } from "@aliceloop/runtime-core";
+import { type McpServerDefinition, type SkillDefinition } from "@aliceloop/runtime-core";
 import { useEffect, useMemo, useState } from "react";
 import { getDesktopBridge } from "../../platform/desktopBridge";
 
@@ -39,7 +39,6 @@ const previewMcpServers: McpServerDefinition[] = [
 
 export interface RuntimeCatalogsState {
   status: "loading" | "ready" | "error";
-  memories: MemoryNote[];
   skills: SkillDefinition[];
   mcpServers: McpServerDefinition[];
   mutatingMcpServerId: string | null;
@@ -52,7 +51,6 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
   const bridge = useMemo(() => getDesktopBridge(), []);
   const [state, setState] = useState<RuntimeCatalogsState>({
     status: "loading",
-    memories: previewShellOverview.memories,
     skills: [],
     mcpServers: previewMcpServers,
     mutatingMcpServerId: null,
@@ -148,29 +146,20 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
     async function load() {
       try {
         const { daemonBaseUrl } = await bridge.getAppMeta();
-        const [memoriesResponse, skillsResponse, mcpServers] = await Promise.all([
-          fetch(`${daemonBaseUrl}/api/memories?limit=50`),
+        const [skillsResponse, mcpServers] = await Promise.all([
           fetch(`${daemonBaseUrl}/api/skills`),
           loadMcpServers(),
         ]);
-
-        if (!memoriesResponse.ok) {
-          throw new Error(`Failed to load memories (${memoriesResponse.status})`);
-        }
 
         if (!skillsResponse.ok) {
           throw new Error(`Failed to load skills (${skillsResponse.status})`);
         }
 
-        const [memories, skills] = (await Promise.all([
-          memoriesResponse.json(),
-          skillsResponse.json(),
-        ])) as [MemoryNote[], SkillDefinition[]];
+        const skills = await skillsResponse.json() as SkillDefinition[];
 
         if (!cancelled) {
           setState({
             status: "ready",
-            memories,
             skills,
             mcpServers,
             mutatingMcpServerId: null,
@@ -182,7 +171,6 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
         if (!cancelled) {
           setState({
             status: "error",
-            memories: previewShellOverview.memories,
             skills: [],
             mcpServers: previewMcpServers,
             mutatingMcpServerId: null,

@@ -8,25 +8,22 @@ import type {
   DocumentKind,
   DocumentStructure,
   LibraryItem,
-  MemoryNote,
   SectionSpan,
   SourceKind,
   TaskRun,
   TaskStatus,
   TaskType,
 } from "@aliceloop/runtime-core";
-import { createMemoryNote, getMemoryNote, upsertMemoryNote } from "../context/memory/memoryRepository";
 import { getDefaultProjectDirectory } from "../repositories/projectRepository";
 import { getPrimaryLibraryContext, getShellOverview } from "../repositories/overviewRepository";
 import { markLibraryAsFocused, persistIngestedLibrary } from "../repositories/libraryRepository";
-import { listFailedManagedTasksForPostmortemBackfill, upsertTaskRun } from "../repositories/taskRunRepository";
+import { upsertTaskRun } from "../repositories/taskRunRepository";
 import { createPermissionSandboxExecutor } from "./sandboxExecutor";
 import { isPathWithinRoot } from "../runtime/sandbox/toolPolicy";
 
 interface TaskRunnerResult {
   task: TaskRun;
   libraryItem?: LibraryItem;
-  memoryNote?: MemoryNote;
   detection?: DocumentDetection;
   workerPlan?: WorkerPlan;
   structure?: DocumentStructure | null;
@@ -125,7 +122,6 @@ function buildReviewCoachContent() {
   const libraryTitle = overview.attention.currentLibraryTitle ?? overview.library[0]?.title ?? "当前资料";
   const concepts = overview.attention.concepts.slice(0, 3);
   const latestArtifact = overview.artifacts[0];
-  const latestMemory = overview.memories[0];
 
   const lines = [
     `当前复习重心：${libraryTitle}`,
@@ -133,86 +129,10 @@ function buildReviewCoachContent() {
     latestArtifact
       ? `最近工件：${latestArtifact.title}，建议先用它回忆主结构，再回到原文核对细节。`
       : "最近工件：还没有新的学习页，建议先把本轮重点整理成提纲。",
-    latestMemory
-      ? `记忆提示：${latestMemory.content}`
-      : "记忆提示：先从最近两次混淆点入手，再补关系图。",
+    "复习提示：先从最近两次混淆点入手，再补关系图。",
   ];
 
   return lines.join("\n");
-}
-
-function buildAttentionSummaryMemory(attentionState: AttentionState) {
-  const lines = [
-    `当前关注资料：${attentionState.currentLibraryTitle ?? "未命名资料"}`,
-    attentionState.currentSectionLabel ? `当前章节：${attentionState.currentSectionLabel}` : "当前章节：先从文档起始结构回看。",
-    `聚焦摘要：${attentionState.focusSummary}`,
-    attentionState.concepts.length > 0
-      ? `高频概念：${attentionState.concepts.slice(0, 5).join("、")}`
-      : "高频概念：先围绕最近的章节标题和主题词建立导航。",
-  ];
-
-  return upsertMemoryNote({
-    id: "memory-attention-primary",
-    kind: "attention-summary",
-    title: `关注摘要 · ${attentionState.currentLibraryTitle ?? "当前资料"}`,
-    content: lines.join("\n"),
-    source: "attention-index",
-    updatedAt: attentionState.updatedAt,
-  });
-}
-
-function createFailureMemory(input: {
-  taskId: string;
-  taskType: TaskType;
-  title: string;
-  detail: string;
-  updatedAt?: string;
-  context: string[];
-}) {
-  const lines = [`任务类型：${input.taskType}`, ...input.context, `失败原因：${input.detail}`];
-
-  return upsertMemoryNote({
-    id: `postmortem-task-${input.taskId}`,
-    kind: "postmortem",
-    title: `失败复盘 · ${input.title}`,
-    content: lines.join("\n"),
-    source: `task-postmortem:${input.taskId}`,
-    updatedAt: input.updatedAt ?? new Date().toISOString(),
-  });
-}
-
-export function backfillFailurePostmortems() {
-  const failedTasks = listFailedManagedTasksForPostmortemBackfill();
-  let createdCount = 0;
-
-  for (const task of failedTasks) {
-    const existingMemory = getMemoryNote(`postmortem-task-${task.id}`);
-    if (existingMemory) {
-      continue;
-    }
-
-    const memoryNote = createFailureMemory({
-      taskId: task.id,
-      taskType: task.taskType,
-      title: task.title,
-      detail: task.detail,
-      updatedAt: task.updatedAt,
-      context: [
-        `任务标题：${task.title}`,
-        task.sessionId ? `会话：${task.sessionId}` : "会话：无",
-        "来源：历史失败任务回填",
-      ],
-    });
-
-    if (memoryNote) {
-      createdCount += 1;
-    }
-  }
-
-  return {
-    scannedCount: failedTasks.length,
-    upsertedCount: createdCount,
-  };
 }
 
 function canUseTextFallback(sourcePath: string) {
@@ -284,7 +204,6 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       focusSummary: `刚完成 ${title} 的初版文档结构抽取，后续可以直接围绕章节和块级内容继续定位。`,
       concepts: inferConcepts(sections),
     });
-    const memoryNote = buildAttentionSummaryMemory(attentionState);
 
     const task = writeTaskRun(
       taskId,
@@ -307,20 +226,11 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       contentBlocks: persisted.contentBlocks,
       crossReferences: persisted.crossReferences,
       attentionState,
-      memoryNote,
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "资料解析失败";
     const task = writeTaskRun(taskId, "document-ingest", "failed", `资料解析失败 · ${title}`, detail, null);
-    const memoryNote = createFailureMemory({
-      taskId,
-      taskType: "document-ingest",
-      title,
-      detail,
-      updatedAt: task.updatedAt,
-      context: [`资料路径：${sourcePath}`],
-    });
-    return { task, memoryNote };
+    return { task };
   }
 }
 
@@ -332,28 +242,16 @@ async function runReviewCoachTask(input: ReviewCoachTaskInput): Promise<TaskRunn
   writeTaskRun(taskId, "review-coach", "queued", title, "正在汇总最近的注意力、工件和记忆。", input.sessionId ?? null);
   writeTaskRun(taskId, "review-coach", "running", title, "正在生成一份新的复习建议。", input.sessionId ?? null);
 
-  const memoryNote = createMemoryNote({
-    id: `memory-${randomUUID()}`,
-    kind: "learning-pattern",
-    title: `复习建议 · ${relatedLibraryTitle}`,
-    content: buildReviewCoachContent(),
-    source: "review-coach",
-    updatedAt: new Date().toISOString(),
-  });
-
   const task = writeTaskRun(
     taskId,
     "review-coach",
     "done",
     title,
-    "复习建议已经沉淀为新的记忆笔记，可直接被后续任务复用。",
+    buildReviewCoachContent(),
     input.sessionId ?? null,
   );
 
-  return {
-    task,
-    memoryNote,
-  };
+  return { task };
 }
 
 async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRunnerResult> {
@@ -407,18 +305,7 @@ async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRu
   } catch (error) {
     const detail = error instanceof Error ? error.message : "本地脚本执行失败";
     const task = writeTaskRun(taskId, "script-runner", "failed", title, detail, input.sessionId ?? null);
-    const memoryNote = createFailureMemory({
-      taskId,
-      taskType: "script-runner",
-      title,
-      detail,
-      updatedAt: task.updatedAt,
-      context: [
-        `命令：${command}${args.length > 0 ? ` ${args.join(" ")}` : ""}`,
-        `工作目录：${cwd}`,
-      ],
-    });
-    return { task, memoryNote };
+    return { task };
   }
 }
 

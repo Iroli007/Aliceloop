@@ -4,11 +4,7 @@ import { getDesktopBridge } from "../../platform/desktopBridge";
 
 export interface SaveMemoryConfigInput {
   enabled?: boolean;
-  autoRetrieval?: boolean;
   queryRewrite?: boolean;
-  maxRetrievalCount?: number;
-  similarityThreshold?: number;
-  autoSummarize?: boolean;
   embeddingModel?: MemoryConfig["embeddingModel"];
   embeddingDimension?: number;
 }

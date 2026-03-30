@@ -2142,25 +2142,6 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   </div>
                 </div>
 
-                {/* ── 记忆 ── */}
-                <h3 className="settings-section-title">记忆</h3>
-                <div className="settings-panel">
-                  <div className="settings-panel__heading">
-                    <span>{runtimeCatalogs.memories.length} 条</span>
-                  </div>
-                  {runtimeCatalogs.error && runtimeCatalogs.status === "error" ? (
-                    <div className="provider-notice provider-notice--error">{runtimeCatalogs.error}</div>
-                  ) : null}
-                  <div className="settings-panel__list">
-                    {runtimeCatalogs.memories.map((memory) => (
-                      <div key={memory.id} className="settings-panel__item">
-                        <strong>{memory.title}</strong>
-                        <span>{memory.content}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
                 {/* ── MCP ── */}
                 <h3 className="settings-section-title">MCP 服务</h3>
                 <div className="settings-panel">

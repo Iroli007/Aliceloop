@@ -11,7 +11,6 @@ import {
   type DeviceType,
   type DocumentKind,
   type DocumentStructure,
-  type MemoryKind,
   type MemoryFactKind,
   type MemoryFactState,
   type ProviderKind,
@@ -30,15 +29,13 @@ import { getMemoryConfig, parseMemoryConfigPatch, updateMemoryConfig } from "./c
 import {
   clearAllMemories,
   createMemory,
-  createMemoryNote,
+  DEFAULT_SEMANTIC_MEMORY_SIMILARITY_THRESHOLD,
   deleteMemory,
-  deleteMemoryNote,
   getMemoryById,
   getMemoryStats,
   listMemories,
   rebuildAllEmbeddings,
   searchMemoriesBySimilarity,
-  searchMemoryNotes,
   updateMemory,
 } from "./context/memory/memoryRepository";
 import {
@@ -51,10 +48,8 @@ import {
 } from "./repositories/libraryRepository";
 import {
   getAttentionState,
-  getMemoryNote,
   getShellOverview,
   getStudyArtifact,
-  listMemoryNotes,
   listStudyArtifacts,
   shellOverviewRoute,
 } from "./repositories/overviewRepository";
@@ -345,17 +340,6 @@ interface SandboxRunQuery {
   limit?: string;
 }
 
-interface MemoryQuery {
-  limit?: string;
-  source?: string;
-}
-
-interface MemorySearchQuery {
-  q?: string;
-  limit?: string;
-  source?: string;
-}
-
 interface ThreadSearchQuery {
   q?: string;
   limit?: string;
@@ -365,13 +349,6 @@ interface MemoryParams {
   id: string;
 }
 
-interface CreateMemoryBody {
-  content?: string;
-  title?: string;
-  kind?: MemoryKind;
-  source?: string;
-}
-
 interface SemanticMemoryEntriesQuery {
   limit?: string;
   offset?: string;
@@ -379,21 +356,23 @@ interface SemanticMemoryEntriesQuery {
   durability?: string;
   orderBy?: string;
   order?: string;
+  projectId?: string;
+  sessionId?: string;
+  includeGlobal?: string;
 }
 
 interface SemanticMemorySearchQuery {
   q?: string;
   limit?: string;
   threshold?: string;
+  projectId?: string;
+  sessionId?: string;
+  includeGlobal?: string;
 }
 
 interface SemanticMemoryConfigBody {
   enabled?: boolean;
-  autoRetrieval?: boolean;
   queryRewrite?: boolean;
-  maxRetrievalCount?: number;
-  similarityThreshold?: number;
-  autoSummarize?: boolean;
   embeddingModel?: "text-embedding-3-small" | "text-embedding-3-large";
   embeddingDimension?: number;
 }
@@ -402,6 +381,8 @@ interface CreateSemanticMemoryBody {
   content?: string;
   source?: string;
   durability?: string;
+  projectId?: string;
+  sessionId?: string;
   factKind?: string;
   factKey?: string;
   factState?: string;
@@ -479,6 +460,28 @@ function parseLimitValue(value: string | string[] | undefined, fallback = 50): n
   return Math.max(1, Math.min(Math.trunc(parsed), 200));
 }
 
+function normalizeOptionalId(value: string | undefined) {
+  const normalized = value?.trim() ?? "";
+  return normalized ? normalized : undefined;
+}
+
+function parseOptionalBoolean(value: string | undefined, fallback: boolean) {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["false", "0", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 function sanitizeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, "-");
 }
@@ -502,14 +505,6 @@ function sanitizeRelativePath(relativePath: string) {
   });
 
   return sanitizedSegments.join("/");
-}
-
-function normalizeMemoryKind(value: string | undefined): MemoryKind {
-  if (value === "attention-summary" || value === "postmortem") {
-    return value;
-  }
-
-  return "learning-pattern";
 }
 
 function normalizeSemanticMemorySource(value: string | undefined, fallback: "auto" | "manual" = "manual") {
@@ -742,52 +737,6 @@ export async function createServer() {
 
   server.get(shellOverviewRoute, async () => getShellOverview());
   server.get("/api/attention", async () => getAttentionState());
-  server.get<{ Querystring: MemoryQuery }>("/api/memories", async (request) => {
-    return listMemoryNotes(parseLimitValue(request.query.limit, 50), request.query.source);
-  });
-  server.get<{ Querystring: MemorySearchQuery }>("/api/memories/search", async (request) => {
-    return searchMemoryNotes(request.query.q ?? "", parseLimitValue(request.query.limit, 10), request.query.source);
-  });
-  server.post<{ Body: CreateMemoryBody }>("/api/memories", async (request, reply) => {
-    const body = request.body ?? {};
-    const content = body.content?.trim();
-    if (!content) {
-      return reply.code(400).send({
-        error: "content_required",
-      });
-    }
-
-    return createMemoryNote({
-      id: randomUUID(),
-      kind: normalizeMemoryKind(body.kind),
-      title: body.title?.trim() || "",
-      content,
-      source: body.source?.trim() || "cli",
-      updatedAt: new Date().toISOString(),
-    });
-  });
-  server.get<{ Params: MemoryParams }>("/api/memories/:id", async (request, reply) => {
-    const memory = getMemoryNote(request.params.id);
-    if (!memory) {
-      return reply.code(404).send({
-        error: "memory_not_found",
-      });
-    }
-
-    return memory;
-  });
-  server.delete<{ Params: MemoryParams }>("/api/memories/:id", async (request, reply) => {
-    if (!deleteMemoryNote(request.params.id)) {
-      return reply.code(404).send({
-        error: "memory_not_found",
-      });
-    }
-
-    return {
-      ok: true,
-      id: request.params.id,
-    };
-  });
   server.get("/api/memory/config", async () => getMemoryConfig());
   server.put<{ Body: SemanticMemoryConfigBody }>("/api/memory/config", async (request, reply) => {
     try {
@@ -833,6 +782,11 @@ export async function createServer() {
           : undefined,
         orderBy: normalizeSemanticMemoryOrderBy(request.query.orderBy),
         order: normalizeSortOrder(request.query.order),
+        scope: {
+          projectId: normalizeOptionalId(request.query.projectId),
+          sessionId: normalizeOptionalId(request.query.sessionId),
+          includeGlobal: parseOptionalBoolean(request.query.includeGlobal, true),
+        },
       });
     } catch (error) {
       if (error instanceof Error) {
@@ -858,6 +812,8 @@ export async function createServer() {
         content,
         source: normalizeSemanticMemorySource(body.source, "manual"),
         durability: normalizeSemanticMemoryDurability(body.durability, "permanent") ?? "permanent",
+        projectId: normalizeOptionalId(body.projectId) ?? null,
+        sessionId: normalizeOptionalId(body.sessionId) ?? null,
         factKind: normalizeSemanticMemoryFactKind(body.factKind) ?? null,
         factKey: normalizeSemanticMemoryFactKey(body.factKey) ?? null,
         factState: normalizeSemanticMemoryFactState(body.factState) ?? "active",
@@ -885,7 +841,14 @@ export async function createServer() {
     return searchMemoriesBySimilarity(
       query,
       parseLimitValue(request.query.limit, 10),
-      parseThresholdValue(request.query.threshold, getMemoryConfig().similarityThreshold),
+      parseThresholdValue(request.query.threshold, DEFAULT_SEMANTIC_MEMORY_SIMILARITY_THRESHOLD),
+      {
+        scope: {
+          projectId: normalizeOptionalId(request.query.projectId),
+          sessionId: normalizeOptionalId(request.query.sessionId),
+          includeGlobal: parseOptionalBoolean(request.query.includeGlobal, true),
+        },
+      },
     );
   });
   server.get<{ Params: MemoryParams }>("/api/memory/entries/:id", async (request, reply) => {

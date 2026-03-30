@@ -162,11 +162,10 @@ async function main() {
 
     const config = await getJson<{
       enabled: boolean;
-      maxRetrievalCount: number;
       queryRewrite: boolean;
     }>(`${baseUrl}/api/memory/config`);
     assert.equal(config.enabled, true, "memory should default to enabled");
-    assert.equal(config.maxRetrievalCount, 8, "memory retrieval count should default to 8");
+    assert.equal(config.queryRewrite, false, "query rewrite should default to disabled");
 
     const created = await sendJson<{
       id: string;
@@ -185,6 +184,25 @@ async function main() {
       `${baseUrl}/api/memory/search?q=${encodeURIComponent("fastify server")}&limit=5`,
     );
     assert.equal(search[0]?.id, created.json?.id, "semantic memory search should find the created memory");
+
+    const chineseCreated = await sendJson<{
+      id: string;
+      content: string;
+    }>(`${baseUrl}/api/memory/entries`, "POST", {
+      content: "回答尽量简洁，优先使用中文。",
+      source: "manual",
+      durability: "permanent",
+      relatedTopics: ["中文", "简洁"],
+    });
+    assert.equal(chineseCreated.status, 201, "Chinese semantic memory creation should succeed");
+    const chineseSearch = await getJson<Array<{ id: string; similarityScore: number }>>(
+      `${baseUrl}/api/memory/search?q=${encodeURIComponent("请用中文简洁回答")}&limit=5`,
+    );
+    assert.equal(chineseSearch[0]?.id, chineseCreated.json?.id, "lexical fallback should find Chinese memories from a natural query");
+    const chineseShortSearch = await getJson<Array<{ id: string; similarityScore: number }>>(
+      `${baseUrl}/api/memory/search?q=${encodeURIComponent("中文")}&limit=5`,
+    );
+    assert.equal(chineseShortSearch[0]?.id, chineseCreated.json?.id, "short Chinese query should still find matching semantic memory");
 
     const typedFact = {
       content: "Prefer concise answers in Chinese.",
@@ -239,16 +257,69 @@ async function main() {
       "memory listing should default to active records only",
     );
 
-    const updatedConfig = await sendJson<{ maxRetrievalCount: number; queryRewrite: boolean }>(
+    const alphaProjectPath = join(tempDataDir, "projects", "alpha");
+    const betaProjectPath = join(tempDataDir, "projects", "beta");
+    const alphaProject = await sendJson<{ id: string; path: string }>(`${baseUrl}/api/projects`, "POST", {
+      name: "Alpha",
+      path: alphaProjectPath,
+    });
+    const betaProject = await sendJson<{ id: string; path: string }>(`${baseUrl}/api/projects`, "POST", {
+      name: "Beta",
+      path: betaProjectPath,
+    });
+    assert.equal(alphaProject.status, 200, "alpha project creation should succeed");
+    assert.equal(betaProject.status, 200, "beta project creation should succeed");
+
+    const alphaScopedMemory = await sendJson<{ id: string }>(`${baseUrl}/api/memory/entries`, "POST", {
+      content: "Alpha project keeps release notes in docs/releases-alpha.md.",
+      source: "manual",
+      durability: "permanent",
+      projectId: alphaProject.json?.id,
+      relatedTopics: ["release-notes", "alpha"],
+    });
+    const betaScopedMemory = await sendJson<{ id: string }>(`${baseUrl}/api/memory/entries`, "POST", {
+      content: "Beta project keeps release notes in docs/releases-beta.md.",
+      source: "manual",
+      durability: "permanent",
+      projectId: betaProject.json?.id,
+      relatedTopics: ["release-notes", "beta"],
+    });
+    assert.equal(alphaScopedMemory.status, 201, "alpha scoped memory creation should succeed");
+    assert.equal(betaScopedMemory.status, 201, "beta scoped memory creation should succeed");
+
+    const alphaScopedSearch = await getJson<Array<{ id: string }>>(
+      `${baseUrl}/api/memory/search?q=${encodeURIComponent("release notes")}&limit=10&projectId=${encodeURIComponent(alphaProject.json?.id ?? "")}&includeGlobal=false`,
+    );
+    assert(
+      alphaScopedSearch.some((memory) => memory.id === alphaScopedMemory.json?.id),
+      "alpha scoped search should find alpha memory",
+    );
+    assert(
+      alphaScopedSearch.every((memory) => memory.id !== betaScopedMemory.json?.id),
+      "alpha scoped search should not leak beta memory",
+    );
+
+    const betaScopedSearch = await getJson<Array<{ id: string }>>(
+      `${baseUrl}/api/memory/search?q=${encodeURIComponent("release notes")}&limit=10&projectId=${encodeURIComponent(betaProject.json?.id ?? "")}&includeGlobal=false`,
+    );
+    assert(
+      betaScopedSearch.some((memory) => memory.id === betaScopedMemory.json?.id),
+      "beta scoped search should find beta memory",
+    );
+    assert(
+      betaScopedSearch.every((memory) => memory.id !== alphaScopedMemory.json?.id),
+      "beta scoped search should not leak alpha memory",
+    );
+
+    const updatedConfig = await sendJson<{ queryRewrite: boolean }>(
       `${baseUrl}/api/memory/config`,
       "PUT",
       {
-        maxRetrievalCount: 3,
         queryRewrite: true,
       },
     );
     assert.equal(updatedConfig.status, 200, "memory config update should succeed");
-    assert.equal(updatedConfig.json?.maxRetrievalCount, 3, "memory config should persist updates");
+    assert.equal(updatedConfig.json?.queryRewrite, true, "memory config should persist query rewrite updates");
 
     const rebuild = await fetch(`${baseUrl}/api/memory/rebuild`, { method: "POST" });
     assert.equal(rebuild.status, 409, "rebuild should report missing embedding provider when not configured");
@@ -258,7 +329,7 @@ async function main() {
     await waitForHealth(baseUrl);
 
     const restartConfig = await getJson<{ queryRewrite: boolean }>(`${baseUrl}/api/memory/config`);
-    assert.equal(restartConfig.queryRewrite, true, "config should survive daemon restart");
+    assert.equal(restartConfig.queryRewrite, true, "query rewrite config should survive daemon restart");
 
     const providerUpdate = await sendJson<{ enabled: boolean }>(`${baseUrl}/api/providers/openai`, "PUT", {
       baseUrl: "http://127.0.0.1:65535/v1",
