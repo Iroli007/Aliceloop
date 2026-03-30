@@ -44,3 +44,9 @@ apps/**/build/
 packages/**/dist/
 apps/desktop/release/
 .alma-snapshots
+.bench-old/
+.codex-artifacts/
+postmortem/
+apps/daemon/browser-screenshots/
+apps/daemon/browser-watch-audio/
+apps/desktop/tmp/

@@ -1,6 +1,6 @@
 # Aliceloop Skill Catalog
 
-`/Users/raper/workspace/Projects/Aliceloop/skills/` is the canonical project skill catalog.
+`skills/` is the canonical project skill catalog.
 
 Each skill lives in its own directory and is defined by a `SKILL.md` file with YAML frontmatter.
 
@@ -25,7 +25,7 @@ These files are loaded into:
 
 The TypeScript selection and loader code still lives under:
 
-- `/Users/raper/workspace/Projects/Aliceloop/apps/daemon/src/context/skills/`
+- `apps/daemon/src/context/skills/`
 
 But new or edited project skills should go in the top-level `skills/` directory, not inside daemon source code.
 
