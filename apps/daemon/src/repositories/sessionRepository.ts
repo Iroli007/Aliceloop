@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
@@ -278,6 +279,112 @@ function findTranscriptArchiveMatch(
     matchedPreview: preview.length > 0 ? summarizeMessagePreview(preview) : null,
     matchedMessageCreatedAt: null,
   };
+}
+
+function resolveTranscriptMatchTimestamp(transcriptPath: string, lineNumber: number | null) {
+  if (!lineNumber || !existsSync(transcriptPath)) {
+    return null;
+  }
+
+  let content = "";
+  try {
+    content = readFileSync(transcriptPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const lines = content.split(/\r?\n/);
+  let currentTimestamp: string | null = null;
+
+  for (let index = 0; index < lines.length && index < lineNumber; index += 1) {
+    const headingMatch = lines[index]?.match(/^## [^(]+ \(([^)]+)\)$/);
+    if (headingMatch) {
+      currentTimestamp = headingMatch[1] ?? null;
+    }
+  }
+
+  return currentTimestamp;
+}
+
+function findTranscriptArchiveMatchesWithRipgrep(
+  candidates: Array<{ sessionId: string; transcriptPath: string }>,
+  queryText: string,
+) {
+  const availableCandidates = candidates.filter(({ transcriptPath }) => existsSync(transcriptPath));
+  if (availableCandidates.length === 0) {
+    return new Map<string, { matchedPreview: string | null; matchedMessageCreatedAt: string | null }>();
+  }
+
+  const candidateByPath = new Map(availableCandidates.map((candidate) => [candidate.transcriptPath, candidate]));
+  const result = spawnSync(
+    "rg",
+    [
+      "--json",
+      "--ignore-case",
+      "--line-number",
+      "--max-count",
+      "1",
+      "--color",
+      "never",
+      "--no-heading",
+      "--",
+      queryText,
+      ...availableCandidates.map((candidate) => candidate.transcriptPath),
+    ],
+    {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 16,
+    },
+  );
+
+  if (result.error || (result.status !== 0 && result.status !== 1)) {
+    return null;
+  }
+
+  const matches = new Map<string, { matchedPreview: string | null; matchedMessageCreatedAt: string | null }>();
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (
+      !event
+      || typeof event !== "object"
+      || !("type" in event)
+      || event.type !== "match"
+      || !("data" in event)
+      || !event.data
+      || typeof event.data !== "object"
+    ) {
+      continue;
+    }
+
+    const data = event.data as {
+      path?: { text?: string };
+      lines?: { text?: string };
+      line_number?: number;
+    };
+    const transcriptPath = data.path?.text ?? "";
+    const candidate = candidateByPath.get(transcriptPath);
+    if (!candidate || matches.has(candidate.sessionId)) {
+      continue;
+    }
+
+    const preview = summarizeMessagePreview(data.lines?.text?.trim() ?? "");
+    matches.set(candidate.sessionId, {
+      matchedPreview: preview,
+      matchedMessageCreatedAt: resolveTranscriptMatchTimestamp(transcriptPath, data.line_number ?? null),
+    });
+  }
+
+  return matches;
 }
 
 function toMessage(row: SessionMessageRow, attachments: Attachment[]): SessionMessage {
@@ -913,32 +1020,47 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
   const normalizedLimit = Math.max(1, Math.min(limit, 100));
   const archiveResults: SessionThreadSummary[] = [];
   const seenSessionIds = new Set<string>();
+  const threadCandidates = listSessionThreads().map((thread) => ({
+    thread,
+    transcriptPath: thread.projectPath
+      ? buildThreadTranscriptExportPaths(thread.projectPath, {
+          sessionId: thread.id,
+          sessionTitle: thread.title,
+          sessionCreatedAt: thread.createdAt,
+        }).markdownPath
+      : null,
+  }));
+  const ripgrepMatches = findTranscriptArchiveMatchesWithRipgrep(
+    threadCandidates
+      .filter((candidate): candidate is { thread: SessionThreadSummary; transcriptPath: string } => Boolean(candidate.transcriptPath))
+      .map((candidate) => ({
+        sessionId: candidate.thread.id,
+        transcriptPath: candidate.transcriptPath,
+      })),
+    trimmedQuery,
+  );
 
-  for (const thread of listSessionThreads()) {
+  for (const candidate of threadCandidates) {
     if (archiveResults.length >= normalizedLimit) {
       break;
     }
 
-    if (!thread.projectPath) {
+    if (!candidate.transcriptPath) {
       continue;
     }
 
-    const transcriptPath = buildThreadTranscriptExportPaths(thread.projectPath, {
-      sessionId: thread.id,
-      sessionTitle: thread.title,
-      sessionCreatedAt: thread.createdAt,
-    }).markdownPath;
-    const archiveMatch = findTranscriptArchiveMatch(transcriptPath, trimmedQuery);
+    const archiveMatch = ripgrepMatches?.get(candidate.thread.id)
+      ?? (ripgrepMatches === null ? findTranscriptArchiveMatch(candidate.transcriptPath, trimmedQuery) : null);
     if (!archiveMatch) {
       continue;
     }
 
     archiveResults.push({
-      ...thread,
+      ...candidate.thread,
       matchedPreview: archiveMatch.matchedPreview,
       matchedMessageCreatedAt: archiveMatch.matchedMessageCreatedAt,
     });
-    seenSessionIds.add(thread.id);
+    seenSessionIds.add(candidate.thread.id);
   }
 
   if (archiveResults.length >= normalizedLimit) {

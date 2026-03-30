@@ -312,26 +312,13 @@ export const schemaStatements = [
     )
   `,
   `
-    CREATE TABLE IF NOT EXISTS memory_notes (
-      id TEXT PRIMARY KEY,
-      kind TEXT NOT NULL,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      source TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `,
-  `
-    CREATE VIRTUAL TABLE IF NOT EXISTS memory_notes_fts USING fts5(
-      memory_id UNINDEXED, kind UNINDEXED, content
-    )
-  `,
-  `
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY,
       content TEXT NOT NULL,
       source TEXT NOT NULL CHECK(source IN ('auto', 'manual')),
       durability TEXT NOT NULL CHECK(durability IN ('permanent', 'temporary')),
+      project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+      session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
       fact_kind TEXT CHECK(fact_kind IN ('preference', 'constraint', 'decision', 'profile', 'account', 'workflow', 'other')),
       fact_key TEXT,
       fact_state TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted')),
@@ -339,6 +326,13 @@ export const schemaStatements = [
       updated_at TEXT NOT NULL,
       access_count INTEGER NOT NULL DEFAULT 0,
       related_topics TEXT NOT NULL DEFAULT '[]'
+    )
+  `,
+  `
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_search_fts USING fts5(
+      memory_id UNINDEXED,
+      search_text,
+      tokenize='trigram'
     )
   `,
   `
@@ -362,6 +356,14 @@ export const schemaStatements = [
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_project_scope_idx
+    ON memories (project_id, fact_state, updated_at DESC)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_session_scope_idx
+    ON memories (session_id, fact_state, updated_at DESC)
   `,
   `
     CREATE INDEX IF NOT EXISTS memories_source_idx

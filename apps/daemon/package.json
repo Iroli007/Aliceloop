@@ -21,6 +21,7 @@
     "bench:load-context": "tsx scripts/loadContextBenchmark.ts",
     "bench:desktop-relay": "tsx scripts/desktopChromeRelayBenchmark.ts",
     "smoke:memory": "tsx scripts/memorySystemSmoke.ts",
+    "smoke:memory-skills": "tsx scripts/memoryThreadSkillsSmoke.ts",
     "smoke:queue": "tsx scripts/sessionRunQueueSmoke.ts",
     "smoke:sandbox": "tsx scripts/sandboxSmoke.ts",
     "smoke:skills": "tsx scripts/skillToolsSmoke.ts",

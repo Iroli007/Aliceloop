@@ -82,7 +82,6 @@ export async function loadContext(
   timings.recentResearchMemoryMs = sessionContext.timings.recentResearchMemoryMs;
   timings.activeTurnMs = sessionContext.timings.activeTurnMs;
   timings.recentToolActivityMs = sessionContext.timings.recentToolActivityMs;
-  timings.taskWorkingMemoryMs = sessionContext.timings.taskWorkingMemoryMs;
   timings.messagesMs = sessionContext.timings.messagesMs;
 
   const latestUserQuery = sessionContext.latestUserQuery;
@@ -143,7 +142,11 @@ export async function loadContext(
 
   const profileFactMemoryStartedAt = nowMs();
   const profileFactMemory = routedSkillIds.has("memory-management") && userQuery
-    ? await buildProfileFactMemoryBlock(userQuery)
+    ? await buildProfileFactMemoryBlock({
+        queryText: userQuery,
+        projectId: sessionContext.projectBinding?.projectId ?? null,
+        sessionId,
+      })
     : { content: "", timings: { skipReason: "skill_not_routed" } };
   timings.profileFactMemoryMs = roundMs(nowMs() - profileFactMemoryStartedAt);
   timings.profileFactMemoryChars = profileFactMemory.content.length;

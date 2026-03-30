@@ -12,21 +12,14 @@ interface DistillationInput {
 
 export interface DistilledMemory {
   content: string;
-  durability: "permanent" | "temporary";
   relatedTopics: string[];
   factKind: MemoryFactKind | null;
   factKey: string | null;
 }
 
-export interface DistilledMemoryBatch {
-  permanent: DistilledMemory[];
-  temporary: DistilledMemory[];
-}
-
 const memoryFactKindSchema = z.enum(["preference", "constraint", "decision", "profile", "account", "workflow", "other"]);
 const extractedMemorySchema = z.object({
   content: z.string().trim().min(1).max(500),
-  durability: z.enum(["permanent", "temporary"]),
   factKind: memoryFactKindSchema.nullable().default(null),
   factKey: z.string().trim().min(1).max(120).nullable().default(null),
   relatedTopics: z.array(z.string().trim().min(1).max(80)).max(6).default([]),
@@ -62,7 +55,7 @@ export async function extractMemoriesFromConversation(
   abortSignal?: AbortSignal,
 ) {
   const config = getMemoryConfig();
-  if (!config.enabled || !config.autoSummarize) {
+  if (!config.enabled) {
     return [] as ExtractedMemory[];
   }
 
@@ -89,14 +82,12 @@ export async function extractMemoriesFromConversation(
       output: Output.array({
         element: extractedMemorySchema,
         name: "memory_candidates",
-        description: "High-value facts worth remembering from the conversation.",
+        description: "Durable long-term facts worth remembering from the conversation.",
       }),
       prompt: [
-        "Extract up to 3 useful memory items from this conversation.",
-        "Return both temporary session notes and permanent long-term facts when they are present.",
-        "For temporary items, capture rolling session summary details such as temporary preferences, current conclusions, or topic summaries.",
-        "For permanent items, keep only durable user preferences, project constraints, stable decisions, workflow conventions, or reusable solutions that would help future work.",
-        "For permanent items, fill factKind and factKey. Use a short stable lowercase fact key such as preferred-language, reply-style, or repo-boundary.",
+        "Extract up to 3 durable long-term memory items from this conversation.",
+        "Keep only durable user preferences, project constraints, stable decisions, workflow conventions, or reusable solutions that would help future work.",
+        "Fill factKind and factKey. Use a short stable lowercase fact key such as preferred-language, reply-style, or repo-boundary.",
         "Do not store one-off research facts, biographies, web-search results, current events, or temporary file operations unless the user explicitly asked to remember them.",
         "Do not restate the entire conversation. Skip transient chit-chat. Return an empty array when nothing is worth storing.",
         "",
@@ -115,14 +106,11 @@ export async function extractMemoriesFromConversation(
   }
 }
 
-export async function reflectOnTurn(input: DistillationInput): Promise<DistilledMemoryBatch> {
+export async function reflectOnTurn(input: DistillationInput): Promise<DistilledMemory[]> {
   const latestUserMessage = input.userMessages.at(-1)?.trim();
   const assistantResponse = input.assistantResponse.trim();
   if (!latestUserMessage || !assistantResponse) {
-    return {
-      permanent: [],
-      temporary: [],
-    };
+    return [];
   }
 
   const extractedMemories = await extractMemoriesFromConversation(
@@ -130,16 +118,10 @@ export async function reflectOnTurn(input: DistillationInput): Promise<Distilled
     assistantResponse,
   );
 
-  const memories = extractedMemories.map((memory) => ({
+  return extractedMemories.map((memory) => ({
     content: memory.content,
-    durability: memory.durability,
     relatedTopics: memory.relatedTopics,
     factKind: memory.factKind,
     factKey: memory.factKey,
   }));
-
-  return {
-    permanent: memories.filter((memory) => memory.durability === "permanent"),
-    temporary: memories.filter((memory) => memory.durability === "temporary"),
-  };
 }

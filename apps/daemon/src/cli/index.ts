@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { generateMusicSketch } from "../services/musicSketchService";
@@ -27,6 +27,8 @@ interface SemanticMemoryPayload {
   content: string;
   source: string;
   durability: string;
+  projectId: string | null;
+  sessionId: string | null;
   factKind: string | null;
   factKey: string | null;
   factState: string;
@@ -35,6 +37,11 @@ interface SemanticMemoryPayload {
   accessCount: number;
   relatedTopics: string[];
   similarityScore?: number;
+}
+
+interface ProjectDirectoryPayload {
+  id: string;
+  path: string;
 }
 
 interface RuntimeSettingsPayload {
@@ -748,12 +755,33 @@ async function handleStatus() {
   };
 }
 
+async function resolveSemanticMemoryProjectScope() {
+  const cwd = resolve(process.cwd());
+  const projects = await apiRequest<ProjectDirectoryPayload[]>("/api/projects");
+  const matchingProject = projects
+    .filter((project) => {
+      const projectPath = resolve(project.path);
+      return cwd === projectPath || cwd.startsWith(projectPath.endsWith(sep) ? projectPath : `${projectPath}${sep}`);
+    })
+    .sort((left, right) => right.path.length - left.path.length)[0];
+
+  return matchingProject?.id ?? null;
+}
+
 async function handleMemory(args: string[]) {
   const action = args[0];
 
   if (action === "list") {
     const limit = parseOptionalLimit(args[1], 20);
-    return apiRequest<SemanticMemoryPayload[]>(`/api/memory/entries?limit=${limit}`);
+    const projectId = await resolveSemanticMemoryProjectScope();
+    const params = new URLSearchParams({
+      limit: String(limit),
+    });
+    if (projectId) {
+      params.set("projectId", projectId);
+      params.set("includeGlobal", "true");
+    }
+    return apiRequest<SemanticMemoryPayload[]>(`/api/memory/entries?${params.toString()}`);
   }
 
   if (action === "search") {
@@ -762,10 +790,15 @@ async function handleMemory(args: string[]) {
       throw new CliError("memory search requires a query");
     }
 
+    const projectId = await resolveSemanticMemoryProjectScope();
     const params = new URLSearchParams({
       q: query,
       limit: "10",
     });
+    if (projectId) {
+      params.set("projectId", projectId);
+      params.set("includeGlobal", "true");
+    }
     return apiRequest<SemanticMemoryPayload[]>(`/api/memory/search?${params.toString()}`);
   }
 
@@ -794,12 +827,14 @@ async function handleMemory(args: string[]) {
       throw new CliError("memory add requires content");
     }
 
+    const projectId = await resolveSemanticMemoryProjectScope();
     return apiRequest<SemanticMemoryPayload>("/api/memory/entries", {
       method: "POST",
       body: JSON.stringify({
         content,
         source: "manual",
         durability: "permanent",
+        projectId,
       }),
     });
   }

@@ -8,7 +8,6 @@ import {
   type ShellOverview,
   type StudyArtifact,
 } from "@aliceloop/runtime-core";
-import { listMemoryNotes } from "../context/memory/memoryRepository";
 import { getDatabase } from "../db/client";
 import { listTaskRuns } from "./taskRunRepository";
 
@@ -306,17 +305,12 @@ export function getShellOverview(): ShellOverview {
     .all() as StudyArtifact[];
 
   const taskRuns = listTaskRuns({ limit: 100 });
-
-  const memoryRows = listMemoryNotes(200);
   const attention = getAttentionState();
 
   return {
     attention,
     artifacts,
     library,
-    memories: memoryRows,
     taskRuns,
   };
 }
-
-export { createMemoryNote, getMemoryNote, listMemoryNotes, upsertMemoryNote } from "../context/memory/memoryRepository";

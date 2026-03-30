@@ -12,7 +12,6 @@ import {
   type DevicePresence,
   type JobRunDetail,
   type LibraryItem,
-  type MemoryNote,
   type Session,
   type SessionEvent,
   type SessionMessage,
@@ -289,53 +288,6 @@ function seedAttentionEvent(db: Database.Database, event: AttentionEvent) {
   ).run(event);
 }
 
-function seedMemory(db: Database.Database, memory: MemoryNote) {
-  db.prepare(
-    `
-      INSERT OR REPLACE INTO memory_notes (
-        id, kind, title, content, source, updated_at
-      ) VALUES (
-        @id, @kind, @title, @content, @source, @updatedAt
-      )
-    `,
-  ).run(memory);
-
-  const row = db
-    .prepare(
-      `
-        SELECT rowid
-        FROM memory_notes
-        WHERE id = ?
-      `,
-    )
-    .get(memory.id) as { rowid: number } | undefined;
-
-  if (!row) {
-    return;
-  }
-
-  db.prepare(
-    `
-      INSERT OR REPLACE INTO memory_notes_fts (
-        rowid,
-        memory_id,
-        kind,
-        content
-      ) VALUES (
-        @rowid,
-        @memoryId,
-        @kind,
-        @content
-      )
-    `,
-  ).run({
-    rowid: row.rowid,
-    memoryId: memory.id,
-    kind: memory.kind,
-    content: `${memory.title}\n${memory.content}`.trim(),
-  });
-}
-
 function seedFtsBlock(db: Database.Database, block: SeedContentBlock) {
   db.prepare(
     `
@@ -510,10 +462,6 @@ function seedOverviewData(db: Database.Database) {
     seedAttentionEvent(db, event);
   }
 
-  for (const memory of previewShellOverview.memories) {
-    seedMemory(db, memory);
-  }
-
   for (const block of seedContentBlocks) {
     seedFtsBlock(db, block);
   }
@@ -576,6 +524,8 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "memories", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL");
+  ensureColumn(db, "memories", "session_id", "TEXT REFERENCES sessions(id) ON DELETE SET NULL");
   ensureColumn(db, "memories", "fact_kind", "TEXT CHECK(fact_kind IN ('preference', 'constraint', 'decision', 'profile', 'account', 'workflow', 'other'))");
   ensureColumn(db, "memories", "fact_key", "TEXT");
   ensureColumn(db, "memories", "fact_state", "TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted'))");
@@ -587,6 +537,25 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
   db.prepare("UPDATE memories SET fact_state = 'active' WHERE COALESCE(fact_state, '') = ''").run();
+  db.prepare("DELETE FROM memory_search_fts").run();
+  db.prepare(
+    `
+      INSERT INTO memory_search_fts (
+        memory_id,
+        search_text
+      )
+      SELECT
+        id,
+        trim(
+          coalesce(content, '')
+          || char(10) || coalesce(fact_kind, '')
+          || char(10) || coalesce(fact_key, '')
+          || char(10) || replace(replace(replace(replace(coalesce(related_topics, '[]'), '[', ' '), ']', ' '), '"', ' '), ',', ' ')
+        )
+      FROM memories
+      WHERE fact_state = 'active'
+    `,
+  ).run();
   db.prepare("UPDATE task_runs SET task_type = 'script-runner' WHERE task_type = 'local-script-runner'").run();
   db.prepare("UPDATE job_runs SET kind = 'script-runner' WHERE kind = 'local-script-runner'").run();
   db.prepare(
@@ -632,23 +601,6 @@ function runMigrations(db: Database.Database) {
         END,
         related_library_title = 'Aliceloop Runtime Notes'
       WHERE id IN ('artifact-study-bianzheng', 'artifact-review-pack')
-    `,
-  ).run();
-  db.prepare(
-    `
-      UPDATE memory_notes
-      SET
-        title = CASE id
-          WHEN 'memory-1' THEN '近期关注重心'
-          WHEN 'memory-2' THEN '稳定混淆点'
-          ELSE title
-        END,
-        content = CASE id
-          WHEN 'memory-1' THEN '用户最近主要围绕 runtime core、provider 接入和多端同步的边界来回切换。'
-          WHEN 'memory-2' THEN '遇到 runtime 设计问题时，优先给分层图和最小执行边界，而不是先展开大而全的流程图。'
-          ELSE content
-        END
-      WHERE id IN ('memory-1', 'memory-2')
     `,
   ).run();
   db.prepare(
@@ -741,23 +693,6 @@ function runMigrations(db: Database.Database) {
       WHERE id IN ('event-1', 'event-2')
     `,
   ).run();
-  db.prepare("DELETE FROM memory_notes_fts").run();
-  db.prepare(
-    `
-      INSERT INTO memory_notes_fts (
-        rowid,
-        memory_id,
-        kind,
-        content
-      )
-      SELECT
-        rowid,
-        id,
-        kind,
-        trim(title || char(10) || content)
-      FROM memory_notes
-    `,
-  ).run();
 }
 
 function bootstrap(db: Database.Database) {
@@ -805,6 +740,7 @@ export function getDatabase(): Database.Database {
   const nativeBindingPath = resolveNativeBindingPath();
   database = new Database(databasePath, nativeBindingPath ? { nativeBinding: nativeBindingPath } : undefined);
   database.pragma("journal_mode = WAL");
+  database.pragma("synchronous = NORMAL");
   database.pragma("foreign_keys = ON");
   bootstrap(database);
   return database;

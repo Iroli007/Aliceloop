@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-task-runs-"));
+  const workspaceRoot = join(tempDataDir, "workspaces", "default");
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
+  process.env.ALICELOOP_DEFAULT_WORKSPACE_DIR = workspaceRoot;
+
+  mkdirSync(workspaceRoot, { recursive: true });
 
   const [
     { createAttachment, createSession, upsertSessionJob },
@@ -23,7 +27,19 @@ async function main() {
   const session = createSession("任务表烟雾测试");
 
   const studyJobId = randomUUID();
-  const scriptPath = join(tempDataDir, "echo-task.js");
+  const sourcePath = join(workspaceRoot, "runtime-notes.txt");
+  const scriptPath = join(workspaceRoot, "echo-task.js");
+  writeFileSync(
+    sourcePath,
+    [
+      "# Runtime 设计草稿",
+      "",
+      "Session、queue 和 events 负责持续状态。",
+      "Sandbox 层只暴露 read、grep、glob、write、edit、bash 六个最小执行 ABI。",
+      "snapshot、stream 和 heartbeat 一起负责多端同步。",
+    ].join("\n"),
+    "utf8",
+  );
   writeFileSync(scriptPath, 'console.log("task-runner-ok");\n', "utf8");
 
   upsertSessionJob({
@@ -77,7 +93,7 @@ async function main() {
   const documentIngest = await runManagedTask({
     taskType: "document-ingest",
     title: "Runtime 设计草稿",
-    sourcePath: "/tmp/runtime-notes.pdf",
+    sourcePath,
     sourceKind: "handout",
     documentKind: "digital",
   });
@@ -91,18 +107,17 @@ async function main() {
     title: "运行任务测试脚本",
     command: "node",
     args: [scriptPath],
-    cwd: tempDataDir,
+    cwd: workspaceRoot,
   });
   const failingScript = await runManagedTask({
     taskType: "script-runner",
     sessionId: session.id,
     title: "运行失败脚本",
     command: "node",
-    args: [join(tempDataDir, "missing-script.js")],
-    cwd: tempDataDir,
+    args: [join(workspaceRoot, "missing-script.js")],
+    cwd: workspaceRoot,
   });
   const refreshedTaskList = listTaskRuns({ limit: 20 });
-  const refreshedOverview = getShellOverview();
 
   assert(studyTask, "study-artifact task should exist");
   assert.equal(studyTask.taskType, "study-artifact");
@@ -120,23 +135,12 @@ async function main() {
   assert(documentIngest.libraryItem, "document-ingest task should create a library item");
   assert.equal(documentIngest.task.taskType, "document-ingest");
   assert.equal(documentIngest.task.status, "done");
-  assert.equal(documentIngest.memoryNote?.kind, "attention-summary", "document-ingest should distill attention into memory");
-  assert(reviewCoach.memoryNote, "review-coach task should create a memory note");
   assert.equal(reviewCoach.task.taskType, "review-coach");
   assert.equal(localScript.task.taskType, "script-runner");
   assert.equal(localScript.task.status, "done");
   assert(localScript.task.detail.includes("task-runner-ok"), "script-runner should capture stdout");
   assert.equal(failingScript.task.taskType, "script-runner");
   assert.equal(failingScript.task.status, "failed");
-  assert.equal(failingScript.memoryNote?.kind, "postmortem", "failed script-runner should create postmortem memory");
-  assert(
-    refreshedOverview.memories.some((memory) => memory.id === documentIngest.memoryNote?.id),
-    "overview should include distilled attention memory",
-  );
-  assert(
-    refreshedOverview.memories.some((memory) => memory.id === failingScript.memoryNote?.id),
-    "overview should include failure postmortem memory",
-  );
   assert(refreshedTaskList.some((task) => task.id === documentIngest.task.id), "task list should include document-ingest task");
   assert(refreshedTaskList.some((task) => task.id === reviewCoach.task.id), "task list should include review-coach task");
   assert(refreshedTaskList.some((task) => task.id === localScript.task.id), "task list should include script-runner task");

@@ -1,7 +1,6 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 import type { ModelMessage } from "ai";
-import type { AttentionState, TaskRun } from "@aliceloop/runtime-core";
 import type { SessionEvent } from "@aliceloop/runtime-core";
 import type { SessionMessage } from "@aliceloop/runtime-core";
 import type { SessionSnapshot } from "@aliceloop/runtime-core";
@@ -19,9 +18,6 @@ import {
   getSessionSnapshot,
   listSessionEventsSince,
 } from "../../repositories/sessionRepository";
-import { getAttentionState } from "../../repositories/overviewRepository";
-import { listPlans, type PlanRecord } from "../../repositories/planRepository";
-import { listTaskRuns } from "../../repositories/taskRunRepository";
 import { nowMs, roundMs } from "../../runtime/perfTrace";
 
 const MAX_HISTORY_MESSAGES = 8;
@@ -446,7 +442,6 @@ interface SessionContextFragmentTimings {
   recentResearchMemoryMs: number;
   activeTurnMs: number;
   recentToolActivityMs: number;
-  taskWorkingMemoryMs: number;
   messagesMs: number;
   totalMs: number;
   snapshotReads: number;
@@ -460,7 +455,6 @@ export interface SessionContextFragments {
   recentResearchMemory: string;
   recentToolActivity: string;
   activeTurn: string;
-  taskWorkingMemory: string;
   messages: ModelMessage[];
   timings: SessionContextFragmentTimings;
 }
@@ -961,161 +955,6 @@ function buildRecentToolActivityBlockFromTraces(traces: RecentToolTrace[]) {
   return lines.join("\n");
 }
 
-function buildWorkspaceBoundarySection(projectBinding: SessionProjectBinding | null) {
-  if (!projectBinding) {
-    return "";
-  }
-
-  const lines = ["### Workspace Boundary"];
-  if (projectBinding.projectName) {
-    lines.push(`- Project: ${projectBinding.projectName}`);
-  }
-  if (projectBinding.projectPath) {
-    lines.push(`- Path: ${projectBinding.projectPath}`);
-  }
-  return lines.join("\n");
-}
-
-function buildAttentionSection(attention: AttentionState) {
-  if (!attention.currentLibraryTitle && !attention.focusSummary && attention.concepts.length === 0) {
-    return "";
-  }
-
-  const lines = ["### Current Attention"];
-  if (attention.currentLibraryTitle) {
-    lines.push(`- Focused on: ${attention.currentLibraryTitle}`);
-  }
-  if (attention.currentSectionLabel) {
-    lines.push(`- Current section: ${attention.currentSectionLabel}`);
-  }
-  if (attention.focusSummary) {
-    lines.push(`- Summary: ${attention.focusSummary}`);
-  }
-  if (attention.concepts.length > 0) {
-    lines.push(`- Key concepts: ${attention.concepts.join(", ")}`);
-  }
-  return lines.join("\n");
-}
-
-function buildPlanStateSection(plans: PlanRecord[]) {
-  if (plans.length === 0) {
-    return "";
-  }
-
-  const lines = ["### Plan State"];
-  for (const plan of plans.slice(0, 2)) {
-    lines.push(`- ${plan.title} · ${plan.status}`);
-    if (plan.goal) {
-      lines.push(`  goal: ${trimInline(plan.goal, 180)}`);
-    }
-    if (plan.steps.length > 0) {
-      lines.push("  steps:");
-      for (const step of plan.steps.slice(0, 4)) {
-        lines.push(`    - ${trimInline(step, 120)}`);
-      }
-    }
-  }
-
-  return lines.join("\n");
-}
-
-function buildTaskRunSection(taskRuns: TaskRun[]) {
-  if (taskRuns.length === 0) {
-    return "";
-  }
-
-  const lines = ["### Session Tasks"];
-  for (const taskRun of taskRuns.slice(0, 4)) {
-    lines.push(`- ${taskRun.status} · ${taskRun.title}`);
-    if (taskRun.detail.trim()) {
-      lines.push(`  detail: ${trimInline(taskRun.detail, 180)}`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-function buildTaskWorkingMemoryBlock(input: {
-  sessionId: string;
-  projectBinding: SessionProjectBinding | null;
-  recentConversationFocus: RecentConversationFocus;
-  activeTurn: string;
-  recentResearchMemory: string;
-  recentToolActivity: string;
-}) {
-  const sections: string[] = [];
-
-  const workspaceBoundary = buildWorkspaceBoundarySection(input.projectBinding);
-  if (workspaceBoundary) {
-    sections.push(workspaceBoundary);
-  }
-
-  const attention = buildAttentionSection(getAttentionState());
-  if (attention) {
-    sections.push(attention);
-  }
-
-  const requestLines = ["### Current Request"];
-  requestLines.push(`- Goal: ${trimInline(input.recentConversationFocus.resolvedCurrentRequest ?? input.recentConversationFocus.latestContent, 240)}`);
-  if (input.recentConversationFocus.latestOpeningLines.length > 0) {
-    requestLines.push(`- Latest opening lines: ${trimInline(input.recentConversationFocus.latestOpeningLines.join(" / "), 240)}`);
-  }
-  if (input.recentConversationFocus.latestClosingLines.length > 0) {
-    requestLines.push(`- Latest closing lines: ${trimInline(input.recentConversationFocus.latestClosingLines.join(" / "), 240)}`);
-  }
-  if (input.recentConversationFocus.effectiveUserQuery && input.recentConversationFocus.effectiveUserQuery !== input.recentConversationFocus.latestContent) {
-    requestLines.push(`- Effective query: ${trimInline(input.recentConversationFocus.effectiveUserQuery, 240)}`);
-  }
-  if (input.recentConversationFocus.carryForwardFacts) {
-    requestLines.push(`- Carry-forward facts: ${trimInline(input.recentConversationFocus.carryForwardFacts, 240)}`);
-  }
-  if (input.recentConversationFocus.worksetConstraints) {
-    requestLines.push(`- Temporary constraints: ${trimInline(input.recentConversationFocus.worksetConstraints, 240)}`);
-  }
-  if (input.recentConversationFocus.routeHints.reasons.length > 0) {
-    requestLines.push(`- Routing hints: ${input.recentConversationFocus.routeHints.reasons.join("; ")}`);
-  }
-  sections.push(requestLines.join("\n"));
-
-  if (input.activeTurn) {
-    sections.push([
-      "### Turn Directive",
-      input.activeTurn,
-    ].join("\n"));
-  }
-
-  if (input.recentToolActivity) {
-    sections.push(input.recentToolActivity);
-  }
-
-  if (input.recentResearchMemory) {
-    sections.push(input.recentResearchMemory);
-  }
-
-  const plans = listPlans({ sessionId: input.sessionId, limit: 2 });
-  const planSection = buildPlanStateSection(plans);
-  if (planSection) {
-    sections.push(planSection);
-  }
-
-  const taskRuns = listTaskRuns({ sessionId: input.sessionId, limit: 4 });
-  const taskSection = buildTaskRunSection(taskRuns);
-  if (taskSection) {
-    sections.push(taskSection);
-  }
-
-  if (sections.length === 0) {
-    return "";
-  }
-
-  return [
-    "## Task Working Memory",
-    "- Treat this as the current task brain, not as long-term memory.",
-    "",
-    ...sections,
-  ].join("\n\n");
-}
-
 function parseRecord(value: unknown) {
   if (typeof value === "string") {
     try {
@@ -1380,17 +1219,6 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const recentResearchMemory = buildRecentResearchMemoryBlockFromTraces(recentToolTraces);
   const recentResearchMemoryMs = roundMs(nowMs() - recentResearchMemoryStartedAt);
 
-  const taskWorkingMemoryStartedAt = nowMs();
-  const taskWorkingMemory = buildTaskWorkingMemoryBlock({
-    sessionId,
-    projectBinding,
-    recentConversationFocus,
-    activeTurn,
-    recentResearchMemory,
-    recentToolActivity,
-  });
-  const taskWorkingMemoryMs = roundMs(nowMs() - taskWorkingMemoryStartedAt);
-
   const messagesStartedAt = nowMs();
   const messages = buildSessionMessagesFromSnapshot(snapshot);
   const messagesMs = roundMs(nowMs() - messagesStartedAt);
@@ -1403,7 +1231,6 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
     recentResearchMemory,
     recentToolActivity,
     activeTurn,
-    taskWorkingMemory,
     messages,
     timings: {
       snapshotMs,
@@ -1415,7 +1242,6 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
       recentResearchMemoryMs,
       activeTurnMs,
       recentToolActivityMs,
-      taskWorkingMemoryMs,
       messagesMs,
       totalMs: roundMs(nowMs() - startedAt),
       snapshotReads: 1,

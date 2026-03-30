@@ -1,7 +1,11 @@
 import type { MemoryWithScore } from "@aliceloop/runtime-core";
 import { nowMs, roundMs } from "../../runtime/perfTrace";
 import { getMemoryConfig } from "./memoryConfig";
-import { searchMemories } from "./memoryRepository";
+import {
+  DEFAULT_SEMANTIC_MEMORY_RETRIEVAL_LIMIT,
+  DEFAULT_SEMANTIC_MEMORY_SIMILARITY_THRESHOLD,
+  searchMemories,
+} from "./memoryRepository";
 
 export interface MemoryBlockResult {
   content: string;
@@ -15,11 +19,15 @@ function formatMemoryLine(memory: MemoryWithScore) {
 }
 
 export async function buildProfileFactMemoryBlock(
-  queryText: string,
+  input: {
+    queryText: string;
+    projectId?: string | null;
+    sessionId?: string | null;
+  },
 ): Promise<MemoryBlockResult> {
   const startedAt = nowMs();
   const timings: Record<string, number | string | null> = {};
-  const trimmedQuery = queryText.trim();
+  const trimmedQuery = input.queryText.trim();
 
   if (!trimmedQuery) {
     timings.skipReason = "no_query";
@@ -31,7 +39,7 @@ export async function buildProfileFactMemoryBlock(
   }
 
   const config = getMemoryConfig();
-  if (!config.enabled || !config.autoRetrieval) {
+  if (!config.enabled) {
     timings.skipReason = "memory_disabled";
     timings.totalMs = roundMs(nowMs() - startedAt);
     return {
@@ -41,11 +49,13 @@ export async function buildProfileFactMemoryBlock(
   }
 
   const searchStartedAt = nowMs();
-  const result = await searchMemories(
-    trimmedQuery,
-    config.maxRetrievalCount,
-    config.similarityThreshold,
-  );
+  const result = await searchMemories(trimmedQuery, DEFAULT_SEMANTIC_MEMORY_RETRIEVAL_LIMIT, DEFAULT_SEMANTIC_MEMORY_SIMILARITY_THRESHOLD, {
+    scope: {
+      projectId: input.projectId ?? null,
+      sessionId: input.sessionId ?? null,
+      includeGlobal: true,
+    },
+  });
   timings.searchMs = roundMs(nowMs() - searchStartedAt);
   timings.searchMode = result.mode;
   timings.fallbackReason = result.fallbackReason;
@@ -53,7 +63,7 @@ export async function buildProfileFactMemoryBlock(
 
   const memories = result.memories
     .filter((memory) => memory.durability === "permanent")
-    .slice(0, config.maxRetrievalCount);
+    .slice(0, DEFAULT_SEMANTIC_MEMORY_RETRIEVAL_LIMIT);
 
   if (memories.length === 0) {
     timings.memoryCount = 0;
