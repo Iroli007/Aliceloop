@@ -14,6 +14,8 @@ import {
   type LibraryItem,
   type Session,
   type SessionEvent,
+  type SessionFocusState,
+  type SessionRollingSummary,
   type SessionMessage,
   type StudyArtifact,
   type TaskRun,
@@ -338,6 +340,48 @@ function seedSession(db: Database.Database, session: Session) {
   ).run(session);
 }
 
+function seedSessionFocusState(db: Database.Database, focusState: SessionFocusState) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO session_focus_state (
+        session_id, goal, constraints_json, priorities_json, next_step, done_criteria_json, blockers_json, updated_at
+      ) VALUES (
+        @sessionId, @goal, @constraintsJson, @prioritiesJson, @nextStep, @doneCriteriaJson, @blockersJson, @updatedAt
+      )
+    `,
+  ).run({
+    sessionId: focusState.sessionId,
+    goal: focusState.goal,
+    constraintsJson: JSON.stringify(focusState.constraints),
+    prioritiesJson: JSON.stringify(focusState.priorities),
+    nextStep: focusState.nextStep,
+    doneCriteriaJson: JSON.stringify(focusState.doneCriteria),
+    blockersJson: JSON.stringify(focusState.blockers),
+    updatedAt: focusState.updatedAt ?? new Date().toISOString(),
+  });
+}
+
+function seedSessionRollingSummary(db: Database.Database, rollingSummary: SessionRollingSummary) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO session_rolling_summary (
+        session_id, current_phase, summary, completed_json, remaining_json, decisions_json, summarized_turn_count, updated_at
+      ) VALUES (
+        @sessionId, @currentPhase, @summary, @completedJson, @remainingJson, @decisionsJson, @summarizedTurnCount, @updatedAt
+      )
+    `,
+  ).run({
+    sessionId: rollingSummary.sessionId,
+    currentPhase: rollingSummary.currentPhase,
+    summary: rollingSummary.summary,
+    completedJson: JSON.stringify(rollingSummary.completed),
+    remainingJson: JSON.stringify(rollingSummary.remaining),
+    decisionsJson: JSON.stringify(rollingSummary.decisions),
+    summarizedTurnCount: rollingSummary.summarizedTurnCount,
+    updatedAt: rollingSummary.updatedAt ?? new Date().toISOString(),
+  });
+}
+
 function seedAttachment(db: Database.Database, attachment: SessionMessage["attachments"][number]) {
   db.prepare(
     `
@@ -478,6 +522,8 @@ function seedSessionData(db: Database.Database) {
   }
 
   seedSession(db, previewSessionSnapshot.session);
+  seedSessionFocusState(db, previewSessionSnapshot.focusState);
+  seedSessionRollingSummary(db, previewSessionSnapshot.rollingSummary);
 
   for (const attachment of previewSessionSnapshot.attachments) {
     seedAttachment(db, attachment);
@@ -515,7 +561,37 @@ function ensureColumn(db: Database.Database, tableName: string, columnName: stri
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
 }
 
+function hasTable(db: Database.Database, tableName: string) {
+  const row = db
+    .prepare(
+      `
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = ?
+      `,
+    )
+    .get(tableName) as { name: string } | undefined;
+
+  return Boolean(row);
+}
+
 function runMigrations(db: Database.Database) {
+  db.exec(
+    `
+      CREATE TABLE IF NOT EXISTS session_rolling_summary (
+        session_id TEXT PRIMARY KEY,
+        current_phase TEXT NOT NULL DEFAULT '',
+        summary TEXT NOT NULL DEFAULT '',
+        completed_json TEXT NOT NULL DEFAULT '[]',
+        remaining_json TEXT NOT NULL DEFAULT '[]',
+        decisions_json TEXT NOT NULL DEFAULT '[]',
+        summarized_turn_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      )
+    `,
+  );
   ensureColumn(db, "sessions", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL");
   ensureColumn(db, "sessions", "workset_state_json", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "attachments", "original_path", "TEXT");
@@ -533,8 +609,38 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, "runtime_settings", "auto_approve_tool_requests", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "runtime_settings", "tool_provider_id", "TEXT");
   ensureColumn(db, "runtime_settings", "tool_model", "TEXT");
+  ensureColumn(db, "runtime_settings", "recent_turns_count", "INTEGER NOT NULL DEFAULT 4");
   ensureColumn(db, "device_presence", "capabilities_json", "TEXT NOT NULL DEFAULT '{}'");
+  if (hasTable(db, "session_phase_summary")) {
+    db.prepare(
+      `
+        INSERT OR IGNORE INTO session_rolling_summary (
+          session_id,
+          current_phase,
+          summary,
+          completed_json,
+          remaining_json,
+          decisions_json,
+          summarized_turn_count,
+          updated_at
+        )
+        SELECT
+          session_id,
+          current_phase,
+          summary,
+          completed_json,
+          remaining_json,
+          decisions_json,
+          0,
+          updated_at
+        FROM session_phase_summary
+      `,
+    ).run();
+  }
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
+  db.prepare(
+    "UPDATE runtime_settings SET recent_turns_count = 4 WHERE COALESCE(recent_turns_count, 0) < 1",
+  ).run();
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
   db.prepare("UPDATE memories SET fact_state = 'active' WHERE COALESCE(fact_state, '') = ''").run();
   db.prepare("DELETE FROM memory_search_fts").run();

@@ -77,10 +77,13 @@ export async function loadContext(
   timings.latestUserMs = sessionContext.timings.latestUserMs;
   timings.projectBindingMs = sessionContext.timings.projectBindingMs;
   timings.attachmentRootsMs = sessionContext.timings.attachmentRootsMs;
+  timings.sessionFocusMs = sessionContext.timings.sessionFocusMs;
+  timings.rollingSummaryMs = sessionContext.timings.rollingSummaryMs;
   timings.recentToolTraceMs = sessionContext.timings.recentToolTraceMs;
   timings.recentConversationFocusMs = sessionContext.timings.recentConversationFocusMs;
   timings.recentResearchMemoryMs = sessionContext.timings.recentResearchMemoryMs;
   timings.activeTurnMs = sessionContext.timings.activeTurnMs;
+  timings.latestTurnMs = sessionContext.timings.latestTurnMs;
   timings.recentToolActivityMs = sessionContext.timings.recentToolActivityMs;
   timings.messagesMs = sessionContext.timings.messagesMs;
 
@@ -273,8 +276,10 @@ export async function loadContext(
   })();
 
   const dynamicBlocks = [
-    recentConversationFocus.content,
     sessionContext.activeTurn,
+    sessionContext.latestTurn,
+    sessionContext.sessionFocus,
+    sessionContext.rollingSummary,
     sessionContext.recentToolActivity,
     sessionContext.recentResearchMemory,
     profileFactMemory.content,

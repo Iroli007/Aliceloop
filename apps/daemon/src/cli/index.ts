@@ -50,6 +50,7 @@ interface RuntimeSettingsPayload {
   reasoningEffort: string;
   toolProviderId: string | null;
   toolModel: string | null;
+  recentTurnsCount: number;
   updatedAt: string | null;
 }
 
@@ -89,13 +90,37 @@ interface SessionThreadSummaryPayload {
   projectPath?: string | null;
 }
 
+interface SessionFocusStatePayload {
+  sessionId: string;
+  goal: string;
+  constraints: string[];
+  priorities: string[];
+  nextStep: string;
+  doneCriteria: string[];
+  blockers: string[];
+  updatedAt: string | null;
+}
+
+interface SessionRollingSummaryPayload {
+  sessionId: string;
+  currentPhase: string;
+  summary: string;
+  completed: string[];
+  remaining: string[];
+  decisions: string[];
+  summarizedTurnCount: number;
+  updatedAt: string | null;
+}
+
 interface SessionSnapshotPayload {
   session: {
     id: string;
     title: string;
     createdAt: string;
-    updatedAt: string;
+  updatedAt: string;
   };
+  focusState: SessionFocusStatePayload;
+  rollingSummary: SessionRollingSummaryPayload;
   messages: Array<{
     id: string;
     role: string;
@@ -252,6 +277,10 @@ function usage() {
     "  aliceloop providers",
     "  aliceloop threads [limit]",
     "  aliceloop thread info <id>",
+    "  aliceloop thread focus <id>",
+    "  aliceloop thread focus-set <id> [--goal <text>] [--constraints <comma,separated>] [--priorities <comma,separated>] [--next-step <text>] [--done <comma,separated>] [--blockers <comma,separated>]",
+    "  aliceloop thread summary <id>",
+    "  aliceloop thread summary-set <id> [--current-phase <text>] [--summary <text>] [--completed <comma,separated>] [--remaining <comma,separated>] [--decisions <comma,separated>]",
     "  aliceloop thread new [title]",
     "  aliceloop thread search <query>",
     "  aliceloop thread delete <id>",
@@ -450,6 +479,22 @@ function splitSteps(rawValue: string | undefined) {
     .filter(Boolean);
 }
 
+function parseOptionalCsvFlag(flags: Record<string, string>, key: string) {
+  if (!(key in flags)) {
+    return undefined;
+  }
+
+  const rawValue = flags[key];
+  if (!rawValue.trim()) {
+    return [];
+  }
+
+  return rawValue
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function splitCsv(rawValue: string | undefined) {
   return splitSteps(rawValue);
 }
@@ -568,12 +613,13 @@ async function fetchConfigSnapshot(): Promise<ConfigSnapshot> {
 }
 
 function flattenConfigSnapshot(snapshot: ConfigSnapshot) {
-  const flattened: Record<string, string | boolean | null> = {
+  const flattened: Record<string, string | number | boolean | null> = {
     "runtime.sandboxProfile": snapshot.runtime.sandboxProfile,
     "runtime.autoApproveToolRequests": snapshot.runtime.autoApproveToolRequests,
     "runtime.reasoningEffort": snapshot.runtime.reasoningEffort,
     "runtime.toolProviderId": snapshot.runtime.toolProviderId,
     "runtime.toolModel": snapshot.runtime.toolModel,
+    "runtime.recentTurnsCount": snapshot.runtime.recentTurnsCount,
     "runtime.updatedAt": snapshot.runtime.updatedAt,
     "user.displayName": snapshot.user.displayName,
     "user.preferredLanguage": snapshot.user.preferredLanguage,
@@ -705,6 +751,18 @@ async function setConfigValue(path: string, rawValue: string) {
       return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
         method: "PUT",
         body: JSON.stringify({ toolModel }),
+      });
+    }
+
+    if (segments[1] === "recentTurnsCount") {
+      const recentTurnsCount = Number.parseInt(rawValue, 10);
+      if (!Number.isFinite(recentTurnsCount) || recentTurnsCount < 1 || recentTurnsCount > 20) {
+        throw new CliError("runtime.recentTurnsCount must be an integer between 1 and 20");
+      }
+
+      return apiRequest<RuntimeSettingsPayload>("/api/runtime/settings", {
+        method: "PUT",
+        body: JSON.stringify({ recentTurnsCount }),
       });
     }
 
@@ -911,6 +969,8 @@ async function handleThread(args: string[]) {
       jobCount: snapshot.jobs.length,
       pendingToolApprovals: snapshot.pendingToolApprovals.length,
       resolvedToolApprovals: snapshot.resolvedToolApprovals.length,
+      focusState: snapshot.focusState,
+      rollingSummary: snapshot.rollingSummary,
       lastEventSeq: snapshot.lastEventSeq,
       recentMessages: snapshot.messages.slice(-5).map((message) => ({
         role: message.role,
@@ -918,6 +978,63 @@ async function handleThread(args: string[]) {
         content: message.content,
       })),
     };
+  }
+
+  if (action === "focus") {
+    const sessionId = args[1]?.trim();
+    if (!sessionId) {
+      throw new CliError("thread focus requires a session id");
+    }
+
+    return apiRequest<SessionFocusStatePayload>(`/api/session/${encodeURIComponent(sessionId)}/focus`);
+  }
+
+  if (action === "focus-set") {
+    const sessionId = args[1]?.trim();
+    if (!sessionId) {
+      throw new CliError("thread focus-set requires a session id");
+    }
+
+    const { flags } = parseFlagArgs(args.slice(2));
+    return apiRequest<SessionFocusStatePayload>(`/api/session/${encodeURIComponent(sessionId)}/focus`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        goal: "goal" in flags ? parseNullableString(flags.goal) : undefined,
+        constraints: parseOptionalCsvFlag(flags, "constraints"),
+        priorities: parseOptionalCsvFlag(flags, "priorities"),
+        nextStep: "next-step" in flags ? parseNullableString(flags["next-step"]) : undefined,
+        doneCriteria: parseOptionalCsvFlag(flags, "done"),
+        blockers: parseOptionalCsvFlag(flags, "blockers"),
+      }),
+    });
+  }
+
+  if (action === "summary") {
+    const sessionId = args[1]?.trim();
+    if (!sessionId) {
+      throw new CliError("thread summary requires a session id");
+    }
+
+    return apiRequest<SessionRollingSummaryPayload>(`/api/session/${encodeURIComponent(sessionId)}/summary`);
+  }
+
+  if (action === "summary-set") {
+    const sessionId = args[1]?.trim();
+    if (!sessionId) {
+      throw new CliError("thread summary-set requires a session id");
+    }
+
+    const { flags } = parseFlagArgs(args.slice(2));
+    return apiRequest<SessionRollingSummaryPayload>(`/api/session/${encodeURIComponent(sessionId)}/summary`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        currentPhase: "current-phase" in flags ? parseNullableString(flags["current-phase"]) : undefined,
+        summary: "summary" in flags ? parseNullableString(flags.summary) : undefined,
+        completed: parseOptionalCsvFlag(flags, "completed"),
+        remaining: parseOptionalCsvFlag(flags, "remaining"),
+        decisions: parseOptionalCsvFlag(flags, "decisions"),
+      }),
+    });
   }
 
   if (action === "new") {

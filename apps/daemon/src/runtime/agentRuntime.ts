@@ -4,9 +4,9 @@ import { statSync } from "node:fs";
 import type { ReasoningEffort } from "@aliceloop/runtime-core";
 import { generateText, stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
-import { autoCompactMessages } from "./autoCompact";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
 import { getLatestUserMessage } from "../context/session/sessionContext";
+import { refreshSessionRollingSummary } from "../context/session/rollingSummary";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
 import { createProviderModel } from "../providers/providerModelFactory";
@@ -86,6 +86,7 @@ function publishAssistantReply(sessionId: string, content: string, skills: strin
   }
 
   void syncSessionProjectHistory(sessionId).catch(() => {});
+  void refreshSessionRollingSummary(sessionId).catch(() => {});
 }
 
 function buildAssistantEventPayload(skills: string[], tools: string[]) {
@@ -687,7 +688,7 @@ async function executeMiniMaxTextToolCallFallback(
         model: createProviderModel(run.provider),
         system: run.context.systemPrompt,
         messages: [
-          ...autoCompactMessages(run.context.messages, 8),
+          ...run.context.messages,
           {
             role: "assistant",
             content: assistantText,
@@ -1110,7 +1111,7 @@ async function executeStreamAttempt(
   const stream = streamText({
     model: createProviderModel(run.provider),
     system: run.context.systemPrompt,
-    messages: autoCompactMessages(run.context.messages, 8),
+    messages: run.context.messages,
     tools: run.context.tools,
     providerOptions: buildAgentProviderOptions(run.provider, runtimeSettings.reasoningEffort),
     stopWhen: stepCountIs(run.context.safetyConfig.maxIterations),
@@ -1530,6 +1531,8 @@ function schedulePostProcessing(run: AgentRun, text: string) {
       publishRuntimeNotice(run.sessionId, `工件流式写入失败：${detail}`);
     });
   }
+
+  void refreshSessionRollingSummary(run.sessionId).catch(() => {});
 
   if (!latestUserMessage) {
     return;

@@ -30,6 +30,32 @@ export const schemaStatements = [
     ON sessions (project_id, updated_at DESC)
   `,
   `
+    CREATE TABLE IF NOT EXISTS session_focus_state (
+      session_id TEXT PRIMARY KEY,
+      goal TEXT NOT NULL DEFAULT '',
+      constraints_json TEXT NOT NULL DEFAULT '[]',
+      priorities_json TEXT NOT NULL DEFAULT '[]',
+      next_step TEXT NOT NULL DEFAULT '',
+      done_criteria_json TEXT NOT NULL DEFAULT '[]',
+      blockers_json TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS session_rolling_summary (
+      session_id TEXT PRIMARY KEY,
+      current_phase TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      completed_json TEXT NOT NULL DEFAULT '[]',
+      remaining_json TEXT NOT NULL DEFAULT '[]',
+      decisions_json TEXT NOT NULL DEFAULT '[]',
+      summarized_turn_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS attachments (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -434,6 +460,7 @@ export const schemaStatements = [
       reasoning_effort TEXT NOT NULL DEFAULT 'medium',
       tool_provider_id TEXT,
       tool_model TEXT,
+      recent_turns_count INTEGER NOT NULL DEFAULT 4,
       updated_at TEXT NOT NULL
     )
   `,

@@ -796,58 +796,33 @@ async function main() {
     : continuationContext.systemPrompt;
   assert.match(
     continuationSystemPrompt,
-    /## Recent Conversation Focus/,
-    "loadContext should add a recent focus block for short continuation turns",
+    /## Latest Turn/,
+    "loadContext should add a latest-turn block for short continuation turns",
   );
   assert.match(
     continuationSystemPrompt,
-    /latest user message is a continuation-style follow-up/i,
-    "continuation focus block should explicitly mark short follow-up turns",
+    /continuation-like/i,
+    "latest-turn block should explicitly mark short follow-up turns",
   );
   assert.match(
     continuationSystemPrompt,
-    /Original topic anchor from recent turns: 帮我调查摩的司机徐师傅，站粉丝数量搞错了。/,
-    "continuation focus block should keep the original research topic visible",
+    /<latest_assistant_reply>[\s\S]*我先按 B 站和时间点继续查。[\s\S]*<\/latest_assistant_reply>/u,
+    "latest-turn block should keep the immediate assistant reply visible",
   );
   assert.match(
     continuationSystemPrompt,
-    /Latest explicit anchor from recent turns: B站内容才是准的，查一下3月22日的情况。/,
-    "continuation focus block should retain the narrowed verification target",
+    /<resolved_current_request>[\s\S]*Current concrete target: B站内容才是准的，查一下3月22日的情况。[\s\S]*Latest user follow-up: 你查/u,
+    "latest-turn block should expand a short follow-up into a concrete work item",
   );
   assert.match(
     continuationSystemPrompt,
-    /Current unresolved research task: 帮我调查摩的司机徐师傅，站粉丝数量搞错了。 .*B站内容才是准的，查一下3月22日的情况。/,
-    "continuation focus block should synthesize an unresolved research task",
+    /## Research Memory/u,
+    "research memory block should remain available for continuation-style investigations",
   );
   assert.match(
     continuationSystemPrompt,
-    /Source policy for this turn: prioritize the primary platform pages for Bilibili, Douyin, and X\/Twitter when relevant/i,
-    "continuation focus block should expose a strict source policy for fresh platform verification work",
-  );
-  assert.match(
-    continuationSystemPrompt,
-    /Resolved current request for this turn: .*Current concrete target: B站内容才是准的，查一下3月22日的情况。.*Latest user follow-up: 你查/i,
-    "continuation focus block should operationally expand a short follow-up into a concrete work item",
-  );
-  assert.match(
-    continuationSystemPrompt,
-    /<resolved_current_request>[\s\S]*Latest user follow-up: 你查[\s\S]*<\/resolved_current_request>/i,
-    "active turn block should expose the resolved current request near the latest user message",
-  );
-  assert.match(
-    continuationSystemPrompt,
-    /Required action for this turn: use the routed web_search \/ web_fetch research pair only if a specific page still needs to be read/i,
-    "continuation focus block should keep fetch lazy when the task is still source-finding only",
-  );
-  assert.match(
-    continuationSystemPrompt,
-    /Sticky skill routing for this turn: .*web-search/i,
-    "continuation focus block should keep the relevant research skills sticky across short follow-ups",
-  );
-  assert.match(
-    continuationSystemPrompt,
-    /Baidu Baike priority is extremely low for this thread/i,
-    "continuation focus block should explicitly de-prioritize Baidu Baike for ongoing fact verification threads",
+    /## Active Turn/u,
+    "active turn block should still anchor the latest user message",
   );
   assert.match(
     continuationSystemPrompt,
@@ -1167,11 +1142,6 @@ async function main() {
     typeof browserContinuationContext.tools.browser_snapshot,
     "object",
     "browser continuation turns should preserve browser_snapshot through sticky browser capability routing",
-  );
-  assert.match(
-    browserContinuationPrompt,
-    /Sticky skill routing for this turn: .*browser/i,
-    "browser continuation context should keep the browser skill sticky",
   );
   assert.match(
     browserContinuationPrompt,
