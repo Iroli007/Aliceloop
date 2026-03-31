@@ -112,6 +112,26 @@ export const previewSessionSnapshot: SessionSnapshot = {
     updatedAt: "2026-03-17T07:28:00.000Z",
   },
   project: null,
+  focusState: {
+    sessionId: primarySessionId,
+    goal: "把 runtime 里 session、sandbox 和 artifact 的关系整理成一个能快速回看的结构。",
+    constraints: ["优先保留手机端易读性", "不要把底层 ABI 和上层产物混在一起"],
+    priorities: ["先讲清分层边界", "再整理多端同步链路"],
+    nextStep: "把 session stream 和 sandbox boundary 的差异再压成一版更短的回看提纲。",
+    doneCriteria: ["能在手机端 1 分钟内快速回看", "分层边界不会再混淆"],
+    blockers: [],
+    updatedAt: "2026-03-17T07:26:00.000Z",
+  },
+  rollingSummary: {
+    sessionId: primarySessionId,
+    currentPhase: "结构收束",
+    summary: "已经把 runtime 设计从分层和多端同步两条线收束成可回看的提纲，当前在把细节压到手机端也能快速扫完的长度。",
+    completed: ["明确 session、sandbox、artifact 的职责边界", "把多端共享任务流放进同一条会话叙事"],
+    remaining: ["把 session stream 再压短一版", "补一个更适合手机快速回看的总结层级"],
+    decisions: ["先做结构化回看页，再补复习包", "分层边界优先于实现细节"],
+    summarizedTurnCount: 1,
+    updatedAt: "2026-03-17T07:27:00.000Z",
+  },
   messages: [
     {
       id: "message-1",

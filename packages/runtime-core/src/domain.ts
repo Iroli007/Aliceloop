@@ -292,6 +292,7 @@ export interface RuntimeSettings {
   reasoningEffort: ReasoningEffort;
   toolProviderId: ProviderKind | null;
   toolModel: string | null;
+  recentTurnsCount: number;
   updatedAt: string | null;
 }
 
@@ -384,6 +385,25 @@ export function normalizeAutoApproveToolRequests(
   return true;
 }
 
+export const MIN_RECENT_TURNS_COUNT = 1;
+export const MAX_RECENT_TURNS_COUNT = 20;
+
+export function normalizeRecentTurnsCount(
+  value: number | string | null | undefined,
+): number {
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Number.parseInt(value, 10)
+      : Number.NaN;
+
+  if (!Number.isFinite(parsed)) {
+    return 4;
+  }
+
+  return Math.max(MIN_RECENT_TURNS_COUNT, Math.min(MAX_RECENT_TURNS_COUNT, Math.round(parsed)));
+}
+
 export const sandboxProfileDefinitions: SandboxProfileDefinition[] = [
   {
     id: "development",
@@ -448,6 +468,7 @@ export const defaultRuntimeSettings: RuntimeSettings = {
   reasoningEffort: "medium",
   toolProviderId: null,
   toolModel: null,
+  recentTurnsCount: 4,
   updatedAt: null,
 };
 
@@ -564,9 +585,33 @@ export interface ToolCallState {
   updatedAt: number;
 }
 
+export interface SessionFocusState {
+  sessionId: string;
+  goal: string;
+  constraints: string[];
+  priorities: string[];
+  nextStep: string;
+  doneCriteria: string[];
+  blockers: string[];
+  updatedAt: string | null;
+}
+
+export interface SessionRollingSummary {
+  sessionId: string;
+  currentPhase: string;
+  summary: string;
+  completed: string[];
+  remaining: string[];
+  decisions: string[];
+  summarizedTurnCount: number;
+  updatedAt: string | null;
+}
+
 export interface SessionSnapshot {
   session: Session;
   project: SessionProjectBinding | null;
+  focusState: SessionFocusState;
+  rollingSummary: SessionRollingSummary;
   messages: SessionMessage[];
   attachments: Attachment[];
   pendingToolApprovals: ToolApproval[];

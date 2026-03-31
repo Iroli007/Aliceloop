@@ -1,4 +1,11 @@
-import { type MemoryEmbeddingModel, type ProjectDirectory, type ProviderKind, type ProviderTransportKind } from "@aliceloop/runtime-core";
+import {
+  MAX_RECENT_TURNS_COUNT,
+  MIN_RECENT_TURNS_COUNT,
+  type MemoryEmbeddingModel,
+  type ProjectDirectory,
+  type ProviderKind,
+  type ProviderTransportKind,
+} from "@aliceloop/runtime-core";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../src/styles/tokens.css";
@@ -355,6 +362,8 @@ function SettingsApp() {
   const [toolProviderIdInput, setToolProviderIdInput] = useState<ProviderKind | "">("");
   const [toolModelInput, setToolModelInput] = useState("");
   const [toolModelNotice, setToolModelNotice] = useState<string | null>(null);
+  const [recentTurnsCountInput, setRecentTurnsCountInput] = useState(4);
+  const [threadContextNotice, setThreadContextNotice] = useState<string | null>(null);
   const [relayStatus, setRelayStatus] = useState<RelayBrowserStackState | null>(null);
   const [relayStatusPending, setRelayStatusPending] = useState(false);
   const [relayNotice, setRelayNotice] = useState<string | null>(null);
@@ -600,7 +609,8 @@ function SettingsApp() {
   useEffect(() => {
     setToolProviderIdInput(runtimeSettings.settings.toolProviderId ?? "");
     setToolModelInput(runtimeSettings.settings.toolModel ?? "");
-  }, [runtimeSettings.settings.toolModel, runtimeSettings.settings.toolProviderId]);
+    setRecentTurnsCountInput(runtimeSettings.settings.recentTurnsCount);
+  }, [runtimeSettings.settings.recentTurnsCount, runtimeSettings.settings.toolModel, runtimeSettings.settings.toolProviderId]);
 
   useEffect(() => {
     setMemoryEnabledInput(memoryConfig.config.enabled);
@@ -872,6 +882,24 @@ function SettingsApp() {
     setToolModelNotice(toolProviderIdInput && toolModelInput.trim()
       ? `Tool Model 已保存为 ${toolProviderIdInput} · ${toolModelInput.trim()}。`
       : "Tool Model 已恢复为自动跟随默认路由。");
+  }
+
+  async function handleSaveThreadContext() {
+    const recentTurnsCount = Math.max(
+      MIN_RECENT_TURNS_COUNT,
+      Math.min(MAX_RECENT_TURNS_COUNT, Math.round(recentTurnsCountInput || MIN_RECENT_TURNS_COUNT)),
+    );
+    const result = await runtimeSettings.save({
+      recentTurnsCount,
+    });
+
+    if (!result.ok) {
+      setThreadContextNotice(result.error ?? "保存线程上下文设置失败。");
+      return;
+    }
+
+    setRecentTurnsCountInput(result.settings?.recentTurnsCount ?? recentTurnsCount);
+    setThreadContextNotice(`最近原文上下文已保留 ${result.settings?.recentTurnsCount ?? recentTurnsCount} 轮。`);
   }
 
   async function handleSaveMemoryConfig() {
@@ -1407,6 +1435,53 @@ function SettingsApp() {
                       disabled={runtimeSettings.saving}
                     >
                       {runtimeSettings.saving ? "保存中..." : "保存 Tool Model"}
+                    </button>
+                  </div>
+                </section>
+
+                <section className="settings-memory__card">
+                  <div className="settings-memory__card-header">
+                    <div>
+                      <h3>线程上下文</h3>
+                      <p>更早的轮次会压进 Rolling Summary，只保留最近 N 轮原文继续参与主上下文。</p>
+                    </div>
+                  </div>
+
+                  {threadContextNotice ? <div className="provider-notice">{threadContextNotice}</div> : null}
+                  {runtimeSettings.error ? <div className="provider-notice provider-notice--error">{runtimeSettings.error}</div> : null}
+
+                  <div className="settings-memory__grid">
+                    <div className="provider-field">
+                      <label>Recent N turns</label>
+                      <input
+                        className="provider-field__input"
+                        type="number"
+                        min={MIN_RECENT_TURNS_COUNT}
+                        max={MAX_RECENT_TURNS_COUNT}
+                        value={recentTurnsCountInput}
+                        onChange={(event) => {
+                          const parsed = Number.parseInt(event.target.value, 10);
+                          setRecentTurnsCountInput(Number.isFinite(parsed) ? parsed : MIN_RECENT_TURNS_COUNT);
+                        }}
+                      />
+                    </div>
+
+                    <div className="provider-field">
+                      <label>滚动摘要</label>
+                      <div className="provider-field__box provider-field__box--input">
+                        自动开启
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="provider-actions">
+                    <button
+                      type="button"
+                      className="settings-actions__button settings-actions__button--primary"
+                      onClick={() => void handleSaveThreadContext()}
+                      disabled={runtimeSettings.saving}
+                    >
+                      {runtimeSettings.saving ? "保存中..." : "保存线程上下文"}
                     </button>
                   </div>
                 </section>

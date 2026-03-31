@@ -2,7 +2,9 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 import type { ModelMessage } from "ai";
 import type { SessionEvent } from "@aliceloop/runtime-core";
+import type { SessionFocusState } from "@aliceloop/runtime-core";
 import type { SessionMessage } from "@aliceloop/runtime-core";
+import type { SessionRollingSummary } from "@aliceloop/runtime-core";
 import type { SessionSnapshot } from "@aliceloop/runtime-core";
 import type { SessionProjectBinding } from "@aliceloop/runtime-core";
 import {
@@ -18,9 +20,9 @@ import {
   getSessionSnapshot,
   listSessionEventsSince,
 } from "../../repositories/sessionRepository";
+import { listRecentTurnMessages, resolveRollingSummaryForSnapshot } from "./rollingSummary";
 import { nowMs, roundMs } from "../../runtime/perfTrace";
 
-const MAX_HISTORY_MESSAGES = 8;
 const MAX_FOCUS_MESSAGES = 6;
 const MAX_TOOL_ACTIVITY_EVENTS = 20;
 const MAX_TOOL_ACTIVITY_ITEMS = 4;
@@ -379,7 +381,6 @@ function buildEffectiveUserQuery(input: {
 }
 
 export interface RecentConversationFocus {
-  content: string;
   latestContent: string;
   latestUserHasImageAttachment: boolean;
   latestOpeningLines: string[];
@@ -437,10 +438,13 @@ interface SessionContextFragmentTimings {
   latestUserMs: number;
   projectBindingMs: number;
   attachmentRootsMs: number;
+  sessionFocusMs: number;
+  rollingSummaryMs: number;
   recentToolTraceMs: number;
   recentConversationFocusMs: number;
   recentResearchMemoryMs: number;
   activeTurnMs: number;
+  latestTurnMs: number;
   recentToolActivityMs: number;
   messagesMs: number;
   totalMs: number;
@@ -451,10 +455,13 @@ export interface SessionContextFragments {
   latestUserQuery: string | null;
   projectBinding: SessionProjectBinding | null;
   attachmentRoots: SessionAttachmentSandboxRoots;
+  sessionFocus: string;
+  rollingSummary: string;
   recentConversationFocus: RecentConversationFocus;
   recentResearchMemory: string;
   recentToolActivity: string;
   activeTurn: string;
+  latestTurn: string;
   messages: ModelMessage[];
   timings: SessionContextFragmentTimings;
 }
@@ -599,9 +606,7 @@ function serializeMessageContent(message: SessionMessage): string {
 }
 
 function buildSessionMessagesFromSnapshot(snapshot: SessionSnapshot): ModelMessage[] {
-  const messages = snapshot.messages
-    .filter((m) => m.role !== "system")
-    .slice(-MAX_HISTORY_MESSAGES);
+  const messages = listRecentTurnMessages(snapshot.messages);
 
   return messages.map(sessionMessageToCore);
 }
@@ -662,20 +667,134 @@ function buildActiveTurnBlockFromFocus(recentConversationFocus: RecentConversati
           "- Baidu Baike has extremely low priority for this kind of question. Only cite it after you fail to find a usable primary platform page, official page, dated report, or reputable analytics source, and if you use it you must explicitly label it as `百度百科` background information rather than a live metric source.",
         ]
       : []),
-    ...(recentConversationFocus.resolvedCurrentRequest
-      ? [
-          "- When the latest user message is a short continuation, execute the resolved request below as the concrete work item for this turn.",
-          "",
-          "<resolved_current_request>",
-          recentConversationFocus.resolvedCurrentRequest,
-          "</resolved_current_request>",
-        ]
-      : []),
     "",
     "<latest_user_message>",
     latestContent,
     "</latest_user_message>",
   ].join("\n");
+}
+
+function buildLatestTurnBlockFromFocus(snapshot: SessionSnapshot, recentConversationFocus: RecentConversationFocus): string {
+  const recentMessages = snapshot.messages.filter((message) => message.role !== "system");
+  const latestAssistantMessage = getLatestAssistantBeforeLastUser(recentMessages);
+  if (!latestAssistantMessage && !recentConversationFocus.resolvedCurrentRequest) {
+    return "";
+  }
+
+  const lines = [
+    "## Latest Turn",
+    "- Resolve the current reply from the immediate exchange below before reaching farther back into the thread.",
+  ];
+
+  if (recentConversationFocus.continuationLike) {
+    lines.push("- The latest user message is continuation-like. Use the immediate assistant reply and resolved request below first.");
+  }
+
+  if (latestAssistantMessage) {
+    lines.push("", "<latest_assistant_reply>");
+    lines.push(trimInline(serializeMessageContent(latestAssistantMessage), 420));
+    lines.push("</latest_assistant_reply>");
+  }
+
+  if (recentConversationFocus.resolvedCurrentRequest) {
+    lines.push("", "<resolved_current_request>");
+    lines.push(recentConversationFocus.resolvedCurrentRequest);
+    lines.push("</resolved_current_request>");
+  }
+
+  return lines.join("\n");
+}
+
+function buildSessionFocusBlock(focusState: SessionFocusState): string {
+  if (
+    !focusState.goal
+    && focusState.constraints.length === 0
+    && focusState.priorities.length === 0
+    && !focusState.nextStep
+    && focusState.doneCriteria.length === 0
+    && focusState.blockers.length === 0
+  ) {
+    return "";
+  }
+
+  const lines = [
+    "## Session Focus",
+    "- Treat this as the persistent focus state for the current session unless the latest user message clearly replaces it.",
+    "- Keep tool choices and replies aligned with the goal, constraints, priorities, and next step below.",
+    "",
+    "<session_focus>",
+  ];
+
+  if (focusState.goal) {
+    lines.push(`- Goal: ${focusState.goal}`);
+  }
+
+  if (focusState.constraints.length > 0) {
+    lines.push(`- Constraints: ${focusState.constraints.join(" | ")}`);
+  }
+
+  if (focusState.priorities.length > 0) {
+    lines.push(`- Priorities: ${focusState.priorities.join(" | ")}`);
+  }
+
+  if (focusState.nextStep) {
+    lines.push(`- Next step: ${focusState.nextStep}`);
+  }
+
+  if (focusState.doneCriteria.length > 0) {
+    lines.push(`- Done criteria: ${focusState.doneCriteria.join(" | ")}`);
+  }
+
+  if (focusState.blockers.length > 0) {
+    lines.push(`- Blockers: ${focusState.blockers.join(" | ")}`);
+  }
+
+  lines.push("</session_focus>");
+  return lines.join("\n");
+}
+
+function buildRollingSummaryBlock(rollingSummary: SessionRollingSummary): string {
+  if (
+    !rollingSummary.currentPhase
+    && !rollingSummary.summary
+    && rollingSummary.completed.length === 0
+    && rollingSummary.remaining.length === 0
+    && rollingSummary.decisions.length === 0
+  ) {
+    return "";
+  }
+
+  const lines = [
+    "## Rolling Summary",
+    "- Treat this as the archived summary for earlier turns that are no longer present as raw messages.",
+    "- Reuse the completed work, remaining work, and locked-in decisions below instead of restarting the thread from zero.",
+    "",
+    "<rolling_summary>",
+  ];
+
+  if (rollingSummary.currentPhase) {
+    lines.push(`- Current phase: ${rollingSummary.currentPhase}`);
+  }
+
+  if (rollingSummary.summary) {
+    lines.push(`- Summary: ${rollingSummary.summary}`);
+  }
+
+  if (rollingSummary.completed.length > 0) {
+    lines.push(`- Completed: ${rollingSummary.completed.join(" | ")}`);
+  }
+
+  if (rollingSummary.remaining.length > 0) {
+    lines.push(`- Remaining: ${rollingSummary.remaining.join(" | ")}`);
+  }
+
+  if (rollingSummary.decisions.length > 0) {
+    lines.push(`- Decisions: ${rollingSummary.decisions.join(" | ")}`);
+  }
+
+  lines.push(`- Archived turns covered: ${rollingSummary.summarizedTurnCount}`);
+  lines.push("</rolling_summary>");
+  return lines.join("\n");
 }
 
 function buildRecentConversationFocusFromSnapshot(
@@ -694,7 +813,6 @@ function buildRecentConversationFocusFromSnapshot(
 
   if (recentMessages.length < 2) {
     return {
-      content: "",
       latestContent,
       latestUserHasImageAttachment,
       latestOpeningLines: latestMessageAnchorLines.openingLines,
@@ -724,10 +842,6 @@ function buildRecentConversationFocusFromSnapshot(
   );
   const worksetConstraints = summarizeWorksetConstraints(anchors);
   const recentToolNames = recentToolTraces.map((trace) => trace.toolName);
-  const sawRecentWebTool = recentToolNames.some((toolName) => {
-    return toolName === "web_search" || toolName === "web_fetch";
-  });
-  const needsDeepResearchFollowup = sawRecentWebTool && needsResearchDeepRead(latestContent);
   const resolvedCurrentRequest = buildResolvedCurrentRequest({
     latestContent,
     continuationLike,
@@ -753,66 +867,7 @@ function buildRecentConversationFocusFromSnapshot(
     recentToolNames,
   });
 
-  const lines = [
-    "## Recent Conversation Focus",
-    "- Use the recent exchange below to resolve pronouns, omissions, and short follow-up requests.",
-  ];
-
-  if (continuationLike) {
-    lines.push("- The latest user message is a continuation-style follow-up. Carry forward the still-open subject from the immediately preceding turns.");
-    lines.push("- If the running topic is current or externally sourced information, execute the relevant search/fetch tools now instead of only saying you will check.");
-    if (carryForwardFacts) {
-      lines.push(`- Current unresolved research task: ${carryForwardFacts}`);
-    }
-    if (worksetConstraints) {
-      lines.push(`- Current carried-forward constraints: ${worksetConstraints}`);
-    }
-    if (needsStrictSourcePolicy(carryForwardFacts) || needsStrictSourcePolicy(worksetConstraints)) {
-      lines.push("- Source policy for this turn: prioritize the primary platform pages for Bilibili, Douyin, and X/Twitter when relevant, then clearly dated reporting or reputable analytics. Treat wiki or encyclopedia pages only as background context for biography, not as the authoritative source for current metrics, latest activity, or date-specific facts.");
-      lines.push("- Baidu Baike priority is extremely low for this thread. Use it only if primary platform pages, official pages, dated reporting, and reputable analytics all fail to establish the fact, and explicitly label it as `百度百科` if you end up citing it.");
-      lines.push("- If the target account, creator page, or source domain is still ambiguous, ask the user for the exact profile URL or trusted site list so you can verify against the right pages.");
-    }
-    if (resolvedCurrentRequest) {
-      lines.push(`- Resolved current request for this turn: ${resolvedCurrentRequest}`);
-    }
-    if (researchContinuation) {
-      lines.push("- Required action for this turn: use the routed web_search / web_fetch research pair only if a specific page still needs to be read; otherwise stay with web_search and the returned source links before replying. Do not ask for clarification unless the recent anchors truly fail to identify any subject, platform, or time target.");
-      lines.push("- Do not stop at a verbal promise. After the tool round finishes, check whether the task is actually complete before replying or asking for the next step.");
-      lines.push("- The research memory block below is the running evidence ledger for this investigation. Do not restart from scratch when the user only asks to continue; reuse the searched sources, fetched pages, and remaining evidence gaps to decide the next step.");
-      lines.push("- Before drafting a report, identify the strongest unfetched candidate URL in the ledger. If one exists, fetch that page before starting a fresh broad search.");
-    }
-    if (needsDeepResearchFollowup) {
-      lines.push("- The latest follow-up is asking for a deeper read, not another shallow search.");
-      lines.push("- Required action for this turn: inspect the research memory ledger, take the strongest unfetched candidate URL, and call `web_fetch` on that page before replying.");
-      lines.push("- Do not answer from snippets alone when the user is explicitly asking for deeper evidence or full-page reading.");
-    }
-  }
-
-  if (latestUserHasImageAttachment) {
-    lines.push("- The latest user message includes one or more image attachments. If the user is asking what is shown in the image, use the routed `view_image` tool on the attachment path instead of guessing.");
-  }
-
-  if (routeHints.stickySkillIds.length > 0) {
-    lines.push(`- Sticky skill routing for this turn: ${routeHints.stickySkillIds.join(", ")}`);
-  }
-
-  if (originalTopicAnchor) {
-    lines.push(`- Original topic anchor from recent turns: ${originalTopicAnchor}`);
-  }
-
-  if (latestExplicitAnchor) {
-    lines.push(`- Latest explicit anchor from recent turns: ${latestExplicitAnchor}`);
-  }
-
-  lines.push("", "<recent_exchange>");
-  for (const message of recentMessages.slice(-6)) {
-    const label = message.role === "assistant" ? "Assistant" : "User";
-    lines.push(`${label}: ${trimInline(serializeMessageContent(message), 220)}`);
-  }
-  lines.push("</recent_exchange>");
-
   return {
-    content: lines.join("\n"),
     latestContent,
     latestUserHasImageAttachment,
     latestOpeningLines: latestMessageAnchorLines.openingLines,
@@ -1199,6 +1254,14 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const attachmentRoots = buildSessionAttachmentSandboxRoots(snapshot.project, snapshot.attachments);
   const attachmentRootsMs = roundMs(nowMs() - attachmentRootsStartedAt);
 
+  const sessionFocusStartedAt = nowMs();
+  const sessionFocus = buildSessionFocusBlock(snapshot.focusState);
+  const sessionFocusMs = roundMs(nowMs() - sessionFocusStartedAt);
+
+  const rollingSummaryStartedAt = nowMs();
+  const rollingSummary = buildRollingSummaryBlock(resolveRollingSummaryForSnapshot(snapshot));
+  const rollingSummaryMs = roundMs(nowMs() - rollingSummaryStartedAt);
+
   const recentToolTraceStartedAt = nowMs();
   const recentToolTraces = extractRecentToolTracesFromSnapshot(sessionId, snapshot);
   const recentToolTraceMs = roundMs(nowMs() - recentToolTraceStartedAt);
@@ -1210,6 +1273,10 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const activeTurnStartedAt = nowMs();
   const activeTurn = buildActiveTurnBlockFromFocus(recentConversationFocus);
   const activeTurnMs = roundMs(nowMs() - activeTurnStartedAt);
+
+  const latestTurnStartedAt = nowMs();
+  const latestTurn = buildLatestTurnBlockFromFocus(snapshot, recentConversationFocus);
+  const latestTurnMs = roundMs(nowMs() - latestTurnStartedAt);
 
   const recentToolActivityStartedAt = nowMs();
   const recentToolActivity = buildRecentToolActivityBlockFromTraces(recentToolTraces);
@@ -1227,20 +1294,26 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
     latestUserQuery,
     projectBinding,
     attachmentRoots,
+    sessionFocus,
+    rollingSummary,
     recentConversationFocus,
     recentResearchMemory,
     recentToolActivity,
     activeTurn,
+    latestTurn,
     messages,
     timings: {
       snapshotMs,
       latestUserMs,
       projectBindingMs,
       attachmentRootsMs,
+      sessionFocusMs,
+      rollingSummaryMs,
       recentToolTraceMs,
       recentConversationFocusMs,
       recentResearchMemoryMs,
       activeTurnMs,
+      latestTurnMs,
       recentToolActivityMs,
       messagesMs,
       totalMs: roundMs(nowMs() - startedAt),
@@ -1266,8 +1339,11 @@ export function buildRecentConversationFocus(sessionId: string): RecentConversat
   return buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces);
 }
 
-export function buildRecentConversationFocusBlock(sessionId: string): string {
-  return buildRecentConversationFocus(sessionId).content;
+export function buildLatestTurnBlock(sessionId: string): string {
+  const snapshot = getSessionSnapshot(sessionId);
+  const recentToolTraces = extractRecentToolTracesFromSnapshot(sessionId, snapshot);
+  const recentConversationFocus = buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces);
+  return buildLatestTurnBlockFromFocus(snapshot, recentConversationFocus);
 }
 
 export function buildRecentToolActivityBlock(sessionId: string) {

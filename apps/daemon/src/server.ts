@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { createReadStream, statSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MAX_RECENT_TURNS_COUNT,
+  MIN_RECENT_TURNS_COUNT,
   primarySessionId,
   type DeviceCapabilities,
   type ContentBlock,
@@ -78,6 +80,8 @@ import {
   deleteSession,
   createSessionMessage,
   hasSession,
+  getSessionFocusState,
+  getSessionRollingSummary,
   listSessionMessageReactions,
   removeSessionMessageReaction,
   getRuntimePresence,
@@ -87,6 +91,8 @@ import {
   listSessionThreads,
   searchSessionThreads,
   listSessionEventsSince,
+  updateSessionFocusState,
+  updateSessionRollingSummary,
 } from "./repositories/sessionRepository";
 import {
   createProjectDirectory,
@@ -231,6 +237,24 @@ interface HeartbeatBody {
   capabilities?: DeviceCapabilities;
 }
 
+interface UpdateSessionFocusBody {
+  goal?: string | null;
+  constraints?: string[];
+  priorities?: string[];
+  nextStep?: string | null;
+  doneCriteria?: string[];
+  blockers?: string[];
+}
+
+interface UpdateSessionSummaryBody {
+  currentPhase?: string | null;
+  summary?: string | null;
+  completed?: string[];
+  remaining?: string[];
+  decisions?: string[];
+  summarizedTurnCount?: number;
+}
+
 interface UpdateProviderBody {
   transport?: ProviderTransportKind;
   baseUrl?: string;
@@ -266,6 +290,7 @@ interface UpdateRuntimeSettingsBody {
   reasoningEffort?: ReasoningEffort;
   toolProviderId?: ProviderKind | null;
   toolModel?: string | null;
+  recentTurnsCount?: number;
 }
 
 interface TaskParams {
@@ -687,6 +712,86 @@ function normalizePlanStatusValue(value: string | undefined) {
   }
 }
 
+function normalizeOptionalFocusText(value: unknown, fieldName: string) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(`invalid_focus_${fieldName}`);
+  }
+
+  return value;
+}
+
+function normalizeFocusListField(value: unknown, fieldName: string) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new Error(`invalid_focus_${fieldName}`);
+  }
+
+  return value;
+}
+
+function parseSessionFocusPatch(body: UpdateSessionFocusBody | undefined) {
+  const record = body ?? {};
+  return {
+    goal: normalizeOptionalFocusText(record.goal, "goal"),
+    constraints: normalizeFocusListField(record.constraints, "constraints"),
+    priorities: normalizeFocusListField(record.priorities, "priorities"),
+    nextStep: normalizeOptionalFocusText(record.nextStep, "next_step"),
+    doneCriteria: normalizeFocusListField(record.doneCriteria, "done_criteria"),
+    blockers: normalizeFocusListField(record.blockers, "blockers"),
+  };
+}
+
+function parseSessionSummaryPatch(body: UpdateSessionSummaryBody | undefined) {
+  const record = body ?? {};
+  return {
+    currentPhase: normalizeOptionalFocusText(record.currentPhase, "current_phase"),
+    summary: normalizeOptionalFocusText(record.summary, "summary"),
+    completed: normalizeFocusListField(record.completed, "completed"),
+    remaining: normalizeFocusListField(record.remaining, "remaining"),
+    decisions: normalizeFocusListField(record.decisions, "decisions"),
+    summarizedTurnCount: record.summarizedTurnCount === undefined
+      ? undefined
+      : normalizeSummarizedTurnCountPatch(record.summarizedTurnCount),
+  };
+}
+
+function normalizeRecentTurnsCountPatch(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("invalid_runtime_recent_turns_count");
+  }
+
+  const rounded = Math.round(value);
+  if (rounded < MIN_RECENT_TURNS_COUNT || rounded > MAX_RECENT_TURNS_COUNT) {
+    throw new Error("invalid_runtime_recent_turns_count");
+  }
+
+  return rounded;
+}
+
+function normalizeSummarizedTurnCountPatch(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("invalid_focus_summarized_turn_count");
+  }
+
+  const rounded = Math.round(value);
+  if (rounded < 0) {
+    throw new Error("invalid_focus_summarized_turn_count");
+  }
+
+  return rounded;
+}
+
 function writeSseEvent(write: (chunk: string) => void, event: unknown, seq: number) {
   write(`id: ${seq}\n`);
   write("event: session\n");
@@ -704,7 +809,7 @@ export async function createServer() {
 
   await server.register(cors, {
     origin: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
 
   backfillTaskRunsFromJobs();
@@ -1507,6 +1612,69 @@ export async function createServer() {
     return getSessionSnapshot(request.params.id);
   });
 
+  server.get<{ Params: SessionParams }>("/api/session/:id/focus", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    return getSessionFocusState(request.params.id);
+  });
+
+  server.patch<{ Params: SessionParams; Body: UpdateSessionFocusBody }>("/api/session/:id/focus", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    try {
+      return updateSessionFocusState(request.params.id, parseSessionFocusPatch(request.body));
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("invalid_focus_")) {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  server.get<{ Params: SessionParams }>("/api/session/:id/summary", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    return getSessionRollingSummary(request.params.id);
+  });
+
+  server.patch<{ Params: SessionParams; Body: UpdateSessionSummaryBody }>("/api/session/:id/summary", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    try {
+      return updateSessionRollingSummary(request.params.id, parseSessionSummaryPatch(request.body));
+    } catch (error) {
+      if (
+        error instanceof Error
+        && (error.message.startsWith("invalid_focus_") || error.message === "invalid_runtime_recent_turns_count")
+      ) {
+        return reply.code(400).send({
+          error: error.message,
+        });
+      }
+
+      throw error;
+    }
+  });
+
   server.get<{ Params: SessionParams; Querystring: SessionEventsQuery }>("/api/session/:id/events", async (request, reply) => {
     if (!hasSession(request.params.id)) {
       return reply.code(404).send({
@@ -1987,6 +2155,7 @@ export async function createServer() {
       reasoningEffort: request.body?.reasoningEffort,
       toolProviderId: request.body?.toolProviderId,
       toolModel: request.body?.toolModel,
+      recentTurnsCount: request.body?.recentTurnsCount,
     });
   });
 

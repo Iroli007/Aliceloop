@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -13,6 +14,8 @@ import {
   type RuntimePresence,
   type Session,
   type SessionEvent,
+  type SessionFocusState,
+  type SessionRollingSummary,
   type SessionMessage,
   type SessionMessageStatus,
   type SessionProjectBinding,
@@ -58,6 +61,28 @@ interface SessionProjectBindingRow {
   projectName: string | null;
   projectPath: string | null;
   projectKind: ProjectDirectoryKind | null;
+}
+
+interface SessionFocusStateRow {
+  sessionId: string;
+  goal: string;
+  constraintsJson: string;
+  prioritiesJson: string;
+  nextStep: string;
+  doneCriteriaJson: string;
+  blockersJson: string;
+  updatedAt: string;
+}
+
+interface SessionRollingSummaryRow {
+  sessionId: string;
+  currentPhase: string;
+  summary: string;
+  completedJson: string;
+  remainingJson: string;
+  decisionsJson: string;
+  summarizedTurnCount: number;
+  updatedAt: string;
 }
 
 interface AttachmentRow {
@@ -195,6 +220,24 @@ export interface SessionConversationMessage {
   createdAt: string;
 }
 
+interface UpdateSessionFocusStateInput {
+  goal?: string | null;
+  constraints?: string[];
+  priorities?: string[];
+  nextStep?: string | null;
+  doneCriteria?: string[];
+  blockers?: string[];
+}
+
+interface UpdateSessionRollingSummaryInput {
+  currentPhase?: string | null;
+  summary?: string | null;
+  completed?: string[];
+  remaining?: string[];
+  decisions?: string[];
+  summarizedTurnCount?: number;
+}
+
 function summarizeMessagePreview(content: string | null) {
   if (!content) {
     return null;
@@ -215,6 +258,79 @@ function summarizeSessionTitle(content: string) {
   }
 
   return normalized.length > 24 ? `${normalized.slice(0, 24).trimEnd()}…` : normalized;
+}
+
+function normalizeFocusText(value: string | null | undefined) {
+  return value?.trim() ?? "";
+}
+
+function normalizeFocusList(values: string[]) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function parseJsonStringArray(rawValue: string) {
+  try {
+    const parsed = JSON.parse(rawValue) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return normalizeFocusList(parsed.filter((value): value is string => typeof value === "string"));
+  } catch {
+    return [];
+  }
+}
+
+function createEmptySessionFocusState(sessionId: string): SessionFocusState {
+  return {
+    sessionId,
+    goal: "",
+    constraints: [],
+    priorities: [],
+    nextStep: "",
+    doneCriteria: [],
+    blockers: [],
+    updatedAt: null,
+  };
+}
+
+function createEmptySessionRollingSummary(sessionId: string): SessionRollingSummary {
+  return {
+    sessionId,
+    currentPhase: "",
+    summary: "",
+    completed: [],
+    remaining: [],
+    decisions: [],
+    summarizedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
+function mapSessionFocusStateRow(row: SessionFocusStateRow): SessionFocusState {
+  return {
+    sessionId: row.sessionId,
+    goal: normalizeFocusText(row.goal),
+    constraints: parseJsonStringArray(row.constraintsJson),
+    priorities: parseJsonStringArray(row.prioritiesJson),
+    nextStep: normalizeFocusText(row.nextStep),
+    doneCriteria: parseJsonStringArray(row.doneCriteriaJson),
+    blockers: parseJsonStringArray(row.blockersJson),
+    updatedAt: row.updatedAt,
+  };
+}
+
+function mapSessionRollingSummaryRow(row: SessionRollingSummaryRow): SessionRollingSummary {
+  return {
+    sessionId: row.sessionId,
+    currentPhase: normalizeFocusText(row.currentPhase),
+    summary: normalizeFocusText(row.summary),
+    completed: parseJsonStringArray(row.completedJson),
+    remaining: parseJsonStringArray(row.remainingJson),
+    decisions: parseJsonStringArray(row.decisionsJson),
+    summarizedTurnCount: Math.max(0, Math.trunc(row.summarizedTurnCount ?? 0)),
+    updatedAt: row.updatedAt,
+  };
 }
 
 function escapeSqlLikePattern(value: string) {
@@ -585,7 +701,7 @@ function listMessages(sessionId: string, attachments: Attachment[]): SessionMess
           updated_at AS updatedAt
         FROM session_messages
         WHERE session_id = ?
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, rowid ASC
       `,
     )
     .all(sessionId) as SessionMessageRow[];
@@ -736,6 +852,56 @@ function readSessionWorksetStateRow(sessionId: string): SessionWorksetState {
   }
 }
 
+function readSessionFocusStateRow(
+  sessionId: string,
+  db: Database.Database = getDatabase(),
+) {
+  const row = db
+    .prepare(
+      `
+        SELECT
+          session_id AS sessionId,
+          goal,
+          constraints_json AS constraintsJson,
+          priorities_json AS prioritiesJson,
+          next_step AS nextStep,
+          done_criteria_json AS doneCriteriaJson,
+          blockers_json AS blockersJson,
+          updated_at AS updatedAt
+        FROM session_focus_state
+        WHERE session_id = ?
+      `,
+    )
+    .get(sessionId) as SessionFocusStateRow | undefined;
+
+  return row ? mapSessionFocusStateRow(row) : createEmptySessionFocusState(sessionId);
+}
+
+function readSessionRollingSummaryRow(
+  sessionId: string,
+  db: Database.Database = getDatabase(),
+) {
+  const row = db
+    .prepare(
+      `
+        SELECT
+          session_id AS sessionId,
+          current_phase AS currentPhase,
+          summary,
+          completed_json AS completedJson,
+          remaining_json AS remainingJson,
+          decisions_json AS decisionsJson,
+          summarized_turn_count AS summarizedTurnCount,
+          updated_at AS updatedAt
+        FROM session_rolling_summary
+        WHERE session_id = ?
+      `,
+    )
+    .get(sessionId) as SessionRollingSummaryRow | undefined;
+
+  return row ? mapSessionRollingSummaryRow(row) : createEmptySessionRollingSummary(sessionId);
+}
+
 export function hasSession(sessionId: string) {
   return Boolean(getSessionRow(sessionId));
 }
@@ -767,6 +933,14 @@ export function getSessionWorksetState(sessionId: string) {
   return readSessionWorksetStateRow(sessionId);
 }
 
+export function getSessionFocusState(sessionId: string) {
+  return readSessionFocusStateRow(sessionId);
+}
+
+export function getSessionRollingSummary(sessionId: string) {
+  return readSessionRollingSummaryRow(sessionId);
+}
+
 export function updateSessionWorksetState(sessionId: string, state: SessionWorksetState) {
   const db = getDatabase();
   const now = new Date().toISOString();
@@ -783,6 +957,126 @@ export function updateSessionWorksetState(sessionId: string, state: SessionWorks
   })();
 
   return readSessionWorksetStateRow(sessionId);
+}
+
+export function updateSessionFocusState(sessionId: string, input: UpdateSessionFocusStateInput) {
+  const db = getDatabase();
+  const current = readSessionFocusStateRow(sessionId, db);
+  const nextState: SessionFocusState = {
+    sessionId,
+    goal: input.goal !== undefined ? normalizeFocusText(input.goal) : current.goal,
+    constraints: input.constraints !== undefined ? normalizeFocusList(input.constraints) : current.constraints,
+    priorities: input.priorities !== undefined ? normalizeFocusList(input.priorities) : current.priorities,
+    nextStep: input.nextStep !== undefined ? normalizeFocusText(input.nextStep) : current.nextStep,
+    doneCriteria: input.doneCriteria !== undefined ? normalizeFocusList(input.doneCriteria) : current.doneCriteria,
+    blockers: input.blockers !== undefined ? normalizeFocusList(input.blockers) : current.blockers,
+    updatedAt: new Date().toISOString(),
+  };
+
+  db.transaction(() => {
+    db.prepare(
+      `
+        INSERT INTO session_focus_state (
+          session_id,
+          goal,
+          constraints_json,
+          priorities_json,
+          next_step,
+          done_criteria_json,
+          blockers_json,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          goal = excluded.goal,
+          constraints_json = excluded.constraints_json,
+          priorities_json = excluded.priorities_json,
+          next_step = excluded.next_step,
+          done_criteria_json = excluded.done_criteria_json,
+          blockers_json = excluded.blockers_json,
+          updated_at = excluded.updated_at
+      `,
+    ).run(
+      nextState.sessionId,
+      nextState.goal,
+      JSON.stringify(nextState.constraints),
+      JSON.stringify(nextState.priorities),
+      nextState.nextStep,
+      JSON.stringify(nextState.doneCriteria),
+      JSON.stringify(nextState.blockers),
+      nextState.updatedAt,
+    );
+
+    db.prepare(
+      `
+        UPDATE sessions
+        SET updated_at = ?
+        WHERE id = ?
+      `,
+    ).run(nextState.updatedAt, sessionId);
+  })();
+
+  return readSessionFocusStateRow(sessionId, db);
+}
+
+export function updateSessionRollingSummary(sessionId: string, input: UpdateSessionRollingSummaryInput) {
+  const db = getDatabase();
+  const current = readSessionRollingSummaryRow(sessionId, db);
+  const nextState: SessionRollingSummary = {
+    sessionId,
+    currentPhase: input.currentPhase !== undefined ? normalizeFocusText(input.currentPhase) : current.currentPhase,
+    summary: input.summary !== undefined ? normalizeFocusText(input.summary) : current.summary,
+    completed: input.completed !== undefined ? normalizeFocusList(input.completed) : current.completed,
+    remaining: input.remaining !== undefined ? normalizeFocusList(input.remaining) : current.remaining,
+    decisions: input.decisions !== undefined ? normalizeFocusList(input.decisions) : current.decisions,
+    summarizedTurnCount: input.summarizedTurnCount !== undefined
+      ? Math.max(0, Math.trunc(input.summarizedTurnCount))
+      : current.summarizedTurnCount,
+    updatedAt: new Date().toISOString(),
+  };
+
+  db.transaction(() => {
+    db.prepare(
+      `
+        INSERT INTO session_rolling_summary (
+          session_id,
+          current_phase,
+          summary,
+          completed_json,
+          remaining_json,
+          decisions_json,
+          summarized_turn_count,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          current_phase = excluded.current_phase,
+          summary = excluded.summary,
+          completed_json = excluded.completed_json,
+          remaining_json = excluded.remaining_json,
+          decisions_json = excluded.decisions_json,
+          summarized_turn_count = excluded.summarized_turn_count,
+          updated_at = excluded.updated_at
+      `,
+    ).run(
+      nextState.sessionId,
+      nextState.currentPhase,
+      nextState.summary,
+      JSON.stringify(nextState.completed),
+      JSON.stringify(nextState.remaining),
+      JSON.stringify(nextState.decisions),
+      nextState.summarizedTurnCount,
+      nextState.updatedAt,
+    );
+
+    db.prepare(
+      `
+        UPDATE sessions
+        SET updated_at = ?
+        WHERE id = ?
+      `,
+    ).run(nextState.updatedAt, sessionId);
+  })();
+
+  return readSessionRollingSummaryRow(sessionId, db);
 }
 
 function countMessagesForSession(sessionId: string) {
@@ -1680,6 +1974,8 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
   }
 
   const project = getSessionProjectBinding(sessionId);
+  const focusState = readSessionFocusStateRow(sessionId);
+  const rollingSummary = readSessionRollingSummaryRow(sessionId);
   const attachments = listAttachments(sessionId);
   const messages = listMessages(sessionId, attachments);
   const jobs = listJobs(sessionId);
@@ -1703,6 +1999,8 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
       projectKind: project?.projectKind ?? null,
     },
     project,
+    focusState,
+    rollingSummary,
     messages,
     attachments,
     pendingToolApprovals: listPendingToolApprovals(sessionId),

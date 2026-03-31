@@ -2,6 +2,7 @@ import {
   defaultRuntimeSettings,
   normalizeAutoApproveToolRequests,
   normalizeProviderKind,
+  normalizeRecentTurnsCount,
   normalizeReasoningEffort,
   normalizeSandboxPermissionProfile,
   type ProviderKind,
@@ -21,6 +22,7 @@ interface RuntimeSettingsRow {
   reasoningEffort: string;
   toolProviderId: string | null;
   toolModel: string | null;
+  recentTurnsCount: number | null;
   updatedAt: string;
 }
 
@@ -35,9 +37,9 @@ function ensureRuntimeSettingsRow() {
   db.prepare(
     `
       INSERT OR IGNORE INTO runtime_settings (
-        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, updated_at
+        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, recent_turns_count, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?
       )
     `,
   ).run(
@@ -47,6 +49,7 @@ function ensureRuntimeSettingsRow() {
     defaultRuntimeSettings.reasoningEffort,
     defaultRuntimeSettings.toolProviderId,
     defaultRuntimeSettings.toolModel,
+    defaultRuntimeSettings.recentTurnsCount,
     now,
   );
   runtimeSettingsEnsured = true;
@@ -68,6 +71,7 @@ export function getRuntimeSettings(): RuntimeSettings {
           reasoning_effort AS reasoningEffort,
           tool_provider_id AS toolProviderId,
           tool_model AS toolModel,
+          recent_turns_count AS recentTurnsCount,
           updated_at AS updatedAt
         FROM runtime_settings
         WHERE id = ?
@@ -86,6 +90,7 @@ export function getRuntimeSettings(): RuntimeSettings {
     reasoningEffort: normalizeReasoningEffort(row.reasoningEffort),
     toolProviderId: normalizeProviderKind(row.toolProviderId),
     toolModel: row.toolModel?.trim() || null,
+    recentTurnsCount: normalizeRecentTurnsCount(row.recentTurnsCount),
     updatedAt: row.updatedAt,
   };
 
@@ -98,6 +103,7 @@ export function updateRuntimeSettings(input: {
   reasoningEffort?: ReasoningEffort;
   toolProviderId?: ProviderKind | null;
   toolModel?: string | null;
+  recentTurnsCount?: number;
 }): RuntimeSettings {
   const current = getRuntimeSettings();
   const next: RuntimeSettings = {
@@ -106,6 +112,7 @@ export function updateRuntimeSettings(input: {
     reasoningEffort: normalizeReasoningEffort(input.reasoningEffort ?? current.reasoningEffort),
     toolProviderId: input.toolProviderId === undefined ? current.toolProviderId : normalizeProviderKind(input.toolProviderId),
     toolModel: input.toolModel === undefined ? current.toolModel : input.toolModel?.trim() || null,
+    recentTurnsCount: normalizeRecentTurnsCount(input.recentTurnsCount ?? current.recentTurnsCount),
     updatedAt: new Date().toISOString(),
   };
   const db = getDatabase();
@@ -113,9 +120,9 @@ export function updateRuntimeSettings(input: {
   db.prepare(
     `
       INSERT INTO runtime_settings (
-        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, updated_at
+        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, recent_turns_count, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?
       )
       ON CONFLICT(id) DO UPDATE SET
         sandbox_profile = excluded.sandbox_profile,
@@ -123,6 +130,7 @@ export function updateRuntimeSettings(input: {
         reasoning_effort = excluded.reasoning_effort,
         tool_provider_id = excluded.tool_provider_id,
         tool_model = excluded.tool_model,
+        recent_turns_count = excluded.recent_turns_count,
         updated_at = excluded.updated_at
     `,
   ).run(
@@ -132,6 +140,7 @@ export function updateRuntimeSettings(input: {
     next.reasoningEffort,
     next.toolProviderId,
     next.toolModel,
+    next.recentTurnsCount,
     next.updatedAt,
   );
 

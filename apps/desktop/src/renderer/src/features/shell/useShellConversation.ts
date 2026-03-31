@@ -21,6 +21,32 @@ const activeSessionStorageKey = "aliceloop-shell-active-session-id";
 const localDraftSessionId = "__local_draft__";
 const streamRetryMs = 2_000;
 
+function createEmptyFocusState(sessionId: string) {
+  return {
+    sessionId,
+    goal: "",
+    constraints: [],
+    priorities: [],
+    nextStep: "",
+    doneCriteria: [],
+    blockers: [],
+    updatedAt: null,
+  };
+}
+
+function createEmptyRollingSummary(sessionId: string) {
+  return {
+    sessionId,
+    currentPhase: "",
+    summary: "",
+    completed: [],
+    remaining: [],
+    decisions: [],
+    summarizedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
 interface SendResult {
   ok: boolean;
   error?: string;
@@ -529,6 +555,8 @@ function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
       createdAt: now,
       updatedAt: now,
     },
+    focusState: createEmptyFocusState(localDraftSessionId),
+    rollingSummary: createEmptyRollingSummary(localDraftSessionId),
     messages: [],
     attachments: [],
     pendingToolApprovals: [],
@@ -548,6 +576,8 @@ function createEmptySnapshotFromThread(thread: SessionThreadSummary, current: Se
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
     },
+    focusState: createEmptyFocusState(thread.id),
+    rollingSummary: createEmptyRollingSummary(thread.id),
     messages: [],
     attachments: [],
     pendingToolApprovals: [],
