@@ -33,9 +33,26 @@ export type SandboxExecutionAccess = "standard" | "elevated";
 export type SandboxPrimitive = "read" | "write" | "edit" | "delete" | "bash";
 export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
 export type ToolApprovalStatus = "pending" | "approved" | "rejected";
+export type ToolApprovalDecisionOption = "allow_once" | "deny_once" | "allow_always" | "deny_always";
+export type ToolPermissionRuleToolName = "read" | "write" | "edit" | "delete" | "bash" | "*";
+
+export interface ToolPermissionRule {
+  toolName: ToolPermissionRuleToolName;
+  pathPrefix?: string;
+  cwdPrefix?: string;
+  commandPrefix?: string;
+}
+
+export interface ToolPermissionRules {
+  allow: ToolPermissionRule[];
+  deny: ToolPermissionRule[];
+  ask: ToolPermissionRule[];
+}
 export type ToolCallStatus =
   | "input-streaming"
   | "input-available"
+  | "queued"
+  | "executing"
   | "approval-requested"
   | "approval-responded"
   | "output-available"
@@ -66,7 +83,16 @@ export type SessionEventType =
   | "tool.approval.resolved"
   | "tool.call.started"
   | "tool.call.completed"
-  | "tool.state.change";
+  | "tool.state.change"
+  | "plan_mode.updated";
+
+export interface SessionPlanModeState {
+  sessionId: string;
+  active: boolean;
+  activePlanId: string | null;
+  enteredAt: string | null;
+  updatedAt: string | null;
+}
 
 export interface LibraryItem {
   id: string;
@@ -192,6 +218,7 @@ export interface SessionThreadSummary {
   projectName?: string | null;
   projectPath?: string | null;
   projectKind?: ProjectDirectoryKind | null;
+  planMode?: SessionPlanModeState;
 }
 
 export interface ProjectDirectory {
@@ -289,6 +316,7 @@ export interface ProviderConfig {
 export interface RuntimeSettings {
   sandboxProfile: SandboxPermissionProfile;
   autoApproveToolRequests: boolean;
+  toolPermissionRules: ToolPermissionRules;
   reasoningEffort: ReasoningEffort;
   toolProviderId: ProviderKind | null;
   toolModel: string | null;
@@ -465,6 +493,11 @@ export const reasoningEffortDefinitions: ReasoningEffortDefinition[] = [
 export const defaultRuntimeSettings: RuntimeSettings = {
   sandboxProfile: "full-access",
   autoApproveToolRequests: true,
+  toolPermissionRules: {
+    allow: [],
+    deny: [],
+    ask: [],
+  },
   reasoningEffort: "medium",
   toolProviderId: null,
   toolModel: null,
@@ -561,16 +594,103 @@ export interface SandboxRun {
 export interface ToolApproval {
   id: string;
   sessionId: string;
+  toolCallId?: string | null;
   toolName: string;
+  kind?: "command" | "question";
   title: string;
   detail: string;
   commandLine: string;
   command: string;
   args: string[];
   cwd: string;
+  question?: {
+    header: string;
+    question: string;
+    options: Array<{
+      label: string;
+      description?: string | null;
+    }>;
+    multiSelect?: boolean;
+  } | null;
+  decisionOption?: ToolApprovalDecisionOption | null;
+  responseText?: string | null;
   status: ToolApprovalStatus;
   requestedAt: string;
   resolvedAt: string | null;
+}
+
+function normalizeToolPermissionRuleToolName(value: unknown): ToolPermissionRuleToolName | null {
+  switch (value) {
+    case "read":
+    case "write":
+    case "edit":
+    case "delete":
+    case "bash":
+    case "*":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function normalizeToolPermissionRule(input: unknown): ToolPermissionRule | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+
+  const toolName = normalizeToolPermissionRuleToolName((input as { toolName?: unknown }).toolName);
+  if (!toolName) {
+    return null;
+  }
+
+  const pathPrefix = typeof (input as { pathPrefix?: unknown }).pathPrefix === "string"
+    ? (input as { pathPrefix: string }).pathPrefix.trim() || undefined
+    : undefined;
+  const cwdPrefix = typeof (input as { cwdPrefix?: unknown }).cwdPrefix === "string"
+    ? (input as { cwdPrefix: string }).cwdPrefix.trim() || undefined
+    : undefined;
+  const commandPrefix = typeof (input as { commandPrefix?: unknown }).commandPrefix === "string"
+    ? (input as { commandPrefix: string }).commandPrefix.trim() || undefined
+    : undefined;
+
+  return {
+    toolName,
+    ...(pathPrefix ? { pathPrefix } : {}),
+    ...(cwdPrefix ? { cwdPrefix } : {}),
+    ...(commandPrefix ? { commandPrefix } : {}),
+  };
+}
+
+function normalizeToolPermissionRuleList(input: unknown): ToolPermissionRule[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map((rule) => normalizeToolPermissionRule(rule))
+    .filter((rule): rule is ToolPermissionRule => Boolean(rule));
+}
+
+export function normalizeToolPermissionRules(input: unknown): ToolPermissionRules {
+  if (!input || typeof input !== "object") {
+    return {
+      allow: [],
+      deny: [],
+      ask: [],
+    };
+  }
+
+  const value = input as {
+    allow?: unknown;
+    deny?: unknown;
+    ask?: unknown;
+  };
+
+  return {
+    allow: normalizeToolPermissionRuleList(value.allow),
+    deny: normalizeToolPermissionRuleList(value.deny),
+    ask: normalizeToolPermissionRuleList(value.ask),
+  };
 }
 
 export interface ToolCallState {
@@ -610,6 +730,7 @@ export interface SessionRollingSummary {
 export interface SessionSnapshot {
   session: Session;
   project: SessionProjectBinding | null;
+  planMode: SessionPlanModeState;
   focusState: SessionFocusState;
   rollingSummary: SessionRollingSummary;
   messages: SessionMessage[];

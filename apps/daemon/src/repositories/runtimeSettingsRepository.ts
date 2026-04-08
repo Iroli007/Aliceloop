@@ -5,12 +5,16 @@ import {
   normalizeRecentTurnsCount,
   normalizeReasoningEffort,
   normalizeSandboxPermissionProfile,
+  normalizeToolPermissionRules,
   type ProviderKind,
   type ReasoningEffort,
   type RuntimeSettings,
   type SandboxPermissionProfile,
+  type ToolPermissionRule,
+  type ToolPermissionRules,
 } from "@aliceloop/runtime-core";
 import { getDatabase } from "../db/client";
+import { appendToolPermissionRule } from "../services/toolPermissionRules";
 
 const runtimeSettingsId = "primary";
 let runtimeSettingsCache: RuntimeSettings | null = null;
@@ -19,11 +23,24 @@ let runtimeSettingsEnsured = false;
 interface RuntimeSettingsRow {
   sandboxProfile: string;
   autoApproveToolRequests: string | number | boolean | null;
+  toolPermissionRulesJson: string | null;
   reasoningEffort: string;
   toolProviderId: string | null;
   toolModel: string | null;
   recentTurnsCount: number | null;
   updatedAt: string;
+}
+
+function parseToolPermissionRulesJson(input: string | null) {
+  if (!input?.trim()) {
+    return defaultRuntimeSettings.toolPermissionRules;
+  }
+
+  try {
+    return normalizeToolPermissionRules(JSON.parse(input));
+  } catch {
+    return defaultRuntimeSettings.toolPermissionRules;
+  }
 }
 
 function ensureRuntimeSettingsRow() {
@@ -37,15 +54,16 @@ function ensureRuntimeSettingsRow() {
   db.prepare(
     `
       INSERT OR IGNORE INTO runtime_settings (
-        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, recent_turns_count, updated_at
+        id, sandbox_profile, auto_approve_tool_requests, tool_permission_rules_json, reasoning_effort, tool_provider_id, tool_model, recent_turns_count, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
     `,
   ).run(
     runtimeSettingsId,
     defaultRuntimeSettings.sandboxProfile,
     defaultRuntimeSettings.autoApproveToolRequests ? 1 : 0,
+    JSON.stringify(defaultRuntimeSettings.toolPermissionRules),
     defaultRuntimeSettings.reasoningEffort,
     defaultRuntimeSettings.toolProviderId,
     defaultRuntimeSettings.toolModel,
@@ -68,6 +86,7 @@ export function getRuntimeSettings(): RuntimeSettings {
         SELECT
           sandbox_profile AS sandboxProfile,
           auto_approve_tool_requests AS autoApproveToolRequests,
+          tool_permission_rules_json AS toolPermissionRulesJson,
           reasoning_effort AS reasoningEffort,
           tool_provider_id AS toolProviderId,
           tool_model AS toolModel,
@@ -87,6 +106,7 @@ export function getRuntimeSettings(): RuntimeSettings {
   runtimeSettingsCache = {
     sandboxProfile: normalizeSandboxPermissionProfile(row.sandboxProfile),
     autoApproveToolRequests: normalizeAutoApproveToolRequests(row.autoApproveToolRequests),
+    toolPermissionRules: parseToolPermissionRulesJson(row.toolPermissionRulesJson),
     reasoningEffort: normalizeReasoningEffort(row.reasoningEffort),
     toolProviderId: normalizeProviderKind(row.toolProviderId),
     toolModel: row.toolModel?.trim() || null,
@@ -100,6 +120,7 @@ export function getRuntimeSettings(): RuntimeSettings {
 export function updateRuntimeSettings(input: {
   sandboxProfile?: SandboxPermissionProfile;
   autoApproveToolRequests?: boolean;
+  toolPermissionRules?: ToolPermissionRules;
   reasoningEffort?: ReasoningEffort;
   toolProviderId?: ProviderKind | null;
   toolModel?: string | null;
@@ -109,6 +130,9 @@ export function updateRuntimeSettings(input: {
   const next: RuntimeSettings = {
     sandboxProfile: normalizeSandboxPermissionProfile(input.sandboxProfile ?? current.sandboxProfile),
     autoApproveToolRequests: input.autoApproveToolRequests ?? current.autoApproveToolRequests,
+    toolPermissionRules: input.toolPermissionRules
+      ? normalizeToolPermissionRules(input.toolPermissionRules)
+      : current.toolPermissionRules,
     reasoningEffort: normalizeReasoningEffort(input.reasoningEffort ?? current.reasoningEffort),
     toolProviderId: input.toolProviderId === undefined ? current.toolProviderId : normalizeProviderKind(input.toolProviderId),
     toolModel: input.toolModel === undefined ? current.toolModel : input.toolModel?.trim() || null,
@@ -120,13 +144,14 @@ export function updateRuntimeSettings(input: {
   db.prepare(
     `
       INSERT INTO runtime_settings (
-        id, sandbox_profile, auto_approve_tool_requests, reasoning_effort, tool_provider_id, tool_model, recent_turns_count, updated_at
+        id, sandbox_profile, auto_approve_tool_requests, tool_permission_rules_json, reasoning_effort, tool_provider_id, tool_model, recent_turns_count, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?
       )
       ON CONFLICT(id) DO UPDATE SET
         sandbox_profile = excluded.sandbox_profile,
         auto_approve_tool_requests = excluded.auto_approve_tool_requests,
+        tool_permission_rules_json = excluded.tool_permission_rules_json,
         reasoning_effort = excluded.reasoning_effort,
         tool_provider_id = excluded.tool_provider_id,
         tool_model = excluded.tool_model,
@@ -137,6 +162,7 @@ export function updateRuntimeSettings(input: {
     runtimeSettingsId,
     next.sandboxProfile,
     next.autoApproveToolRequests ? 1 : 0,
+    JSON.stringify(next.toolPermissionRules),
     next.reasoningEffort,
     next.toolProviderId,
     next.toolModel,
@@ -147,6 +173,21 @@ export function updateRuntimeSettings(input: {
   runtimeSettingsCache = next;
   runtimeSettingsEnsured = true;
   return { ...next };
+}
+
+export function appendRuntimeToolPermissionRule(
+  behavior: keyof ToolPermissionRules,
+  rule: ToolPermissionRule,
+): RuntimeSettings {
+  const current = getRuntimeSettings();
+  const nextRules = appendToolPermissionRule(current.toolPermissionRules, behavior, rule);
+  if (nextRules === current.toolPermissionRules) {
+    return current;
+  }
+
+  return updateRuntimeSettings({
+    toolPermissionRules: nextRules,
+  });
 }
 
 export function resetRuntimeSettingsCache() {

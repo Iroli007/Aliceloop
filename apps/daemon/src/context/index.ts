@@ -6,14 +6,25 @@ import {
   buildSessionContextFragments,
 } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
-import { buildSkillContextBlock, selectRelevantSkillDefinitions } from "./skills/skillLoader";
-import { mergeSkillRouteHints, needsBrowserAutomation, needsCameraCapture, needsEpisodicHistoryRecall, needsFileManagement, needsImageAnalysis, needsWebFetch, needsWebResearch } from "./skills/skillRouting";
-import { buildToolSet } from "./tools/toolRegistry";
+import {
+  buildSelectedSkillBodyBlock,
+  buildSkillContextBlock,
+  buildSkillDynamicOverlay,
+  buildStaticSkillCatalogBlock,
+  computeSkillBlockKey,
+  getSkillDefinition,
+  getStaticSkillCatalogKey,
+  selectRelevantSkillDefinitions,
+} from "./skills/skillLoader";
+import { mergeSkillRouteHints, needsBrowserAutomation, needsCameraCapture, needsEpisodicHistoryRecall, needsFileManagement, needsImageAnalysis, needsSystemInfo, needsWebFetch, needsWebResearch } from "./skills/skillRouting";
+import { BASE_TOOL_SCHEMA_KEY, buildToolSet, computeToolSurfaceKey, DEFAULT_ATTACHED_TOOL_NAMES, STATIC_BASE_TOOL_BLOCK } from "./tools/toolRegistry";
 import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import { getDefaultProjectDirectory } from "../repositories/projectRepository";
 import { getDataDir } from "../db/client";
 import { getSessionWorksetState } from "../repositories/sessionRepository";
+import { getSessionPlanModeState } from "../repositories/sessionPlanModeRepository";
+import { getLatestPlan, getPlan } from "../repositories/planRepository";
 import {
   isAliceloopGeneratedFile,
   markGeneratedFileDeleted,
@@ -21,11 +32,17 @@ import {
 } from "../repositories/sessionGeneratedFileRepository";
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
 import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
+import {
+  createAgentPermissionFrontdesk,
+  createDefaultAgentPermissionContext,
+} from "../services/agentPermissionFrontdesk";
 import { getSandboxProjectRoot } from "../runtime/sandbox/toolPolicy";
+import { parseShellScriptCommandsForPolicy } from "../runtime/sandbox/toolPolicy";
 import {
   getActiveWorksetSkillIds,
   getActiveWorksetToolNames,
 } from "./workset/worksetState";
+import { ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME, WRITE_PLAN_ARTIFACT_TOOL_NAME } from "./tools/planModeTools";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -41,6 +58,8 @@ export interface AgentContext {
   safetyConfig: SafetyConfig;
   timings: Record<string, number | string | null>;
   routedSkillIds: string[];
+  planModeActive: boolean;
+  activePlanId: string | null;
 }
 
 const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
@@ -51,10 +70,197 @@ const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
 interface LoadContextOptions {
   additionalStickySkillIds?: string[];
   additionalToolNames?: string[];
+  additionalSelectedSkillIds?: string[];
+}
+
+const PLAN_MODE_BLOCKED_BASH_COMMANDS = new Set([
+  "chmod",
+  "chown",
+  "cp",
+  "dd",
+  "install",
+  "ln",
+  "mkdir",
+  "mv",
+  "rm",
+  "rmdir",
+  "tee",
+  "touch",
+]);
+
+const PLAN_MODE_ALLOWED_ALICELOOP_PLAN_ACTIONS = new Set([
+  "list",
+  "show",
+]);
+
+const PLAN_MODE_ALLOWED_GIT_SUBCOMMANDS = new Set([
+  "branch",
+  "diff",
+  "grep",
+  "log",
+  "ls-files",
+  "rev-parse",
+  "show",
+  "status",
+]);
+
+function assertPlanModeParsedCommand(
+  parsedCommand: { command: string; args?: string[] },
+): { command: string; args: string[] } {
+  const command = parsedCommand.command.trim();
+  const args = [...(parsedCommand.args ?? [])];
+
+  if (!command || command === ":") {
+    return {
+      command: ":",
+      args: [],
+    };
+  }
+
+  if (PLAN_MODE_BLOCKED_BASH_COMMANDS.has(command)) {
+    throw new Error(`Plan mode blocked write-oriented bash command: ${command}`);
+  }
+
+  if (command === "sed" && args.some((arg) => arg === "-i" || arg === "--in-place" || arg.startsWith("-i"))) {
+    throw new Error("Plan mode blocked in-place sed edits.");
+  }
+
+  if (command === "npm") {
+    const subcommand = args.find((arg) => arg && !arg.startsWith("-"));
+    if (subcommand && !["help", "root", "prefix", "bin", "version", "view", "query", "search", "ls", "outdated", "explain", "pkg"].includes(subcommand)) {
+      throw new Error(`Plan mode blocked npm ${subcommand}; use read-only npm inspection commands only.`);
+    }
+  }
+
+  if (command === "git") {
+    const subcommand = args[0]?.trim() ?? "";
+    if (!PLAN_MODE_ALLOWED_GIT_SUBCOMMANDS.has(subcommand)) {
+      throw new Error(`Plan mode blocked git ${subcommand || "<missing>"}; use read-only git inspection commands only.`);
+    }
+  }
+
+  if (command === "aliceloop") {
+    const subcommand = args[0]?.trim();
+    if (subcommand !== "plan") {
+      if (subcommand && PLAN_MODE_ALLOWED_ALICELOOP_PLAN_ACTIONS.has(subcommand)) {
+        return {
+          command,
+          args: ["plan", ...args],
+        };
+      }
+      throw new Error("Plan mode only allows `aliceloop plan ...` commands. Use the plan mode tools to enter or exit planning.");
+    }
+  }
+
+  return {
+    command,
+    args,
+  };
 }
 
 function prefersDeepResearchFetch(query: string) {
   return /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u.test(query.trim());
+}
+
+function buildPlanModeReminder(sessionId: string, activePlanId: string | null) {
+  const planRef = activePlanId ? `Plan #${activePlanId.slice(0, 8)}` : "当前绑定计划";
+  return [
+    "Plan mode is active for this thread.",
+    `Current planning artifact: ${planRef}.`,
+    "While plan mode is active, stay in planning: inspect code, analyze structure, clarify requirements, and update the bound plan record only.",
+    "Writable atomic tools are temporarily withheld for this turn; treat bash, read, glob, and grep as the only execution tools available during planning.",
+    "Do not implement changes, edit repository files, or execute write-oriented bash commands until plan mode is explicitly exited.",
+    "If you need the user to choose between options or clarify scope, use `ask_user_question` instead of asking plain-text follow-up questions.",
+    "Ask one structured clarification at a time. Do not dump multiple categories of questions into one assistant reply.",
+    "When requirements are still ambiguous, end the turn with `ask_user_question` and wait for the user's answer before continuing.",
+    "Keep clarifying requirements until the solution scope is concrete enough to execute confidently.",
+    `When the plan is ready, call \`${WRITE_PLAN_ARTIFACT_TOOL_NAME}\` with a clear title, a short summary/goal, and at least two ordered implementation steps.`,
+    `Keep using \`${WRITE_PLAN_ARTIFACT_TOOL_NAME}\` whenever the user asks to revise the plan. The plan artifact is the source of truth, not your freeform assistant prose.`,
+    `When planning is complete, call \`${EXIT_PLAN_MODE_TOOL_NAME}\` before moving into implementation. Do not call it until the active plan artifact is actually filled in.`,
+    `If the user says to start building now, exit planning first with \`${EXIT_PLAN_MODE_TOOL_NAME}\`, then continue in the reloaded implementation pass.`,
+    "Do not use `aliceloop plan create`, `aliceloop plan update`, `aliceloop plan approve`, or `aliceloop plan archive` from bash while planning.",
+    "Do not load or rely on task/todo-style skills while planning. Plan mode is its own workflow.",
+    `The current thread id is ${sessionId}. In plan mode, prefer bash command+args form, but simple read-only shell chains like \`which python3 && python3 --version\` are allowed.`,
+  ].join("\n");
+}
+
+function buildPlanArtifactBlock(sessionId: string, activePlanId: string | null, planModeActive: boolean) {
+  const plan = planModeActive
+    ? (activePlanId ? getPlan(activePlanId) : null)
+    : getLatestPlan(sessionId, "approved");
+  if (!plan) {
+    return "";
+  }
+
+  const steps = plan.steps.length > 0
+    ? plan.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")
+    : "1. Fill in concrete implementation steps.";
+
+  return [
+    planModeActive ? "Current plan artifact:" : "Most recent approved plan for this thread:",
+    `Plan ID: ${plan.id}`,
+    `Title: ${plan.title || "Untitled plan"}`,
+    `Goal: ${plan.goal || "(no goal recorded yet)"}`,
+    "Steps:",
+    steps,
+    planModeActive
+      ? "Keep this plan record updated while clarifying requirements."
+      : "Use this plan as the execution guide unless the user changes direction. Execute the steps in order; for larger steps, you may delegate sub-work with `task_delegation` and poll it with `task_output`.",
+  ].join("\n");
+}
+
+function createPlanModeSandboxExecutor(
+  sandbox: ReturnType<typeof createPermissionSandboxExecutor>,
+) {
+  return {
+    ...sandbox,
+    async writeBinaryFile(_input: Parameters<typeof sandbox.writeBinaryFile>[0]) {
+      throw new Error("Plan mode only allows read-only exploration and plan record updates.");
+    },
+    async writeTextFile(_input: Parameters<typeof sandbox.writeTextFile>[0]) {
+      throw new Error("Plan mode only allows read-only exploration and plan record updates.");
+    },
+    async editTextFile(_input: Parameters<typeof sandbox.editTextFile>[0]) {
+      throw new Error("Plan mode only allows read-only exploration and plan record updates.");
+    },
+    async deletePath(_input: Parameters<typeof sandbox.deletePath>[0]) {
+      throw new Error("Plan mode does not allow deleting files.");
+    },
+    async runBash(input: Parameters<typeof sandbox.runBash>[0]) {
+      if (input.script?.trim()) {
+        const parsedCommands = parseShellScriptCommandsForPolicy(input.script);
+        if (parsedCommands.length === 0) {
+          return {
+            stdout: "",
+            stderr: "",
+          };
+        }
+
+        for (const parsedCommand of parsedCommands) {
+          assertPlanModeParsedCommand(parsedCommand);
+        }
+
+        return sandbox.runBash(input);
+      }
+
+      const normalizedInput = assertPlanModeParsedCommand({
+        command: input.command,
+        args: input.args,
+      });
+      if (normalizedInput.command === ":") {
+        return {
+          stdout: "",
+          stderr: "",
+        };
+      }
+
+      return sandbox.runBash({
+        ...input,
+        command: normalizedInput.command,
+        args: normalizedInput.args,
+      });
+    },
+  };
 }
 
 export async function loadContext(
@@ -90,14 +296,27 @@ export async function loadContext(
   const latestUserQuery = sessionContext.latestUserQuery;
   const recentConversationFocus = sessionContext.recentConversationFocus;
   const latestUserHasImageAttachment = recentConversationFocus.latestUserHasImageAttachment;
+  const planModeStateStartedAt = nowMs();
+  const planModeState = getSessionPlanModeState(sessionId);
+  timings.planModeStateMs = roundMs(nowMs() - planModeStateStartedAt);
+  timings.planModeActive = planModeState.active ? 1 : 0;
+  timings.planModePlanId = planModeState.activePlanId;
+  const planModeReminder = planModeState.active
+    ? buildPlanModeReminder(sessionId, planModeState.activePlanId)
+    : "";
+  const planArtifactBlock = buildPlanArtifactBlock(sessionId, planModeState.activePlanId, planModeState.active);
+  timings.planArtifactChars = planArtifactBlock.length;
 
   const userQuery = recentConversationFocus.effectiveUserQuery ?? latestUserQuery;
   timings.effectiveUserQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
   const sessionWorksetStateStartedAt = nowMs();
   const sessionWorksetState = getSessionWorksetState(sessionId);
   timings.sessionWorksetStateMs = roundMs(nowMs() - sessionWorksetStateStartedAt);
-  const activeWorksetSkillIds = getActiveWorksetSkillIds(sessionWorksetState);
-  const activeWorksetToolNames = getActiveWorksetToolNames(sessionWorksetState);
+  const shouldCarryForwardWorkset = Boolean(
+    recentConversationFocus.continuationLike || recentConversationFocus.researchContinuation,
+  );
+  const activeWorksetSkillIds = shouldCarryForwardWorkset ? getActiveWorksetSkillIds(sessionWorksetState) : [];
+  const activeWorksetToolNames = shouldCarryForwardWorkset ? getActiveWorksetToolNames(sessionWorksetState) : [];
   timings.sessionWorksetActiveSkillCount = activeWorksetSkillIds.length;
   timings.sessionWorksetActiveToolCount = activeWorksetToolNames.length;
 
@@ -124,18 +343,56 @@ export async function loadContext(
   timings.attachmentRootsAggregated = 1;
 
   const skillRoutingStartedAt = nowMs();
-  const routedSkills = selectRelevantSkillDefinitions(userQuery, routeHints);
+  const additionallySelectedSkillIds = planModeState.active
+    ? []
+    : [...new Set(options?.additionalSelectedSkillIds ?? [])];
+  const routedSkills = planModeState.active
+    ? []
+    : (() => {
+        const routedSkillMap = new Map(
+          selectRelevantSkillDefinitions(userQuery, routeHints).map((skill) => [skill.id, skill] as const),
+        );
+        for (const skillId of additionallySelectedSkillIds) {
+          const skill = getSkillDefinition(skillId);
+          if (skill?.status === "available") {
+            routedSkillMap.set(skill.id, skill);
+          }
+        }
+        return [...routedSkillMap.values()].sort((a, b) => a.id.localeCompare(b.id));
+      })();
   timings.skillRoutingMs = roundMs(nowMs() - skillRoutingStartedAt);
-  timings.skillRouteSource = "metadata";
+  timings.skillRouteSource = planModeState.active ? "suppressed:plan-mode" : "metadata";
   timings.ruleSkillCount = routedSkills.length;
   timings.fallbackSkillCount = 0;
+  timings.forcedSkillCount = additionallySelectedSkillIds.length;
+  timings.forcedSkills = additionallySelectedSkillIds.join(",");
   const browserRelayAvailable = hasHealthyDesktopRelay();
   const skillsStartedAt = nowMs();
-  const skills = buildSkillContextBlock(routedSkills, {
-    browserRelayAvailable,
-    routeHints,
-  });
+  const staticSkillCatalogBlock = planModeState.active ? "" : buildStaticSkillCatalogBlock();
+  const selectedSkillBodies = planModeState.active
+    ? { content: "", keys: [] as string[] }
+    : buildSelectedSkillBodyBlock(routedSkills);
+  const skillDynamicOverlay = planModeState.active
+    ? ""
+    : buildSkillDynamicOverlay(routedSkills, {
+        browserRelayAvailable,
+        routeHints,
+      });
+  const skills = planModeState.active
+    ? ""
+    : buildSkillContextBlock(routedSkills, {
+        browserRelayAvailable,
+        routeHints,
+      });
   timings.skillsMs = roundMs(nowMs() - skillsStartedAt);
+  timings.skillBlockChars = skills.length;
+  timings.skillBlockKey = computeSkillBlockKey(skills);
+  timings.staticSkillCatalogChars = staticSkillCatalogBlock.length;
+  timings.staticSkillCatalogKey = getStaticSkillCatalogKey();
+  timings.skillBodyChars = selectedSkillBodies.content.length;
+  timings.skillBodyKeys = selectedSkillBodies.keys.join(",");
+  timings.skillDynamicOverlayChars = skillDynamicOverlay.length;
+  timings.skillDynamicOverlayKey = skillDynamicOverlay ? computeSkillBlockKey(skillDynamicOverlay) : null;
   timings.routedSkillCount = routedSkills.length;
   timings.routedSkills = routedSkills.map((skill) => skill.id).join(",");
   timings.routedSkillGroups = "";
@@ -185,7 +442,7 @@ export async function loadContext(
   const workspaceProject = getDefaultProjectDirectory();
 
   const sandboxStartedAt = nowMs();
-  const sandbox = createPermissionSandboxExecutor({
+  const baseSandbox = createPermissionSandboxExecutor({
     label: `agent:${sessionId}`,
     permissionProfile: "full-access",
     autoApproveToolRequests,
@@ -207,6 +464,19 @@ export async function loadContext(
       markGeneratedFileDeleted(targetPath);
     },
   });
+  const frontdeskSandbox = createAgentPermissionFrontdesk(baseSandbox, {
+    sessionId,
+    abortSignal,
+    permissionContext: createDefaultAgentPermissionContext({
+      mode: planModeState.active
+        ? "plan"
+        : runtimeSettings.autoApproveToolRequests
+          ? "bypassPermissions"
+          : "auto",
+      rules: runtimeSettings.toolPermissionRules,
+    }),
+  });
+  const sandbox = planModeState.active ? createPlanModeSandboxExecutor(frontdeskSandbox) : frontdeskSandbox;
   timings.sandboxMs = roundMs(nowMs() - sandboxStartedAt);
 
   const activeSkillsStartedAt = nowMs();
@@ -219,13 +489,40 @@ export async function loadContext(
     routeHints,
     hasImageAttachment: latestUserHasImageAttachment,
     browserRelayAvailable,
-    additionalToolNames: [
-      ...(options?.additionalToolNames ?? []),
-      ...activeWorksetToolNames,
-    ],
+    additionalToolNames: options?.additionalToolNames ?? [],
+    planModeActive: planModeState.active,
   });
   timings.toolsMs = roundMs(nowMs() - toolsStartedAt);
   timings.toolQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
+  const attachedToolNames = Object.keys(tools);
+  const attachedToolNameSet = new Set(attachedToolNames);
+  const missingAllowedToolsBySkill = planModeState.active
+    ? []
+    : routedSkills
+    .map((skill) => ({
+      skillId: skill.id,
+      missingTools: skill.allowedTools.filter((toolName) => !attachedToolNameSet.has(toolName)),
+    }))
+    .filter((entry) => entry.missingTools.length > 0);
+  timings.toolSurfaceCount = attachedToolNames.length;
+  timings.toolSurfaceKey = computeToolSurfaceKey(attachedToolNames);
+  timings.toolSurfaceNames = attachedToolNames.join(",");
+  timings.toolSurfaceStablePrefix = attachedToolNames
+    .slice(0, DEFAULT_ATTACHED_TOOL_NAMES.length)
+    .every((toolName, index) => toolName === DEFAULT_ATTACHED_TOOL_NAMES[index])
+    ? 1
+    : 0;
+  timings.baseToolSchemaKey = BASE_TOOL_SCHEMA_KEY;
+  timings.baseToolSchemaCount = DEFAULT_ATTACHED_TOOL_NAMES.length;
+  timings.baseToolPromptChars = STATIC_BASE_TOOL_BLOCK.length;
+  timings.baseToolPromptKey = computeSkillBlockKey(STATIC_BASE_TOOL_BLOCK);
+  timings.skillAllowedToolCoverageOk = missingAllowedToolsBySkill.length === 0 ? 1 : 0;
+  timings.skillAllowedToolMissingCount = missingAllowedToolsBySkill.reduce((sum, entry) => {
+    return sum + entry.missingTools.length;
+  }, 0);
+  timings.skillAllowedToolMissingBySkill = missingAllowedToolsBySkill
+    .map((entry) => `${entry.skillId}:${entry.missingTools.join(",")}`)
+    .join("|");
 
   const initialToolChoice = (() => {
     const toolNames = new Set(Object.keys(tools));
@@ -243,30 +540,13 @@ export async function loadContext(
       return { type: "tool", toolName: "web_search" } as const;
     }
 
-    if (needsBrowserAutomation(queryText)) {
-      if (toolNames.has("browser_snapshot")) {
-        return { type: "tool", toolName: "browser_snapshot" } as const;
-      }
-
-      if (toolNames.has("browser_navigate")) {
-        return { type: "tool", toolName: "browser_navigate" } as const;
-      }
-    }
-
     if (
       toolNames.has("bash")
       && (
-        routedSkillIds.has("skill-hub")
-        || routedSkillIds.has("skill-search")
-        || routedSkillIds.has("memory-management")
-        || routedSkillIds.has("thread-management")
-        || routedSkillIds.has("tasks")
-        || routedSkillIds.has("plan-mode")
-        || routedSkillIds.has("scheduler")
-        || routedSkillIds.has("system-info")
-        || routedSkillIds.has("file-manager")
+        needsBrowserAutomation(queryText)
         || needsCameraCapture(queryText)
         || needsFileManagement(queryText)
+        || needsSystemInfo(queryText)
       )
     ) {
       return { type: "tool", toolName: "bash" } as const;
@@ -276,6 +556,8 @@ export async function loadContext(
   })();
 
   const dynamicBlocks = [
+    planModeReminder,
+    planArtifactBlock,
     sessionContext.activeTurn,
     sessionContext.latestTurn,
     sessionContext.sessionFocus,
@@ -284,14 +566,39 @@ export async function loadContext(
     sessionContext.recentResearchMemory,
     profileFactMemory.content,
     historicalContext.content,
-    skills,
+    skillDynamicOverlay,
   ].filter(Boolean);
 
   const promptAssemblyStartedAt = nowMs();
-  let systemPrompt: AgentContext["systemPrompt"];
+let systemPrompt: AgentContext["systemPrompt"];
   if (Array.isArray(persona)) {
     // persona is already system messages with cache control
     systemPrompt = [...persona];
+    systemPrompt.push({
+      role: "system",
+      content: STATIC_BASE_TOOL_BLOCK,
+      providerOptions: {
+        anthropic: { cacheControl: { type: "ephemeral" } }
+      }
+    });
+    if (staticSkillCatalogBlock) {
+      systemPrompt.push({
+        role: "system",
+        content: staticSkillCatalogBlock,
+        providerOptions: {
+          anthropic: { cacheControl: { type: "ephemeral" } }
+        }
+      });
+    }
+    if (selectedSkillBodies.content) {
+      systemPrompt.push({
+        role: "system",
+        content: selectedSkillBodies.content,
+        providerOptions: {
+          anthropic: { cacheControl: { type: "ephemeral" } }
+        }
+      });
+    }
     if (dynamicBlocks.length > 0) {
       systemPrompt.push({
         role: "system",
@@ -300,7 +607,7 @@ export async function loadContext(
     }
   } else {
     // fallback: persona is a string
-    systemPrompt = [persona, ...dynamicBlocks].filter(Boolean).join("\n\n");
+    systemPrompt = [persona, STATIC_BASE_TOOL_BLOCK, staticSkillCatalogBlock, selectedSkillBodies.content, ...dynamicBlocks].filter(Boolean).join("\n\n");
   }
   timings.promptAssemblyMs = roundMs(nowMs() - promptAssemblyStartedAt);
   if (Array.isArray(systemPrompt)) {
@@ -340,5 +647,7 @@ export async function loadContext(
     },
     timings,
     routedSkillIds: routedSkills.map((skill) => skill.id),
+    planModeActive: planModeState.active,
+    activePlanId: planModeState.activePlanId,
   };
 }

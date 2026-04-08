@@ -141,9 +141,5 @@ export function inferStickySkillIdsFromContext(query: string) {
     stickySkillIds.add("skill-hub");
     stickySkillIds.add("skill-search");
   }
-  if (matches(query, /继续|接着|go on|resume|恢复/iu)) {
-    stickySkillIds.add("continue");
-  }
-
   return [...stickySkillIds];
 }

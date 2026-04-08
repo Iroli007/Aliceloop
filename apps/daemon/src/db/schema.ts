@@ -258,6 +258,21 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS session_plan_modes (
+      session_id TEXT PRIMARY KEY,
+      active INTEGER NOT NULL DEFAULT 0,
+      active_plan_id TEXT,
+      entered_at TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (active_plan_id) REFERENCES plan_runs(id) ON DELETE SET NULL
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS session_plan_modes_active_updated_idx
+    ON session_plan_modes (active, updated_at DESC)
+  `,
+  `
     CREATE INDEX IF NOT EXISTS plan_runs_status_updated_idx
     ON plan_runs (status, updated_at)
   `,
@@ -457,6 +472,7 @@ export const schemaStatements = [
       id TEXT PRIMARY KEY,
       sandbox_profile TEXT NOT NULL,
       auto_approve_tool_requests INTEGER NOT NULL DEFAULT 1,
+      tool_permission_rules_json TEXT NOT NULL DEFAULT '{"allow":[],"deny":[],"ask":[]}',
       reasoning_effort TEXT NOT NULL DEFAULT 'medium',
       tool_provider_id TEXT,
       tool_model TEXT,

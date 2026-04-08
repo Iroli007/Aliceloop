@@ -18,6 +18,7 @@ import {
   type SessionRollingSummary,
   type SessionMessage,
   type SessionMessageStatus,
+  type SessionPlanModeState,
   type SessionProjectBinding,
   type SessionRole,
   type SessionSnapshot,
@@ -30,6 +31,7 @@ import { getShellOverview } from "./overviewRepository";
 import { syncTaskRunFromJob } from "./taskRunRepository";
 import { listPendingToolApprovals } from "../services/toolApprovalBroker";
 import { getDefaultProjectDirectory, getProjectDirectory } from "./projectRepository";
+import { getSessionPlanModeState } from "./sessionPlanModeRepository";
 import {
   buildThreadTranscriptExportPaths,
   clearSessionTranscriptExports,
@@ -161,6 +163,10 @@ interface SessionThreadSummaryRow {
   projectName: string | null;
   projectPath: string | null;
   projectKind: ProjectDirectoryKind | null;
+  planModeActive: number | null;
+  planModePlanId: string | null;
+  planModeEnteredAt: string | null;
+  planModeUpdatedAt: string | null;
 }
 
 interface SessionConversationMessageRow {
@@ -303,6 +309,16 @@ function createEmptySessionRollingSummary(sessionId: string): SessionRollingSumm
     remaining: [],
     decisions: [],
     summarizedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
+function createInactivePlanModeState(sessionId: string): SessionPlanModeState {
+  return {
+    sessionId,
+    active: false,
+    activePlanId: null,
+    enteredAt: null,
     updatedAt: null,
   };
 }
@@ -1109,6 +1125,13 @@ function toSessionThreadSummary(row: SessionThreadSummaryRow): SessionThreadSumm
     projectName: row.projectName,
     projectPath: row.projectPath,
     projectKind: row.projectKind,
+    planMode: {
+      sessionId: row.id,
+      active: row.planModeActive === 1,
+      activePlanId: row.planModePlanId,
+      enteredAt: row.planModeEnteredAt,
+      updatedAt: row.planModeUpdatedAt,
+    },
   };
 }
 
@@ -1130,10 +1153,16 @@ function findReusableDraftSession(projectId: string | null): SessionThreadSummar
           projects.id AS projectId,
           projects.name AS projectName,
           projects.path AS projectPath,
-          projects.kind AS projectKind
+          projects.kind AS projectKind,
+          COALESCE(plan_mode.active, 0) AS planModeActive,
+          plan_mode.active_plan_id AS planModePlanId,
+          plan_mode.entered_at AS planModeEnteredAt,
+          plan_mode.updated_at AS planModeUpdatedAt
         FROM sessions
         LEFT JOIN projects
           ON projects.id = sessions.project_id
+        LEFT JOIN session_plan_modes AS plan_mode
+          ON plan_mode.session_id = sessions.id
         WHERE NOT EXISTS (
           SELECT 1
           FROM session_messages
@@ -1149,6 +1178,7 @@ function findReusableDraftSession(projectId: string | null): SessionThreadSummar
           FROM job_runs
           WHERE job_runs.session_id = sessions.id
         )
+          AND COALESCE(plan_mode.active, 0) = 0
           AND (
             (? IS NULL AND sessions.project_id IS NULL)
             OR sessions.project_id = ?
@@ -1180,10 +1210,16 @@ export function listSessionThreads(): SessionThreadSummary[] {
           projects.id AS projectId,
           projects.name AS projectName,
           projects.path AS projectPath,
-          projects.kind AS projectKind
+          projects.kind AS projectKind,
+          COALESCE(plan_mode.active, 0) AS planModeActive,
+          plan_mode.active_plan_id AS planModePlanId,
+          plan_mode.entered_at AS planModeEnteredAt,
+          plan_mode.updated_at AS planModeUpdatedAt
         FROM sessions
         LEFT JOIN projects
           ON projects.id = sessions.project_id
+        LEFT JOIN session_plan_modes AS plan_mode
+          ON plan_mode.session_id = sessions.id
         LEFT JOIN (
           SELECT
             session_id,
@@ -1201,6 +1237,7 @@ export function listSessionThreads(): SessionThreadSummary[] {
             LIMIT 1
           )
         WHERE COALESCE(message_counts.messageCount, 0) > 0
+          OR COALESCE(plan_mode.active, 0) = 1
         ORDER BY sessions.updated_at DESC, sessions.created_at DESC
       `,
     )
@@ -1233,10 +1270,16 @@ export function listHistoricalSessionCandidates(
           projects.id AS projectId,
           projects.name AS projectName,
           projects.path AS projectPath,
-          projects.kind AS projectKind
+          projects.kind AS projectKind,
+          COALESCE(plan_mode.active, 0) AS planModeActive,
+          plan_mode.active_plan_id AS planModePlanId,
+          plan_mode.entered_at AS planModeEnteredAt,
+          plan_mode.updated_at AS planModeUpdatedAt
         FROM sessions
         LEFT JOIN projects
           ON projects.id = sessions.project_id
+        LEFT JOIN session_plan_modes AS plan_mode
+          ON plan_mode.session_id = sessions.id
         LEFT JOIN (
           SELECT
             session_id,
@@ -1256,7 +1299,10 @@ export function listHistoricalSessionCandidates(
             LIMIT 1
           )
         WHERE sessions.id <> ?
-          AND COALESCE(message_counts.messageCount, 0) > 0
+          AND (
+            COALESCE(message_counts.messageCount, 0) > 0
+            OR COALESCE(plan_mode.active, 0) = 1
+          )
         ORDER BY
           CASE
             WHEN ? IS NOT NULL AND sessions.project_id = ? THEN 0
@@ -1379,10 +1425,16 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
           projects.id AS projectId,
           projects.name AS projectName,
           projects.path AS projectPath,
-          projects.kind AS projectKind
+          projects.kind AS projectKind,
+          COALESCE(plan_mode.active, 0) AS planModeActive,
+          plan_mode.active_plan_id AS planModePlanId,
+          plan_mode.entered_at AS planModeEnteredAt,
+          plan_mode.updated_at AS planModeUpdatedAt
         FROM sessions
         LEFT JOIN projects
           ON projects.id = sessions.project_id
+        LEFT JOIN session_plan_modes AS plan_mode
+          ON plan_mode.session_id = sessions.id
         LEFT JOIN (
           SELECT
             session_id,
@@ -1477,6 +1529,7 @@ export function createSession(
     projectName: projectId ? getProjectDirectory(projectId).name : null,
     projectPath: projectId ? getProjectDirectory(projectId).path : null,
     projectKind: projectId ? getProjectDirectory(projectId).kind : null,
+    planMode: createInactivePlanModeState(id),
   };
 }
 
@@ -1850,7 +1903,7 @@ function listResolvedApprovalEvents(sessionId: string): ToolApproval[] {
 export function reconcileInterruptedSessionState() {
   const db = getDatabase();
   const now = new Date().toISOString();
-  const runningJobs = db
+  const interruptedJobs = db
     .prepare(
       `
         SELECT
@@ -1863,13 +1916,13 @@ export function reconcileInterruptedSessionState() {
           updated_at AS updatedAt
         FROM job_runs
         WHERE kind = 'provider-completion'
-          AND status = 'running'
+          AND status IN ('queued', 'running')
       `,
     )
     .all() as JobRunRow[];
   const pendingApprovals = listPendingApprovalEvents();
 
-  if (runningJobs.length === 0 && pendingApprovals.length === 0) {
+  if (interruptedJobs.length === 0 && pendingApprovals.length === 0) {
     return {
       clearedJobs: 0,
       clearedApprovals: 0,
@@ -1877,7 +1930,7 @@ export function reconcileInterruptedSessionState() {
   }
 
   db.transaction(() => {
-    for (const row of runningJobs) {
+    for (const row of interruptedJobs) {
       const job: JobRunDetail = {
         id: row.id,
         sessionId: row.sessionId,
@@ -1907,7 +1960,7 @@ export function reconcileInterruptedSessionState() {
   })();
 
   return {
-    clearedJobs: runningJobs.length,
+    clearedJobs: interruptedJobs.length,
     clearedApprovals: pendingApprovals.length,
   };
 }
@@ -1976,6 +2029,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
   const project = getSessionProjectBinding(sessionId);
   const focusState = readSessionFocusStateRow(sessionId);
   const rollingSummary = readSessionRollingSummaryRow(sessionId);
+  const planMode = getSessionPlanModeState(sessionId);
   const attachments = listAttachments(sessionId);
   const messages = listMessages(sessionId, attachments);
   const jobs = listJobs(sessionId);
@@ -2005,6 +2059,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     attachments,
     pendingToolApprovals: listPendingToolApprovals(sessionId),
     resolvedToolApprovals: listResolvedApprovalEvents(sessionId),
+    planMode,
     jobs,
     devices,
     runtimePresence,

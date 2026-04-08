@@ -88,6 +88,7 @@ interface SessionThreadSummaryPayload {
   projectId?: string | null;
   projectName?: string | null;
   projectPath?: string | null;
+  planMode?: SessionPlanModePayload;
 }
 
 interface SessionFocusStatePayload {
@@ -119,6 +120,7 @@ interface SessionSnapshotPayload {
     createdAt: string;
   updatedAt: string;
   };
+  planMode: SessionPlanModePayload;
   focusState: SessionFocusStatePayload;
   rollingSummary: SessionRollingSummaryPayload;
   messages: Array<{
@@ -169,6 +171,14 @@ interface PlanPayload {
   createdAt: string;
   updatedAt: string;
   approvedAt: string | null;
+}
+
+interface SessionPlanModePayload {
+  sessionId: string;
+  active: boolean;
+  activePlanId: string | null;
+  enteredAt: string | null;
+  updatedAt: string | null;
 }
 
 interface SkillPayload {
@@ -296,6 +306,9 @@ function usage() {
     "  aliceloop plan update <id> [--title <text>] [--goal <text>] [--steps <comma,separated,steps>] [--status <draft|approved|archived>]",
     "  aliceloop plan approve <id>",
     "  aliceloop plan archive <id>",
+    "  aliceloop plan-mode status --session <id>",
+    "  aliceloop plan-mode enter --session <id> [--plan <id>] [--title <title>]",
+    "  aliceloop plan-mode exit --session <id>",
     "  aliceloop skills list",
     "  aliceloop skills show <id>",
     "  aliceloop skills search <query>",
@@ -1262,6 +1275,34 @@ async function handlePlan(args: string[]) {
   throw new CliError(`Unknown plan command: ${action ?? "(missing)"}\n\n${usage()}`);
 }
 
+async function handlePlanMode(args: string[]) {
+  const action = args[0];
+  const { flags } = parseFlagArgs(args.slice(1));
+  const sessionId = await resolveTargetSessionId(flags.session);
+
+  if (action === "status") {
+    return apiRequest<SessionPlanModePayload>(`/api/session/${encodeURIComponent(sessionId)}/plan-mode`);
+  }
+
+  if (action === "enter") {
+    return apiRequest<SessionPlanModePayload>(`/api/session/${encodeURIComponent(sessionId)}/plan-mode/enter`, {
+      method: "POST",
+      body: JSON.stringify({
+        planId: flags.plan?.trim() || null,
+        title: flags.title?.trim() || null,
+      }),
+    });
+  }
+
+  if (action === "exit") {
+    return apiRequest<SessionPlanModePayload>(`/api/session/${encodeURIComponent(sessionId)}/plan-mode/exit`, {
+      method: "POST",
+    });
+  }
+
+  throw new CliError(`Unknown plan-mode command: ${action ?? "(missing)"}\n\n${usage()}`);
+}
+
 async function handleSkills(args: string[]) {
   const action = args[0];
 
@@ -1867,6 +1908,9 @@ export async function runCli(args: string[], io: CliIO = defaultIo) {
         break;
       case "plan":
         result = await handlePlan(args.slice(1));
+        break;
+      case "plan-mode":
+        result = await handlePlanMode(args.slice(1));
         break;
       case "skills":
         result = await handleSkills(args.slice(1));

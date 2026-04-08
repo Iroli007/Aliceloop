@@ -19,6 +19,7 @@ import {
   synthesizeRollingVideoSummary,
   understandAudioFile,
 } from "../../services/multimodalAnalysisService";
+import { STABLE_TOOL_PROVIDER_OPTIONS } from "./toolProviderOptions";
 
 const DEFAULT_BROWSER_SESSION_ID = "default-browser-session";
 const DEFAULT_WAIT_TIMEOUT_SECONDS = 12;
@@ -224,6 +225,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
 
   const tools: ToolSet = {
     browser_navigate: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Open a URL in the current browser tab and return a structured page snapshot with element refs. " +
         "This prefers the visible Aliceloop Desktop Chrome relay when it is healthy, and falls back to PinchTab only when the relay is unavailable.",
@@ -243,6 +245,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_snapshot: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Capture the current page state as JSON, including headings, visible text, and interactive element refs " +
         "from the current browser tab.",
@@ -262,6 +265,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_find: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Find likely interactive elements on the current page by natural-language query, text, placeholder, role, or tag, and return ranked matches without clicking anything.",
       inputSchema: z.object({
@@ -306,6 +310,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_wait: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Wait for text, a specific ref, or a likely element query to appear on the current page, polling snapshots until it shows up or the timeout expires.",
       inputSchema: z.object({
@@ -391,6 +396,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_click: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Click an interactive page element by its ref from browser_snapshot, then return the refreshed page snapshot so the result can be verified immediately.",
       inputSchema: z.object({
@@ -409,6 +415,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_type: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Fill a text field by its ref from browser_snapshot, optionally pressing Enter, and return the refreshed page snapshot so the result can be verified immediately.",
       inputSchema: z.object({
@@ -425,6 +432,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_scroll: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Scroll the current page and return a refreshed snapshot. Use this on lazy-loaded pages such as social feeds, video pages, and comment sections before looking for elements that are not yet in the DOM snapshot.",
       inputSchema: z.object({
@@ -440,6 +448,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_batch: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Run a short sequence of browser actions in one tool call on the current browser tab, such as navigate -> find target -> click/type, and return the final page snapshot plus step summaries.",
       inputSchema: z.object({
@@ -511,6 +520,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_screenshot: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Save a screenshot of the current page or a specific page element to disk. When the DOM snapshot is unclear, you can also ask this tool to analyze the screenshot and return visible UI clues such as bottom input bars, send buttons, and likely next actions.",
       inputSchema: z.object({
@@ -548,6 +558,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_media_probe: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Inspect the current page for visible HTML5 video/audio elements, playback state, subtitle signals, and the best player ref.",
       inputSchema: z.object({
@@ -562,6 +573,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_video_watch_start: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Start or resume a reusable watch session for the current video/audio player so later polls can summarize what the video says and shows.",
       inputSchema: z.object({
@@ -622,6 +634,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_video_watch_poll: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Poll the current or specified watch session to capture fresh subtitle/audio/visual evidence and update the rolling video summary.",
       inputSchema: z.object({
@@ -764,6 +777,7 @@ export function createBrowserTools(sessionId = DEFAULT_BROWSER_SESSION_ID): Tool
     }),
 
     browser_video_watch_stop: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Stop the current or specified watch session and return the final rolling summary collected so far.",
       inputSchema: z.object({

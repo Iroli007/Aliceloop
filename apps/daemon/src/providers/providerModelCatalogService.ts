@@ -1,36 +1,6 @@
-import { recommendToolModel, type ProviderKind, type ProviderTransportKind } from "@aliceloop/runtime-core";
+import { recommendToolModel, type ProviderKind } from "@aliceloop/runtime-core";
 import { getStoredProviderConfig } from "../repositories/providerRepository";
-
-function resolveEffectiveTransport(transport: ProviderTransportKind, model: string) {
-  if (transport !== "auto") {
-    return transport;
-  }
-
-  return model.trim().toLowerCase().startsWith("claude")
-    ? "anthropic"
-    : "openai-compatible";
-}
-
-function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.trim().replace(/\/+$/, "");
-}
-
-function buildModelsEndpoint(baseUrl: string, transport: ProviderTransportKind, model: string) {
-  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
-  const effectiveTransport = resolveEffectiveTransport(transport, model);
-
-  if (effectiveTransport === "anthropic") {
-    if (normalizedBaseUrl.endsWith("/v1/messages")) {
-      return `${normalizedBaseUrl.slice(0, -"/messages".length)}/models`;
-    }
-    if (normalizedBaseUrl.endsWith("/v1")) {
-      return `${normalizedBaseUrl}/models`;
-    }
-    return `${normalizedBaseUrl}/v1/models`;
-  }
-
-  return `${normalizedBaseUrl}/models`;
-}
+import { buildProviderModelsEndpoint, resolveProviderTransport } from "./providerProfile";
 
 function extractModelIds(payload: unknown) {
   const lists = [
@@ -74,8 +44,8 @@ export async function fetchProviderModels(providerId: ProviderKind) {
     throw new Error("provider_api_key_required");
   }
 
-  const endpoint = buildModelsEndpoint(config.baseUrl, config.transport, config.model);
-  const effectiveTransport = resolveEffectiveTransport(config.transport, config.model);
+  const endpoint = buildProviderModelsEndpoint(config.baseUrl, config);
+  const effectiveTransport = resolveProviderTransport(config);
   const response = await fetch(endpoint, {
     headers: effectiveTransport === "anthropic"
       ? {

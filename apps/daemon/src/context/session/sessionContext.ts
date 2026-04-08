@@ -9,7 +9,6 @@ import type { SessionSnapshot } from "@aliceloop/runtime-core";
 import type { SessionProjectBinding } from "@aliceloop/runtime-core";
 import {
   type SkillRouteHints,
-  inferStickySkillIdsFromContext,
   needsBrowserAutomation,
   needsWebFetch,
   needsWebResearch,
@@ -490,10 +489,6 @@ function buildSkillRouteHints(input: {
   });
   const loginOrQrContinuation = looksLikeLoginOrQrContinuationContext(input.carryForwardFacts)
     || looksLikeLoginOrQrContinuationContext(input.worksetConstraints);
-
-  for (const skillId of inferStickySkillIdsFromContext(currentQuery)) {
-    stickySkillIds.add(skillId);
-  }
 
   if (
     input.researchContinuation

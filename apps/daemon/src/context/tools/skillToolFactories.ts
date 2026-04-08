@@ -2,11 +2,13 @@ import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
 import { createChromeRelayTools } from "./chromeRelayTool";
 import { createManagedTaskTools } from "./managedTaskTools";
+import { createTaskDelegationTools } from "./taskDelegationTools";
 import { createViewImageTool } from "./viewImageTool";
 import { createWebFetchTool } from "./webFetchTool";
 import { createWebSearchTool } from "./webSearchTool";
 
-export const BASE_TOOL_NAMES = new Set(["grep", "glob", "read", "write", "edit", "bash"]);
+export const BASE_TOOL_ORDER = ["bash", "read", "write", "glob", "grep", "edit"] as const;
+export const BASE_TOOL_NAMES = new Set<string>(BASE_TOOL_ORDER);
 
 // Lazy-cached managed task tools (includes dynamic runtime_script_*)
 let cachedManagedTaskTools: ToolSet | null = null;
@@ -21,6 +23,7 @@ const cachedBrowserTools = new Map<string, ToolSet>();
 const cachedChromeRelayTools = new Map<string, ToolSet>();
 const cachedWebFetchTools = new Map<string, ToolSet>();
 const cachedWebSearchTools = new Map<string, ToolSet>();
+const cachedTaskDelegationTools = new Map<string, ToolSet>();
 const cachedViewImageTools = new Map<string, ToolSet>();
 
 interface SkillToolFactoryOptions {
@@ -91,6 +94,18 @@ function getViewImageToolSet(sessionId?: string) {
   return tools;
 }
 
+function getTaskDelegationToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedTaskDelegationTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createTaskDelegationTools(sessionId);
+  cachedTaskDelegationTools.set(cacheKey, tools);
+  return tools;
+}
+
 const BROWSER_TOOL_NAMES = new Set([
   "browser_find",
   "browser_navigate",
@@ -123,6 +138,16 @@ const CHROME_RELAY_TOOL_NAMES = new Set([
   "chrome_relay_forward",
 ]);
 
+function pickRequestedTools(toolSet: ToolSet, requestedNames: Iterable<string>) {
+  const picked: ToolSet = {};
+  for (const name of requestedNames) {
+    if (name in toolSet) {
+      picked[name] = toolSet[name];
+    }
+  }
+  return picked;
+}
+
 // Tool name -> factory, each factory returns { [toolName]: tool({...}) }
 const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) => ToolSet>([
   ["browser_find", (options) => getBrowserToolSet(options?.sessionId)],
@@ -139,6 +164,8 @@ const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) =
   ["browser_video_watch_stop", (options) => getBrowserToolSet(options?.sessionId)],
   ["document_ingest", () => ({ document_ingest: getManagedTaskTools().document_ingest })],
   ["review_coach", () => ({ review_coach: getManagedTaskTools().review_coach })],
+  ["task_delegation", (options) => ({ task_delegation: getTaskDelegationToolSet(options?.sessionId).task_delegation })],
+  ["task_output", (options) => ({ task_output: getTaskDelegationToolSet(options?.sessionId).task_output })],
   ["view_image", (options) => getViewImageToolSet(options?.sessionId)],
   ["web_fetch", (options) => getWebFetchToolSet(options?.sessionId)],
   ["web_search", (options) => getWebSearchToolSet(options?.sessionId)],
@@ -156,14 +183,14 @@ function resolveSkillToolSelection(requestedNames: Set<string>, options?: SkillT
 
     if (BROWSER_TOOL_NAMES.has(name)) {
       if (!browserToolsAttached) {
-        Object.assign(tools, getBrowserToolSet(options?.sessionId));
+        Object.assign(tools, pickRequestedTools(getBrowserToolSet(options?.sessionId), requestedNames));
         browserToolsAttached = true;
       }
       continue;
     }
 
     if (CHROME_RELAY_TOOL_NAMES.has(name)) {
-      Object.assign(tools, getChromeRelayToolSet(options?.sessionId));
+      Object.assign(tools, pickRequestedTools(getChromeRelayToolSet(options?.sessionId), requestedNames));
       continue;
     }
 
@@ -218,5 +245,6 @@ export function resetSkillToolCache() {
   cachedChromeRelayTools.clear();
   cachedWebFetchTools.clear();
   cachedWebSearchTools.clear();
+  cachedTaskDelegationTools.clear();
   cachedViewImageTools.clear();
 }

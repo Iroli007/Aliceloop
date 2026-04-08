@@ -1,19 +1,23 @@
 import {
+  extractStructuredPlanDraft,
   reasoningEffortDefinitions,
   type Attachment,
   type ProviderTransportKind,
   type SessionEvent,
+  type SessionFocusState,
   type SessionMessage,
   type ReasoningEffort,
+  type SessionRollingSummary,
   type ToolApproval,
+  type ToolApprovalDecisionOption,
 } from "@aliceloop/runtime-core";
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useProviderConfigs } from "../providers/useProviderConfigs";
 import { settingsNav } from "./nav";
 import { SourceLinksSection } from "./SourceLinks";
 import { TurnMetaBadge } from "./TurnMetaBadge";
 import { ToolWorkflowCard, buildToolSourceLinks, type ToolSourceLink } from "./ToolWorkflowCard";
-import { type ToolWorkflowEntry, useShellConversation } from "./useShellConversation";
+import { type ShellPlanRecord, type ToolWorkflowEntry, useShellConversation } from "./useShellConversation";
 import { useRuntimeCatalogs } from "./useRuntimeCatalogs";
 import { useRuntimeSettings } from "./useRuntimeSettings";
 import { WindowControls } from "./WindowControls";
@@ -138,6 +142,96 @@ function formatThreadId(threadId: string) {
   return `${threadId.slice(0, 8)}…${threadId.slice(-4)}`;
 }
 
+function normalizeQuickReplyOption(value: string, side: "left" | "right") {
+  let next = value.trim();
+  next = next.replace(/^\d+[.)、]\s*/, "");
+  next = next.replace(/^(平台|方案|方向|重点|范围|目标)\s*[-：:]\s*/u, "");
+  if (side === "left") {
+    next = next.replace(/^(主要是|主要|优先|偏向|先做|先支持|只做|只支持|仅做|仅支持)\s*/u, "");
+  } else {
+    next = next.replace(/^(也需要|也要|同时需要|同时支持|也支持|另外|还要|还需要|顺便)\s*/u, "");
+  }
+  next = next.replace(/\s*支持$/u, "");
+  next = next.replace(/\s*为主$/u, "");
+  next = next.replace(/\s+/g, " ");
+  return next.trim();
+}
+
+function compactQuickReplyOption(value: string) {
+  let next = value.trim();
+  next = next.replace(/^\d+[.)、]\s*/, "");
+  next = next.replace(/^(?:[-*•]\s*)/u, "");
+  next = next.split(/\s*[—–-]\s*/u, 1)[0] ?? next;
+  next = next.replace(/[（(].*$/u, "");
+  next = next.replace(/\s+/gu, " ").trim();
+  return next;
+}
+
+function extractQuickReplyOptions(content: string) {
+  const lines = content
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const choiceQuestion = [...lines]
+    .reverse()
+    .find((line) => /[？?]/u.test(line) && line.includes("还是"));
+
+  if (choiceQuestion) {
+    const focusedLine = (choiceQuestion.split(/\s[-—–:：]\s/u).at(-1) ?? choiceQuestion)
+      .replace(/[？?]+\s*$/u, "")
+      .trim();
+    const [leftRaw, rightRaw] = focusedLine.split(/\s*还是\s*/u, 2);
+    if (leftRaw && rightRaw) {
+      const left = normalizeQuickReplyOption(leftRaw, "left");
+      const right = normalizeQuickReplyOption(rightRaw, "right");
+      const options = /^(也|同时|另外|还)/u.test(rightRaw.trim())
+        ? [left, right, left && right ? `${left} + ${right}` : right]
+        : [left, right];
+      return [...new Set(options.map((option) => option.trim()).filter((option) => option.length > 0 && option.length <= 32))].slice(0, 3);
+    }
+  }
+
+  const optionGroups: string[][] = [];
+  let currentGroup: string[] = [];
+  for (const line of lines) {
+    const bulletMatch = line.match(/^\s*(?:[-*•]|\d+[.)、])\s*(.+?)\s*$/u);
+    if (bulletMatch) {
+      const option = compactQuickReplyOption(bulletMatch[1] ?? "");
+      if (option.length > 0 && option.length <= 32) {
+        currentGroup.push(option);
+      }
+      continue;
+    }
+
+    if (currentGroup.length >= 2) {
+      optionGroups.push(currentGroup);
+    }
+    currentGroup = [];
+  }
+  if (currentGroup.length >= 2) {
+    optionGroups.push(currentGroup);
+  }
+
+  if (optionGroups.length > 0) {
+    return [...new Set(optionGroups[0] ?? [])].slice(0, 4);
+  }
+
+  const listOptions = lines
+    .map((line) => {
+      const match = line.match(/^\s*(?:[-*•]|\d+[.)、])\s*(.+?)\s*$/u);
+      return match ? compactQuickReplyOption(match[1] ?? "") : null;
+    })
+    .filter((line): line is string => Boolean(line))
+    .filter((line) => line.length > 0 && line.length <= 40);
+
+  return [...new Set(listOptions)].slice(0, 3);
+}
+
+function isQuestionApproval(approval: ToolApproval) {
+  return approval.kind === "question" && approval.question;
+}
+
 function formatApprovalTime(isoString: string | null) {
   if (!isoString) {
     return "";
@@ -154,6 +248,136 @@ function formatApprovalTime(isoString: string | null) {
     second: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+interface PlanMessageMeta {
+  title: string;
+  planId: string | null;
+  status: string | null;
+  bodyContent: string;
+  previewContent: string;
+  isExpandable: boolean;
+}
+
+function buildPlanPreviewContent(bodyContent: string) {
+  const lines = bodyContent
+    .split(/\r?\n/u)
+    .map((line) => line.trimEnd());
+  const preview = lines.slice(0, 8).join("\n").trim();
+  if (!preview) {
+    return bodyContent;
+  }
+  return preview.length < bodyContent.trim().length ? `${preview}\n\n…` : preview;
+}
+
+function ChevronToggleIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d={expanded ? "M4.5 10L8 6.5L11.5 10" : "M4.5 6L8 9.5L11.5 6"}
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function extractPlanMessageMeta(content: string): PlanMessageMeta | null {
+  const planDraft = extractStructuredPlanDraft(content);
+  if (!planDraft) {
+    return null;
+  }
+  const bodyContent = planDraft.bodyContent;
+  const lineCount = bodyContent.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
+
+  return {
+    title: planDraft.title,
+    planId: planDraft.planId,
+    status: planDraft.status,
+    bodyContent,
+    previewContent: buildPlanPreviewContent(bodyContent),
+    isExpandable: bodyContent.length > 560 || lineCount > 10,
+  };
+}
+
+function buildActivePlanBody(plan: ShellPlanRecord) {
+  const sections: string[] = [];
+
+  if (plan.goal.trim()) {
+    sections.push(`## Summary\n\n${plan.goal.trim()}`);
+  }
+
+  if (plan.steps.length > 0) {
+    sections.push(`## Implementation Steps\n\n${plan.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}`);
+  }
+
+  if (sections.length === 0) {
+    sections.push("## Summary\n\n正在整理需求与实施步骤…");
+  }
+
+  return sections.join("\n\n");
+}
+
+function hasRenderablePlanContent(plan: ShellPlanRecord | null) {
+  if (!plan) {
+    return false;
+  }
+
+  return plan.goal.trim().length > 0 && plan.steps.length > 0;
+}
+
+function shouldRenderActivePlanArtifact(
+  plan: ShellPlanRecord | null,
+  isPlanning: boolean,
+  messages: import("@aliceloop/runtime-core").SessionMessage[],
+  enteredAt: string | null,
+) {
+  if (!plan || !hasRenderablePlanContent(plan)) {
+    return false;
+  }
+
+  if (!isPlanning) {
+    return plan.status === "approved";
+  }
+
+  if (!enteredAt) {
+    return false;
+  }
+
+  const userMessagesSinceEntered = messages.filter((message) => {
+    return message.role === "user" && message.createdAt >= enteredAt && message.content.trim().length > 0;
+  }).length;
+
+  return userMessagesSinceEntered >= 3;
+}
+
+function buildActivePlanMeta(
+  plan: ShellPlanRecord | null,
+  isPlanning: boolean,
+  messages: import("@aliceloop/runtime-core").SessionMessage[],
+  enteredAt: string | null,
+): PlanMessageMeta | null {
+  if (!shouldRenderActivePlanArtifact(plan, isPlanning, messages, enteredAt)) {
+    return null;
+  }
+
+  if (!plan) {
+    return null;
+  }
+
+  const bodyContent = buildActivePlanBody(plan);
+  const lineCount = bodyContent.split(/\r?\n/u).filter((line) => line.trim().length > 0).length;
+
+  return {
+    title: plan.title,
+    planId: plan.id,
+    status: isPlanning ? "计划进行中" : plan.status,
+    bodyContent,
+    previewContent: buildPlanPreviewContent(bodyContent),
+    isExpandable: bodyContent.length > 560 || lineCount > 10,
+  };
 }
 
 function isDeleteToolApproval(approval: ToolApproval) {
@@ -188,6 +412,14 @@ function interpretDeleteApprovalReply(content: string): "approve" | "reject" | n
   }
 
   return null;
+}
+
+function formatResolvedApprovalStatus(approval: ToolApproval) {
+  if (approval.status === "approved") {
+    return approval.decisionOption === "allow_always" ? "已永久允许" : "已允许";
+  }
+
+  return approval.decisionOption === "deny_always" ? "已永久拒绝" : "已拒绝";
 }
 
 function dedupeToolSourceLinks(links: ToolSourceLink[]) {
@@ -351,6 +583,12 @@ type TimelineEntry =
       } | null;
     }
   | {
+      kind: "active-plan";
+      planMeta: PlanMessageMeta;
+      sortSeq: null;
+      sortTime: string;
+    }
+  | {
       kind: "approval";
       approval: ToolApproval;
       sortSeq: number | null;
@@ -398,6 +636,10 @@ type TimelineBlock =
       groupKey: string;
       groupLabel: string;
       tools: ToolWorkflowEntry[];
+    }
+  | {
+      kind: "active-plan";
+      planMeta: PlanMessageMeta;
     };
 
 function buildTimeline(
@@ -405,6 +647,8 @@ function buildTimeline(
   resolvedApprovals: ToolApproval[],
   toolWorkflowEntries: ToolWorkflowEntry[],
   sessionEvents: SessionEvent[],
+  activePlanMeta: PlanMessageMeta | null,
+  activePlanUpdatedAt: string | null,
 ): TimelineBlock[] {
   const messageSeqById = new Map<string, number>();
   const approvalSeqById = new Map<string, number>();
@@ -443,6 +687,9 @@ function buildTimeline(
   }
 
   for (const approval of resolvedApprovals) {
+    if (isQuestionApproval(approval)) {
+      continue;
+    }
     entries.push({
       kind: "approval",
       approval,
@@ -457,6 +704,15 @@ function buildTimeline(
       tool,
       sortSeq: tool.createdSeq,
       sortTime: tool.createdAt,
+    });
+  }
+
+  if (activePlanMeta && activePlanUpdatedAt) {
+    entries.push({
+      kind: "active-plan",
+      planMeta: activePlanMeta,
+      sortSeq: null,
+      sortTime: activePlanUpdatedAt,
     });
   }
 
@@ -486,6 +742,7 @@ function buildTimeline(
       message: 0,
       approval: 1,
       tool: 2,
+      "active-plan": 3,
     };
 
     return kindOrder[a.kind] - kindOrder[b.kind];
@@ -556,6 +813,15 @@ function buildTimeline(
         kind: "message",
         message: entry.message,
         sourceLinks: entry.sourceLinks,
+      });
+      continue;
+    }
+
+    if (entry.kind === "active-plan") {
+      flushAssistantTurn();
+      blocks.push({
+        kind: "active-plan",
+        planMeta: entry.planMeta,
       });
       continue;
     }
@@ -710,6 +976,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [composerNotice, setComposerNotice] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(176);
   const [composerReserveSpace, setComposerReserveSpace] = useState(192);
+  const [expandedPlanMessageIds, setExpandedPlanMessageIds] = useState<Set<string>>(() => new Set());
+  const [isActivePlanExpanded, setIsActivePlanExpanded] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [queuedAttachments, setQueuedAttachments] = useState<Attachment[]>([]);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
@@ -717,6 +985,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
+  const [selectedQuestionOptions, setSelectedQuestionOptions] = useState<string[]>([]);
   const approvalDockRef = useRef<HTMLDivElement | null>(null);
   const [approvalAttachments, setApprovalAttachments] = useState<Attachment[]>([]);
   const motionTimerRef = useRef<number | null>(null);
@@ -737,11 +1006,121 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
   const enabledProvider = configuredProviders.find((item) => item.enabled)
     ?? providers.find((item) => item.enabled) ?? null;
-  const activeToolApproval = conversation.pendingToolApprovals[0] ?? null;
+  const activeToolApproval = useMemo(() => {
+    if (conversation.pendingCommandApprovals.length === 0) {
+      return null;
+    }
+
+    const pendingApprovalsByToolCallId = new Map(
+      conversation.pendingCommandApprovals.flatMap((approval) => (
+        typeof approval.toolCallId === "string" && approval.toolCallId.length > 0
+          ? [[approval.toolCallId, approval] as const]
+          : []
+      )),
+    );
+
+    for (let index = conversation.toolWorkflowEntries.length - 1; index >= 0; index -= 1) {
+      const entry = conversation.toolWorkflowEntries[index];
+      if (entry.status !== "approval-requested") {
+        continue;
+      }
+
+      const matchingApproval = pendingApprovalsByToolCallId.get(entry.toolCallId);
+      if (matchingApproval) {
+        return matchingApproval;
+      }
+    }
+
+    return conversation.pendingCommandApprovals[0] ?? null;
+  }, [conversation.pendingCommandApprovals, conversation.toolWorkflowEntries]);
+  const activePlanMeta = useMemo(
+    () => buildActivePlanMeta(
+      conversation.activePlan,
+      conversation.planMode.active,
+      conversation.messages,
+      conversation.planMode.enteredAt,
+    ),
+    [conversation.activePlan, conversation.planMode.active, conversation.messages, conversation.planMode.enteredAt],
+  );
+  const timelineBlocks = useMemo(
+    () => buildTimeline(
+      conversation.messages,
+      conversation.resolvedToolApprovals,
+      conversation.toolWorkflowEntries,
+      conversation.sessionEvents,
+      activePlanMeta,
+      conversation.activePlan?.updatedAt ?? null,
+    ),
+    [
+      conversation.messages,
+      conversation.resolvedToolApprovals,
+      conversation.toolWorkflowEntries,
+      conversation.sessionEvents,
+      activePlanMeta,
+      conversation.activePlan?.updatedAt,
+    ],
+  );
+  const planMetaByMessageId = useMemo(() => {
+    if (activePlanMeta) {
+      return new Map<string, PlanMessageMeta>();
+    }
+
+    const next = new Map<string, PlanMessageMeta>();
+    for (const message of conversation.messages) {
+      if (message.role !== "assistant") {
+        continue;
+      }
+      const planMeta = extractPlanMessageMeta(message.content);
+      if (planMeta) {
+        next.set(message.id, planMeta);
+      }
+    }
+    return next;
+  }, [conversation.messages, activePlanMeta]);
+  const activeQuestionApproval = useMemo(() => {
+    return conversation.pendingQuestionApprovals[0] ?? null;
+  }, [conversation.pendingQuestionApprovals]);
+  const activeQuestionPrompt = activeQuestionApproval?.question ?? null;
   const activeDeleteApproval = activeToolApproval ? isDeleteToolApproval(activeToolApproval) : false;
   const composerHasText = composerDraft.trim().length > 0;
-  const composerHasSendableContent = composerHasText || queuedAttachments.length > 0;
+  const composerHasStructuredSelection = Boolean(activeQuestionPrompt?.multiSelect && selectedQuestionOptions.length > 0);
+  const composerHasSendableContent = composerHasText || queuedAttachments.length > 0 || composerHasStructuredSelection;
   const isComposerBusy = conversation.isResponding || conversation.isAwaitingToolApproval;
+  const latestVisibleMessage = useMemo(() => {
+    return [...conversation.messages]
+      .reverse()
+      .find((message) => message.role !== "system" && message.content.trim().length > 0) ?? null;
+  }, [conversation.messages]);
+
+  useEffect(() => {
+    setIsActivePlanExpanded(false);
+  }, [activePlanMeta?.planId, conversation.activePlan?.updatedAt]);
+  const composerQuickReplies = useMemo(() => {
+    if (
+      activeQuestionPrompt
+      || conversation.pending
+      || conversation.pendingUpload
+      || isComposerBusy
+      || composerHasText
+      || queuedAttachments.length > 0
+    ) {
+      return [];
+    }
+
+    if (!latestVisibleMessage || latestVisibleMessage.role !== "assistant") {
+      return [];
+    }
+
+    return extractQuickReplyOptions(latestVisibleMessage.content);
+  }, [
+    composerHasText,
+    activeQuestionPrompt,
+    conversation.pending,
+    conversation.pendingUpload,
+    isComposerBusy,
+    latestVisibleMessage,
+    queuedAttachments.length,
+  ]);
   const installedMcpServers = runtimeCatalogs.mcpServers.filter((server) => server.installStatus === "installed");
   const visibleMcpServers = (mcpView === "installed" ? installedMcpServers : runtimeCatalogs.mcpServers)
     .slice()
@@ -784,6 +1163,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [previewImage]);
+
+  useEffect(() => {
+    setSelectedQuestionOptions([]);
+  }, [activeQuestionApproval?.id]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -949,7 +1332,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [conversation.pendingToolApprovals.length]);
+  }, [conversation.pendingCommandApprovals.length]);
 
   // Handle paste (image drop) on approval dock
   useEffect(() => {
@@ -1134,7 +1517,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
   async function submitComposerDraft() {
     const content = composerDraft.trim();
-    if (!content && queuedAttachments.length === 0) {
+    if (!content && queuedAttachments.length === 0 && !composerHasStructuredSelection) {
       return;
     }
 
@@ -1160,7 +1543,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }
 
     setComposerNotice(null);
-    const result = await conversation.sendMessage(content, queuedAttachments.map((attachment) => attachment.id));
+    const outboundContent = content || (composerHasStructuredSelection ? selectedQuestionOptions.join("、") : "");
+    const result = await conversation.sendMessage(outboundContent, queuedAttachments.map((attachment) => attachment.id));
     if (!result.ok) {
       setComposerNotice(result.error ?? "发送失败");
       return;
@@ -1168,6 +1552,45 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
     setComposerDraft("");
     setQueuedAttachments([]);
+    setSelectedQuestionOptions([]);
+  }
+
+  async function handleQuickReply(option: string) {
+    if (conversation.pending || conversation.pendingUpload || isComposerBusy) {
+      return;
+    }
+
+    setComposerNotice(null);
+    const result = await conversation.sendMessage(option);
+    if (!result.ok) {
+      setComposerDraft(option);
+      setComposerNotice(result.error ?? "发送失败");
+    }
+  }
+
+  async function handleQuestionOptionClick(option: string) {
+    if (!activeQuestionPrompt) {
+      return;
+    }
+
+    if (activeQuestionPrompt.multiSelect) {
+      setSelectedQuestionOptions((current) => (
+        current.includes(option)
+          ? current.filter((item) => item !== option)
+          : [...current, option]
+      ));
+      return;
+    }
+
+    setComposerNotice(null);
+    const result = await conversation.sendMessage(option);
+    if (!result.ok) {
+      setComposerDraft(option);
+      setComposerNotice(result.error ?? "发送失败");
+      return;
+    }
+
+    setSelectedQuestionOptions([]);
   }
 
   async function handleComposerPrimaryAction() {
@@ -1249,7 +1672,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     setMcpNotice(`${result.server?.label ?? serverId} 已从 Aliceloop 的 MCP 已安装列表移除。`);
   }
 
-  async function resolveToolApproval(action: "approve" | "reject") {
+  async function resolveToolApproval(
+    action: "approve" | "reject",
+    decisionOption?: ToolApprovalDecisionOption,
+  ) {
     if (!activeToolApproval) {
       return;
     }
@@ -1257,13 +1683,55 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     setComposerNotice(null);
     const result =
       action === "approve"
-        ? await conversation.approveToolApproval(activeToolApproval.id)
-        : await conversation.rejectToolApproval(activeToolApproval.id);
+        ? await conversation.approveToolApproval(activeToolApproval.id, decisionOption)
+        : await conversation.rejectToolApproval(activeToolApproval.id, decisionOption);
 
     if (!result.ok) {
       setComposerNotice(result.error ?? "命令审批失败");
     }
     setApprovalAttachments([]);
+  }
+
+  async function handleExitPlanMode() {
+    setComposerNotice(null);
+    if (conversation.isResponding) {
+      const stopResult = await conversation.stopResponse();
+      if (!stopResult.ok && stopResult.error !== "当前没有正在输出的 agent。") {
+        setComposerNotice(stopResult.error ?? "停止失败");
+        return;
+      }
+    }
+    const result = await conversation.exitPlanMode();
+    if (!result.ok) {
+      setComposerNotice(result.error ?? "退出计划模式失败");
+    }
+  }
+
+  async function handleEnterPlanMode() {
+    setComposerNotice(null);
+    if (conversation.isResponding) {
+      const stopResult = await conversation.stopResponse();
+      if (!stopResult.ok && stopResult.error !== "当前没有正在输出的 agent。") {
+        setComposerNotice(stopResult.error ?? "停止失败");
+        return;
+      }
+    }
+    const result = await conversation.enterPlanMode();
+    if (!result.ok) {
+      setComposerNotice(result.error ?? "进入计划模式失败");
+    }
+  }
+
+  function togglePlanExpansion(messageId: string) {
+    setExpandedPlanMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
   }
 
   async function handleCopyMessage(messageId: string, content: string) {
@@ -1380,6 +1848,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       : conversation.stoppingResponse
         ? "正在停止等待中的命令审批"
         : "等待命令确认，点击可停止"
+    : conversation.isAwaitingUserQuestion && activeQuestionPrompt?.multiSelect
+      ? composerHasStructuredSelection || composerHasText
+        ? "发送回答"
+        : "选择或输入回答"
     : conversation.pending
       ? "发送消息"
     : conversation.isResponding
@@ -1405,18 +1877,34 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           <button
             type="button"
             className="approval-card__btn approval-card__btn--reject"
-            onClick={() => void resolveToolApproval("reject")}
+            onClick={() => void resolveToolApproval("reject", "deny_once")}
             disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
           >
-            拒绝
+            拒绝一次
+          </button>
+          <button
+            type="button"
+            className="approval-card__btn approval-card__btn--reject"
+            onClick={() => void resolveToolApproval("reject", "deny_always")}
+            disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
+          >
+            总是拒绝
           </button>
           <button
             type="button"
             className="approval-card__btn approval-card__btn--approve"
-            onClick={() => void resolveToolApproval("approve")}
+            onClick={() => void resolveToolApproval("approve", "allow_once")}
             disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
           >
-            {conversation.resolvingToolApprovalId === activeToolApproval.id ? "处理中…" : "允许执行"}
+            允许一次
+          </button>
+          <button
+            type="button"
+            className="approval-card__btn approval-card__btn--approve"
+            onClick={() => void resolveToolApproval("approve", "allow_always")}
+            disabled={conversation.resolvingToolApprovalId === activeToolApproval.id}
+          >
+            {conversation.resolvingToolApprovalId === activeToolApproval.id ? "处理中…" : "总是允许"}
           </button>
         </div>
       </div>
@@ -1477,9 +1965,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             setQueuedAttachments([]);
                             conversation.selectSession(thread.id);
                           }}
-                        >
+                          >
                           <div className="sidebar__thread-row">
-                            <span className="sidebar__thread-title">{thread.title}</span>
+                            <span className="sidebar__thread-title">
+                              {thread.title}
+                              {thread.planMode?.active ? <span className="sidebar__thread-plan-marker">计划中</span> : null}
+                            </span>
                             <span className="sidebar__thread-id">{formatThreadId(thread.id)}</span>
                           </div>
                           <div className="sidebar__thread-preview">
@@ -1542,12 +2033,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           <section ref={messagesViewportRef} className="workspace">
             <div className={`workspace__thread${activeToolApproval ? " workspace__thread--approval-active" : ""}`}>
               <div ref={messagesContentRef} className="workspace__messages">
-                {buildTimeline(
-                  conversation.messages,
-                conversation.resolvedToolApprovals,
-                  conversation.toolWorkflowEntries,
-                  conversation.sessionEvents,
-                ).map((entry) => {
+                {timelineBlocks.map((entry) => {
                   if (entry.kind === "assistant-turn") {
                     return (
                       <section
@@ -1562,17 +2048,51 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
                           const message = item.message;
                           const assistantSources = message.role === "assistant" && item.sourceLinks.length > 0 ? item.sourceLinks : null;
+                          const planMeta = message.role === "assistant" ? (planMetaByMessageId.get(message.id) ?? null) : null;
+                          const isPlanExpanded = planMeta ? expandedPlanMessageIds.has(message.id) : false;
 
                           return (
                             <article
                               key={`${message.id}::${itemIndex}`}
-                              className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
+                              className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}${planMeta ? " workspace__message--plan" : ""}`}
                             >
-                              <div className="workspace__message-body">
-                                <MessageContent
-                                  content={message.content}
-                                  renderMarkdown={message.role === "assistant" || message.role === "system"}
-                                />
+                              <div className={`workspace__message-body${planMeta ? " workspace__message-body--plan" : ""}`}>
+                                {planMeta ? (
+                                  <div className="workspace__plan-card-head">
+                                    <div className="workspace__plan-card-copy">
+                                      <span className="workspace__plan-card-eyebrow">
+                                        {planMeta.planId ? `计划草案 · #${planMeta.planId.slice(0, 8)}` : "计划草案"}
+                                      </span>
+                                      <strong className="workspace__plan-card-title">{planMeta.title}</strong>
+                                    </div>
+                                    <div className="workspace__plan-card-meta">
+                                      {planMeta.isExpandable ? (
+                                        <button
+                                          type="button"
+                                          className="workspace__plan-chip workspace__plan-chip--icon"
+                                          onClick={() => togglePlanExpansion(message.id)}
+                                          aria-label={isPlanExpanded ? "收起计划" : "展开计划"}
+                                        >
+                                          <ChevronToggleIcon expanded={isPlanExpanded} />
+                                        </button>
+                                      ) : null}
+                                      <button
+                                        type="button"
+                                        className={`workspace__plan-chip workspace__plan-chip--copy${copiedMessageId === message.id ? " workspace__plan-chip--copied" : ""}`}
+                                        onClick={() => void handleCopyMessage(message.id, planMeta.bodyContent)}
+                                        aria-label="复制计划"
+                                      >
+                                        {copiedMessageId === message.id ? "已复制" : "复制"}
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : null}
+                                <div className={planMeta ? `workspace__plan-card-content${planMeta.isExpandable && !isPlanExpanded ? " workspace__plan-card-content--collapsed" : ""}` : undefined}>
+                                  <MessageContent
+                                    content={planMeta ? (isPlanExpanded ? planMeta.bodyContent : planMeta.previewContent) : message.content}
+                                    renderMarkdown={message.role === "assistant" || message.role === "system"}
+                                  />
+                                </div>
                               </div>
                               {message.attachments.length > 0 ? (
                                 <>
@@ -1618,23 +2138,25 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                                   ) : null}
                                 </>
                               ) : null}
-                              <button
-                                type="button"
-                                className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
-                                onClick={() => void handleCopyMessage(message.id, message.content)}
-                                aria-label="复制"
-                              >
-                                {copiedMessageId === message.id ? (
-                                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                                    <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                  </svg>
-                                ) : (
-                                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                                    <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
-                                    <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                                  </svg>
-                                )}
-                              </button>
+                              {planMeta ? null : (
+                                <button
+                                  type="button"
+                                  className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
+                                  onClick={() => void handleCopyMessage(message.id, message.content)}
+                                  aria-label="复制"
+                                >
+                                  {copiedMessageId === message.id ? (
+                                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                      <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                  ) : (
+                                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                      <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                                      <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                                    </svg>
+                                  )}
+                                </button>
+                              )}
                               {assistantSources ? (
                                 <SourceLinksSection
                                   links={assistantSources}
@@ -1675,6 +2197,53 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     return <ToolWorkflowCard key={`tool-${entry.tool.toolCallId}`} entry={entry.tool} />;
                   }
 
+                  if (entry.kind === "active-plan") {
+                    return (
+                      <article
+                        key={`plan-artifact-${entry.planMeta.planId ?? "draft"}`}
+                        className="workspace__message workspace__message--assistant workspace__message--plan"
+                      >
+                        <div className="workspace__message-body workspace__message-body--plan">
+                          <div className="workspace__plan-card-head">
+                            <div className="workspace__plan-card-copy">
+                              <span className="workspace__plan-card-eyebrow">
+                                {(conversation.planMode.active ? "当前计划" : "执行计划")
+                                  + (entry.planMeta.planId ? ` · #${entry.planMeta.planId.slice(0, 8)}` : "")}
+                              </span>
+                              <strong className="workspace__plan-card-title">{entry.planMeta.title}</strong>
+                            </div>
+                            <div className="workspace__plan-card-meta">
+                              {entry.planMeta.isExpandable ? (
+                                <button
+                                  type="button"
+                                  className="workspace__plan-chip workspace__plan-chip--icon"
+                                  onClick={() => setIsActivePlanExpanded((current) => !current)}
+                                  aria-label={isActivePlanExpanded ? "收起计划" : "展开计划"}
+                                >
+                                  <ChevronToggleIcon expanded={isActivePlanExpanded} />
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                className={`workspace__plan-chip workspace__plan-chip--copy${copiedMessageId === entry.planMeta.planId ? " workspace__plan-chip--copied" : ""}`}
+                                onClick={() => void handleCopyMessage(entry.planMeta.planId ?? "active-plan", entry.planMeta.bodyContent)}
+                                aria-label="复制计划"
+                              >
+                                {copiedMessageId === entry.planMeta.planId ? "已复制" : "复制"}
+                              </button>
+                            </div>
+                          </div>
+                          <div className={`workspace__plan-card-content${entry.planMeta.isExpandable && !isActivePlanExpanded ? " workspace__plan-card-content--collapsed" : ""}`}>
+                            <MessageContent
+                              content={isActivePlanExpanded ? entry.planMeta.bodyContent : entry.planMeta.previewContent}
+                              renderMarkdown
+                            />
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  }
+
                   if (entry.kind === "approval") {
                     const approval = entry.approval;
                     return (
@@ -1682,7 +2251,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                         <span className="approval-resolved__tool">{approval.title}</span>
                         <span className="approval-resolved__command">{approval.commandLine}</span>
                         <span className={`approval-resolved__status approval-resolved__status--${approval.status}`}>
-                          {approval.status === "approved" ? "已批准" : "已拒绝"}
+                          {formatResolvedApprovalStatus(approval)}
                         </span>
                         <span className="approval-resolved__time">{formatApprovalTime(approval.resolvedAt)}</span>
                       </div>
@@ -1690,17 +2259,51 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   }
 
                   const message = entry.message;
+                  const planMeta = message.role === "assistant" ? (planMetaByMessageId.get(message.id) ?? null) : null;
+                  const isPlanExpanded = planMeta ? expandedPlanMessageIds.has(message.id) : false;
 
                   return (
                     <article
                       key={message.id}
-                      className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}`}
+                      className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}${planMeta ? " workspace__message--plan" : ""}`}
                     >
-                      <div className="workspace__message-body">
-                        <MessageContent
-                          content={message.content}
-                          renderMarkdown={message.role === "assistant" || message.role === "system"}
-                        />
+                      <div className={`workspace__message-body${planMeta ? " workspace__message-body--plan" : ""}`}>
+                        {planMeta ? (
+                          <div className="workspace__plan-card-head">
+                            <div className="workspace__plan-card-copy">
+                              <span className="workspace__plan-card-eyebrow">
+                                {planMeta.planId ? `计划草案 · #${planMeta.planId.slice(0, 8)}` : "计划草案"}
+                              </span>
+                              <strong className="workspace__plan-card-title">{planMeta.title}</strong>
+                            </div>
+                            <div className="workspace__plan-card-meta">
+                              {planMeta.isExpandable ? (
+                                <button
+                                  type="button"
+                                  className="workspace__plan-chip workspace__plan-chip--icon"
+                                  onClick={() => togglePlanExpansion(message.id)}
+                                  aria-label={isPlanExpanded ? "收起计划" : "展开计划"}
+                                >
+                                  <ChevronToggleIcon expanded={isPlanExpanded} />
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                className={`workspace__plan-chip workspace__plan-chip--copy${copiedMessageId === message.id ? " workspace__plan-chip--copied" : ""}`}
+                                onClick={() => void handleCopyMessage(message.id, planMeta.bodyContent)}
+                                aria-label="复制计划"
+                              >
+                                {copiedMessageId === message.id ? "已复制" : "复制"}
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                        <div className={planMeta ? `workspace__plan-card-content${planMeta.isExpandable && !isPlanExpanded ? " workspace__plan-card-content--collapsed" : ""}` : undefined}>
+                          <MessageContent
+                            content={planMeta ? (isPlanExpanded ? planMeta.bodyContent : planMeta.previewContent) : message.content}
+                            renderMarkdown={message.role === "assistant" || message.role === "system"}
+                          />
+                        </div>
                       </div>
                       {message.attachments.length > 0 ? (
                         <>
@@ -1746,23 +2349,25 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                           ) : null}
                         </>
                       ) : null}
-                      <button
-                        type="button"
-                        className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
-                        onClick={() => void handleCopyMessage(message.id, message.content)}
-                        aria-label="复制"
-                      >
-                        {copiedMessageId === message.id ? (
-                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                            <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        ) : (
-                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                            <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
-                            <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                          </svg>
-                        )}
-                      </button>
+                      {planMeta ? null : (
+                        <button
+                          type="button"
+                          className={`workspace__message-copy${copiedMessageId === message.id ? " workspace__message-copy--copied" : ""}`}
+                          onClick={() => void handleCopyMessage(message.id, message.content)}
+                          aria-label="复制"
+                        >
+                          {copiedMessageId === message.id ? (
+                            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                              <path d="M2 7l3.5 3.5L12 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          ) : (
+                            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                              <rect x="4.5" y="4.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                              <path d="M3.5 9.5H3a1.5 1.5 0 01-1.5-1.5V3a1.5 1.5 0 011.5-1.5h5a1.5 1.5 0 011.5 1.5v.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                            </svg>
+                          )}
+                        </button>
+                      )}
                     </article>
                   );
                 })}
@@ -1841,6 +2446,63 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                       ×
                     </button>
                   </div>
+                ))}
+              </div>
+            ) : null}
+            {activeQuestionPrompt ? (
+              <div className="composer__question-card" role="group" aria-label={activeQuestionPrompt.header}>
+                <div className="composer__question-copy">
+                  <span className="composer__question-header">{activeQuestionPrompt.header}</span>
+                  <div className="composer__question-text">{activeQuestionPrompt.question}</div>
+                </div>
+                <div className="composer__quick-replies" role="list" aria-label={activeQuestionPrompt.question}>
+                  {activeQuestionPrompt.options.map((option) => {
+                    const selected = selectedQuestionOptions.includes(option.label);
+                    return (
+                      <button
+                        key={option.label}
+                        type="button"
+                        className={`composer__quick-reply${selected ? " composer__quick-reply--selected" : ""}`}
+                        onClick={() => { void handleQuestionOptionClick(option.label); }}
+                        disabled={conversation.pending || conversation.pendingUpload || conversation.isAwaitingToolApproval}
+                        title={option.description ?? option.label}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {activeQuestionPrompt.multiSelect ? (
+                  <div className="composer__question-hint">
+                    <span>可多选，也可以直接输入自己的答案。</span>
+                    {selectedQuestionOptions.length > 0 ? (
+                      <button
+                        type="button"
+                        className="composer__question-submit"
+                        onClick={() => { void submitComposerDraft(); }}
+                        disabled={conversation.pending || conversation.pendingUpload}
+                      >
+                        发送已选 {selectedQuestionOptions.length}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="composer__question-hint">也可以忽略选项，直接输入自己的答案。</div>
+                )}
+              </div>
+            ) : null}
+            {composerQuickReplies.length > 0 ? (
+              <div className="composer__quick-replies" role="list" aria-label="建议回复">
+                {composerQuickReplies.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    className="composer__quick-reply"
+                    onClick={() => { void handleQuickReply(option); }}
+                    disabled={conversation.pending || conversation.pendingUpload || isComposerBusy}
+                  >
+                    {option}
+                  </button>
                 ))}
               </div>
             ) : null}
@@ -1950,8 +2612,47 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 ) : null}
               </div>
 
+              {conversation.planModeAvailable ? (
+                <button
+                  type="button"
+                  className={`composer__plan-mode-btn${conversation.planMode.active ? "" : " composer__plan-mode-btn--inactive"}`}
+                  onClick={() => {
+                    void (conversation.planMode.active ? handleExitPlanMode() : handleEnterPlanMode());
+                  }}
+                  disabled={conversation.planMode.active ? conversation.exitingPlanMode : conversation.enteringPlanMode}
+                  aria-label={conversation.planMode.active ? "退出计划模式" : "进入计划模式"}
+                  title={conversation.planMode.active ? "退出计划模式" : "进入计划模式"}
+                >
+                  <svg
+                    className="composer__plan-mode-btn-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M4.5 6.5h7" />
+                    <path d="M4.5 12h7" />
+                    <path d="M4.5 17.5h7" />
+                    <path d="M15.5 7.25 18 4.75" />
+                    <path d="M18 7.25 15.5 4.75" />
+                    <path d="M16.75 12h2.75" />
+                    <path d="M15.25 17.5 16.5 18.75l3-3" />
+                  </svg>
+                  <span>
+                    {conversation.planMode.active
+                      ? (conversation.exitingPlanMode ? "退出中…" : "计划")
+                      : (conversation.enteringPlanMode ? "进入中…" : "计划")}
+                  </span>
+                </button>
+              ) : null}
+
               {conversation.isAwaitingToolApproval ? (
                 <span className="composer__status-chip">{activeDeleteApproval ? "等待删除回复" : "等待命令确认"}</span>
+              ) : conversation.isAwaitingUserQuestion ? (
+                <span className="composer__status-chip">等待你的选择</span>
               ) : null}
 
               <span className="composer__spacer" />

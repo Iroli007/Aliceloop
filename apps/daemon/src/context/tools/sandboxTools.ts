@@ -3,14 +3,20 @@ import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { tool } from "ai";
+import { tool, type ToolExecutionOptions } from "ai";
 import type { createPermissionSandboxExecutor } from "../../services/sandboxExecutor";
+import type { BashProgressTracker, ToolApprovalStateTracker } from "../../runtime/sandbox/types";
 import { getSandboxProjectRoot, isPathAllowed } from "../../runtime/sandbox/toolPolicy";
 import { normalizeBashInput } from "./bashInputNormalizer";
+import { STABLE_TOOL_PROVIDER_OPTIONS } from "./toolProviderOptions";
 
 const execFileAsync = promisify(execFile);
 
 type SandboxExecutor = ReturnType<typeof createPermissionSandboxExecutor>;
+type SandboxedToolExecutionOptions = ToolExecutionOptions & {
+  approvalStateTracker?: ToolApprovalStateTracker;
+  bashProgressTracker?: BashProgressTracker;
+};
 
 function buildToolErrorResponse(error: string, hint: string) {
   return JSON.stringify({ error, hint }, null, 2);
@@ -57,6 +63,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
 
   return {
     grep: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Strictly used for global text or regular expression searches inside files in the current workspace.\n\nUse case: Locating specific function definitions, variable names, or error logs (e.g., searching for function login). It returns the exact file path and line numbers containing the match.\n\nWARNING: If you already know the exact file path and want to view its full context, DO NOT use this tool. Use the read tool instead.",
       inputSchema: z.object({
@@ -111,6 +118,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
     }),
 
     glob: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Strictly used to find files and directories in the current workspace by name or wildcard.\n\nUse case: Discovering workspace structure or finding specific files (e.g., **/*.test.ts).\n\nWARNING: This tool will NEVER return the internal code content of a file. If you need to search for specific code logic, you MUST use the grep tool.",
       inputSchema: z.object({
@@ -138,6 +146,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
     }),
 
     read: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Read the content of a file at a known, specific path with a sliding window.\n\nUse case: You have identified the target file via glob or grep and now need to carefully read its source code.\n\nThe tool returns a window of lines starting from `offset` (default 0, 0-indexed) with up to `limit` lines (default 500). The response header always includes the total line count so you can decide whether to request the next window.\n\nWARNING: You MUST provide an exact relative or absolute file path (e.g. src/app.ts). NEVER pass wildcards or directory names to this tool!",
       inputSchema: z.object({
@@ -182,6 +191,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
     }),
 
     write: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Strictly used to create a completely NEW file from scratch, or to 100% overwrite an extremely small file.\n\nUse case: Generating boilerplate files or creating new test cases.\n\nWARNING: It is STRICTLY FORBIDDEN to use this tool to modify existing code files that exceed 50 lines. Outputting the entire file will cause severe truncation errors. To modify existing code, you MUST use the edit tool.",
       inputSchema: z.object({
@@ -192,13 +202,19 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           .string()
           .describe("The text content to write to the file"),
       }),
-      execute: async ({ targetPath, content }) => {
-        await sandbox.writeTextFile({ targetPath, content });
+      execute: async ({ targetPath, content }, options?: SandboxedToolExecutionOptions) => {
+        await sandbox.writeTextFile({
+          targetPath,
+          content,
+          toolCallId: options?.toolCallId,
+          approvalStateTracker: options?.approvalStateTracker,
+        });
         return `File written successfully: ${targetPath}`;
       },
     }),
 
     edit: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Used for localized, precise block replacements (Search and Replace) within existing code files.\n\nUse case: Fixing bugs, adding a few lines of logic, or modifying specific functions.\n\nRULE: You must provide the exact [Original Code Block] to be replaced and the new [Replacement Code Block]. DO NOT output the entire file content!",
       inputSchema: z.object({
@@ -212,9 +228,11 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           .string()
           .describe("The replacement text"),
       }),
-      execute: async ({ filePath, oldText, newText }) => {
+      execute: async ({ filePath, oldText, newText }, options?: SandboxedToolExecutionOptions) => {
         await sandbox.editTextFile({
           targetPath: filePath,
+          toolCallId: options?.toolCallId,
+          approvalStateTracker: options?.approvalStateTracker,
           transform: (content) => {
             // 抹平操作系统差异
             const normalizedContent = content.replace(/\r\n/g, '\n');
@@ -264,6 +282,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
     }),
 
     bash: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Execute shell commands and return their output. You can either pass a single executable in `command` plus tokenized `args`, or pass a multi-command shell line in `script` when you need chaining or pipelines such as `which aliceloop && aliceloop config list` or `ifconfig | grep \"inet \"`. Do not set both forms at once. In development mode, `script` supports simple chaining and pipelines only; avoid redirection and command substitution there. In full-access mode, normal shell script syntax is allowed. Allowed commands include file inspection, repository inspection, local script/test commands, environment diagnosis, Aliceloop CLI inspection, process/path inspection, system diagnostics, and safe file deletion.",
       inputSchema: z.preprocess(normalizeBashInput, z.object({
@@ -295,12 +314,15 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           });
         }
       })),
-      execute: async ({ command, args, script, cwd }) => {
+      execute: async ({ command, args, script, cwd }, options?: SandboxedToolExecutionOptions) => {
         const result = await sandbox.runBash({
           command: command?.trim() || "",
           args,
           script,
           cwd,
+          toolCallId: options?.toolCallId,
+          approvalStateTracker: options?.approvalStateTracker,
+          progressTracker: options?.bashProgressTracker,
         });
         return result;
       },

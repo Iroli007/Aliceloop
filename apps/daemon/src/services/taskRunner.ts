@@ -17,6 +17,7 @@ import type {
 import { getDefaultProjectDirectory } from "../repositories/projectRepository";
 import { getPrimaryLibraryContext, getShellOverview } from "../repositories/overviewRepository";
 import { markLibraryAsFocused, persistIngestedLibrary } from "../repositories/libraryRepository";
+import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import { upsertTaskRun } from "../repositories/taskRunRepository";
 import { createPermissionSandboxExecutor } from "./sandboxExecutor";
 import { isPathWithinRoot } from "../runtime/sandbox/toolPolicy";
@@ -158,11 +159,12 @@ async function runDocumentIngestTask(input: DocumentIngestTaskInput): Promise<Ta
       throw new Error(`document-ingest sourcePath must stay inside the default workspace: ${sourcePath}`);
     }
 
+    const runtimeSettings = getRuntimeSettings();
     const now = new Date().toISOString();
     const libraryItemId = `library-${randomUUID()}`;
     const sandbox = createPermissionSandboxExecutor({
       label: `document-ingest:${title}`,
-      permissionProfile: "full-access",
+      permissionProfile: runtimeSettings.sandboxProfile,
       workspaceRoot,
     });
     const fallbackText = canUseTextFallback(sourcePath)
@@ -270,9 +272,10 @@ async function runScriptRunnerTask(input: ScriptRunnerTaskInput): Promise<TaskRu
       throw new Error(`script-runner cwd must stay inside the default workspace: ${cwd}`);
     }
 
+    const runtimeSettings = getRuntimeSettings();
     const sandbox = createPermissionSandboxExecutor({
       label: `script-runner:${title}`,
-      permissionProfile: "full-access",
+      permissionProfile: runtimeSettings.sandboxProfile,
       workspaceRoot,
       defaultCwd: workspaceRoot,
     });

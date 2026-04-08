@@ -1,12 +1,14 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SkillDefinition, SkillMode, SkillStatus } from "@aliceloop/runtime-core";
 import {
   type SkillRouteHints,
+  needsAudioAnalysis,
   needsBrowserAutomation,
   needsFileManagement,
-  inferStickySkillIdsFromContext,
+  needsSystemInfo,
 } from "./skillRouting";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -52,7 +54,27 @@ interface SkillCatalogCacheState {
   byId: Map<string, SkillDefinition>;
 }
 
+interface StaticSkillCatalogBlockCacheState {
+  fingerprint: string;
+  content: string;
+  key: string;
+}
+
+interface SkillBodyCacheEntry {
+  fingerprint: string;
+  content: string;
+  key: string;
+}
+
 let skillCatalogCache: SkillCatalogCacheState | null = null;
+let staticSkillCatalogBlockCache: StaticSkillCatalogBlockCacheState | null = null;
+const skillBodyCache = new Map<string, SkillBodyCacheEntry>();
+const MAX_SELECTED_SKILLS = 2;
+const TOOL_OWNED_SKILL_IDS = new Set(["plan-mode"]);
+
+export function computeSkillBlockKey(content: string) {
+  return createHash("sha1").update(content).digest("hex").slice(0, 16);
+}
 
 const SEARCH_SYNONYM_PATTERNS: Array<[RegExp, string]> = [
   [/(?:浏览器|网页|网站|页面)/giu, " browser web page site "],
@@ -102,9 +124,9 @@ const SEARCH_SYNONYM_PATTERNS: Array<[RegExp, string]> = [
   [/(?:说了什么|讲了什么)/giu, " transcript said summary "],
   [/(?:发文件|发送文件|上传文件)/giu, " send file attach file "],
   [/(?:待办)/giu, " todo checklist "],
+  [/(?:任务追踪|任务跟踪|任务列表|任务进度|多步骤任务|长期任务|列一下任务|有哪些任务|查看任务|任务拆成步骤|列步骤)/giu, " tasks task tracking progress list steps "],
   [/(?:计划|规划)/giu, " plan planning "],
-  [/(?:定时|提醒)/giu, " schedule scheduler reminder "],
-  [/(?:继续|接着|恢复)/giu, " continue resume "],
+  [/(?:定时|提醒|cron)/giu, " schedule scheduler reminder cron "],
   [/(?:能力|技能|工具)/giu, " skill capability tool "],
   [/(?:browser_click|browser_open|browser_type|browser relay)/giu, " browser capability tool "],
   [/(?:推特)/giu, " twitter "],
@@ -238,7 +260,7 @@ function normalizeSearchText(rawText: string) {
 }
 
 function buildSkillSearchCorpus(skill: SkillDefinition) {
-  return [skill.id, skill.label, skill.description, skill.allowedTools.join(" ")].join(" ");
+  return [skill.id, skill.label, skill.description].join(" ");
 }
 
 function expandTokenVariants(token: string) {
@@ -296,16 +318,9 @@ function scoreSkillMatch(
   const normalizedMetadata = normalizeSearchText(metadataText);
   const skillTokens = new Set(extractSearchTokens(metadataText));
   const nameTokens = new Set(extractSearchTokens(`${skill.id} ${skill.label}`));
-  const allowedToolTokens = new Set(extractSearchTokens(skill.allowedTools.join(" ")));
   const queryTokens = extractSearchTokens(query);
   const queryTokenSet = new Set(queryTokens);
   const specificQueryTokens = queryTokens.filter((token) => !GENERIC_DISCOVERY_TOKENS.has(token));
-
-  if (queryTokens.length === 0) {
-    return 0;
-  }
-
-  let score = 0;
   const compactQuery = normalizedQuery.replace(/\s+/g, "");
   const exactNameVariants = [
     skill.id,
@@ -318,21 +333,21 @@ function scoreSkillMatch(
     .map((value) => value.toLowerCase())
     .filter(Boolean);
 
-  let hasExactNameMatch = false;
-  for (const variant of exactNameVariants) {
-    if (normalizedQuery.includes(variant) || compactQuery.includes(variant.replace(/\s+/g, ""))) {
-      score += 40;
-      hasExactNameMatch = true;
-      break;
-    }
+  const hasExactNameMatch = exactNameVariants.some((variant) => {
+    return normalizedQuery.includes(variant) || compactQuery.includes(variant.replace(/\s+/g, ""));
+  });
+
+  if (queryTokens.length === 0) {
+    return 0;
   }
 
-  const hasExactAllowedToolMatch = skill.allowedTools.some((toolName) => {
-    const toolTokens = extractSearchTokens(toolName);
-    return toolTokens.length > 0 && toolTokens.every((token) => queryTokenSet.has(token));
-  });
-  if (hasExactAllowedToolMatch) {
-    score += 18;
+  if (!hasExactNameMatch && specificQueryTokens.length === 0) {
+    return 0;
+  }
+
+  let score = 0;
+  if (hasExactNameMatch) {
+    score += 40;
   }
 
   let matchedWeight = 0;
@@ -360,9 +375,7 @@ function scoreSkillMatch(
     matchedTokenCount += 1;
     score += nameTokens.has(token)
       ? tokenWeight + 4
-      : allowedToolTokens.has(token)
-        ? tokenWeight + 2
-        : tokenWeight;
+      : tokenWeight;
   }
 
   if (score > 0 && normalizedMetadata.includes(normalizedQuery)) {
@@ -378,7 +391,7 @@ function scoreSkillMatch(
     const coverage = matchedWeight / totalWeight;
     score += Math.round(coverage * 8);
 
-    if (!hasExactNameMatch && !hasExactAllowedToolMatch && matchedTokenCount === 1 && coverage < 0.45) {
+    if (!hasExactNameMatch && matchedTokenCount === 1 && coverage < 0.45) {
       score -= 4;
     }
   }
@@ -484,6 +497,25 @@ function normalizeMode(value: string | undefined, sourcePath: string): SkillMode
   throw new SkillFrontmatterError(sourcePath, `unsupported mode "${value}"`);
 }
 
+function stripSkillFrontmatter(source: string) {
+  const lines = source.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") {
+    return source.trim();
+  }
+
+  for (let index = 1; index < lines.length; index += 1) {
+    if (lines[index]?.trim() === "---") {
+      return lines.slice(index + 1).join("\n").trim();
+    }
+  }
+
+  return source.trim();
+}
+
+function getSkillRelativeSourcePath(sourcePath: string) {
+  return relative(skillsRootDir, sourcePath).replace(/\\/g, "/");
+}
+
 function readSkillDefinition(directoryName: string) {
   const sourcePath = join(skillsRootDir, directoryName, "SKILL.md");
   if (!existsSync(sourcePath)) {
@@ -571,7 +603,9 @@ function getSkillCatalogCache() {
     .map((directoryName) => readSkillDefinition(directoryName))
     .filter((skill): skill is SkillDefinition => Boolean(skill))
     .sort((left, right) => left.id.localeCompare(right.id));
-  const activeDefinitions = definitions.filter((skill) => skill.status === "available");
+  const activeDefinitions = definitions.filter((skill) => {
+    return skill.status === "available" && !TOOL_OWNED_SKILL_IDS.has(skill.id);
+  });
 
   skillCatalogCache = {
     fingerprint,
@@ -598,24 +632,22 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
   }
 
   const activeSkills = listActiveSkillDefinitions();
-  const stickySkillIds = new Set([
-    ...inferStickySkillIdsFromContext(normalizedQuery),
-    ...(hints?.stickySkillIds ?? []),
-  ]);
+  const stickySkillIds = new Set(hints?.stickySkillIds ?? []);
   const browserSceneBlocksLocalMediaSkills = needsBrowserAutomation(normalizedQuery);
-
-  if (needsFileManagement(normalizedQuery)) {
-    return [...stickySkillIds];
-  }
 
   const tokenDocumentFrequency = buildTokenDocumentFrequency(activeSkills);
   const scoredSkills = activeSkills
     .map((skill) => ({
       id: skill.id,
       blocked: browserSceneBlocksLocalMediaSkills && (skill.id === "video-reader" || skill.id === "music-listener"),
-      score: stickySkillIds.has(skill.id)
-        ? 1000
-        : scoreSkillMatch(skill, normalizedQuery, tokenDocumentFrequency, activeSkills.length),
+      score: (() => {
+        const baseScore = scoreSkillMatch(skill, normalizedQuery, tokenDocumentFrequency, activeSkills.length);
+        if (!stickySkillIds.has(skill.id)) {
+          return baseScore;
+        }
+
+        return baseScore > 0 ? baseScore + 4 : 6;
+      })(),
     }))
     .filter((entry) => !entry.blocked && entry.score > 0)
     .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
@@ -628,22 +660,35 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
   const nonStickyEntries = scoredSkills.filter((entry) => !stickySkillIds.has(entry.id));
 
   if (nonStickyEntries.length === 0) {
-    return stickyEntries.slice(0, 4).map((entry) => entry.id);
+    return stickyEntries
+      .filter((entry) => entry.score >= 8)
+      .slice(0, MAX_SELECTED_SKILLS)
+      .map((entry) => entry.id);
   }
 
   const topNonStickyScore = nonStickyEntries[0]?.score ?? 0;
+  if (topNonStickyScore < 8) {
+    return stickyEntries
+      .filter((entry) => entry.score >= 8)
+      .slice(0, MAX_SELECTED_SKILLS)
+      .map((entry) => entry.id);
+  }
+
   const minimumNonStickyScore = topNonStickyScore >= 24
-    ? topNonStickyScore - 10
+    ? topNonStickyScore - 6
     : topNonStickyScore >= 14
-      ? topNonStickyScore - 6
+      ? topNonStickyScore - 4
       : topNonStickyScore >= 8
-        ? topNonStickyScore - 3
+        ? topNonStickyScore - 2
         : Math.max(4, topNonStickyScore);
 
   const selectedIds = new Set<string>();
   const orderedSelections: string[] = [];
 
   for (const entry of stickyEntries) {
+    if (entry.score < 8) {
+      continue;
+    }
     if (!selectedIds.has(entry.id)) {
       selectedIds.add(entry.id);
       orderedSelections.push(entry.id);
@@ -659,7 +704,21 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
     orderedSelections.push(entry.id);
   }
 
-  return orderedSelections.slice(0, 4);
+  const limitedSelections = orderedSelections.slice(0, MAX_SELECTED_SKILLS);
+
+  if (limitedSelections.includes("thread-management") && limitedSelections.includes("system-info") && !needsSystemInfo(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "system-info");
+  }
+
+  if (limitedSelections.includes("send-file") && limitedSelections.includes("music-listener") && !needsAudioAnalysis(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "music-listener");
+  }
+
+  if (limitedSelections.includes("send-file") && limitedSelections.includes("file-manager") && !needsFileManagement(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "file-manager");
+  }
+
+  return limitedSelections;
 }
 
 export function selectRelevantSkillDefinitions(query: string | null | undefined, hints?: SkillRouteHints) {
@@ -676,6 +735,8 @@ export function getSkillDefinition(skillId: string) {
 
 export function resetSkillCatalogCache() {
   skillCatalogCache = null;
+  staticSkillCatalogBlockCache = null;
+  skillBodyCache.clear();
 }
 
 interface BuildSkillContextBlockOptions {
@@ -683,67 +744,132 @@ interface BuildSkillContextBlockOptions {
   routeHints?: SkillRouteHints;
 }
 
-export function buildSkillContextBlock(skills: SkillDefinition[], options?: BuildSkillContextBlockOptions) {
-  if (skills.length === 0) {
-    return [
-      "No extra local skill was selected for this turn.",
-      "Select skills from metadata only when they materially help the task.",
-      "Tool routing is separate from skill selection.",
-    ].join("\n");
+function getStaticSkillCatalogBlockState() {
+  const catalog = getSkillCatalogCache();
+  if (staticSkillCatalogBlockCache?.fingerprint === catalog.fingerprint) {
+    return staticSkillCatalogBlockCache;
   }
 
-  const sections = [
-    "Project skills live in the local context catalog.",
+  const content = [
+    "Local skill catalog for this project.",
     `Skill catalog root: ${skillsRootDir}`,
     "Architecture rule: skills are AI-native instruction blocks selected from metadata; they are not workflow scripts.",
-    "Tool routing is handled separately from skill selection.",
-    "Bash can invoke unlimited scripts = unlimited capabilities. Skills封装这些能力。",
-    "Critical execution rule: when a selected skill shows shell commands or CLI examples, treat them as actions to run with the attached tools, not as text to paste into the assistant reply.",
-    "If `bash` is attached for the current turn, execute the relevant command and answer from its result. Do not reply with raw command suggestions like `ls`, `pwd`, or `aliceloop ...` unless the user explicitly asked for the command itself.",
-    "Do not expose internal routing labels such as `web_search`, `web-fetch`, `memory-management`, or `thread-management` in a normal user-facing answer unless the user explicitly asked for runtime diagnostics.",
-    "If a turn needs better capability coverage, improve retrieval quality or use skill-hub / skill-search instead of expanding the default tool base.",
-    "Selection policy: prefer the smallest relevant subset of skills for this turn instead of loading the whole catalog.",
-    "The skills below were selected as relevant for this turn. Read their SKILL.md files before acting when needed.",
+    "Use `use_skill` with the exact skill id when a catalog skill matches the task and is not already loaded.",
+    "Start with the smallest relevant task skill. Add a second non-meta task skill only if execution truly requires it.",
+    "Do not call `skill-hub` or `skill-search` just to inspect this catalog.",
+    "Do not emit raw `<skill>...</skill>` tags in the reply.",
+    "Skills usually work through bash, read, and write. A small set of native exceptions such as web_search, web_fetch, and view_image may appear only when the selected skill truly needs them.",
+    "Capability judgment examples: website or platform interaction -> browser; exact page/original article/docs reading -> web-fetch; general current-info lookup -> web-search; sending a local file/photo into the conversation -> send-file; generating a new image/poster/avatar -> image-gen; managing threads/sessions -> thread-management; asking what skills/capabilities exist -> skill-hub or skill-search.",
+    "Decision boundary: for shopping-site price checks, product lookup, and other factual reading tasks, prefer web-search / web-fetch first. Use browser only when the task truly needs interaction such as login, clicking, filling forms, captcha handling, or working with an existing visible tab.",
     "",
-    "Selected skills for this turn:",
-  ];
+    "Available skills:",
+    ...catalog.activeDefinitions.map((skill) => {
+      return `- ${skill.label}: ${skill.description} [id=${skill.id}; ${getSkillRelativeSourcePath(skill.sourcePath)}]`;
+    }),
+  ].join("\n");
 
-  const routedSkillIds = new Set(skills.map((skill) => skill.id));
+  staticSkillCatalogBlockCache = {
+    fingerprint: catalog.fingerprint,
+    content,
+    key: computeSkillBlockKey(content),
+  };
+
+  return staticSkillCatalogBlockCache;
+}
+
+function getSkillBodyCacheEntry(skill: SkillDefinition) {
+  const fingerprint = `${statSync(skill.sourcePath).mtimeMs}`;
+  const cachedEntry = skillBodyCache.get(skill.id);
+  if (cachedEntry?.fingerprint === fingerprint) {
+    return cachedEntry;
+  }
+
+  const source = readFileSync(skill.sourcePath, "utf8");
+  const body = stripSkillFrontmatter(source);
+  const content = [
+    `Loaded skill: ${skill.id}`,
+    `Source: ${getSkillRelativeSourcePath(skill.sourcePath)}`,
+    body,
+  ].join("\n\n");
+  const key = computeSkillBlockKey(content);
+  const entry = {
+    fingerprint,
+    content,
+    key,
+  } satisfies SkillBodyCacheEntry;
+  skillBodyCache.set(skill.id, entry);
+  return entry;
+}
+
+export function buildStaticSkillCatalogBlock() {
+  return getStaticSkillCatalogBlockState().content;
+}
+
+export function getStaticSkillCatalogKey() {
+  return getStaticSkillCatalogBlockState().key;
+}
+
+export function buildSelectedSkillBodyBlock(skills: SkillDefinition[]) {
+  const orderedSkills = [...skills].sort((a, b) => a.id.localeCompare(b.id));
+  if (orderedSkills.length === 0) {
+    return {
+      content: "",
+      keys: [] as string[],
+    };
+  }
+
+  const entries = orderedSkills.map((skill) => ({
+    skillId: skill.id,
+    entry: getSkillBodyCacheEntry(skill),
+  }));
+
+  return {
+    content: entries.map(({ entry }) => entry.content).join("\n\n"),
+    keys: entries.map(({ skillId, entry }) => `${skillId}:${entry.key}`),
+  };
+}
+
+export function buildSkillDynamicOverlay(skills: SkillDefinition[], options?: BuildSkillContextBlockOptions) {
+  const orderedSkills = [...skills].sort((a, b) => a.id.localeCompare(b.id));
+  const loadedSkillIds = orderedSkills.map((skill) => skill.id);
+  const loadedSkillIdSet = new Set(loadedSkillIds);
+  const sections: string[] = [];
+
+  if (loadedSkillIds.length === 0) {
+    sections.push("No extra local skill was selected for this turn.");
+  } else {
+    sections.push(`Loaded skill ids for this turn: ${loadedSkillIds.join(", ")}.`);
+  }
+
   if ((options?.routeHints?.stickySkillIds.length ?? 0) > 0) {
-    sections.push(`- Relevant carry-forward skills from the immediate context: ${options?.routeHints?.stickySkillIds.join(", ")}.`);
-  }
-  if (routedSkillIds.has("web-search") || routedSkillIds.has("web-fetch")) {
-    sections.push("- Routing priority: when the user needs exact factual verification, current metrics, dates, or source-backed corrections, treat web_search as the default first step and only route web_fetch when a specific page still needs to be read.");
-    sections.push("- Source priority: primary platform pages and clearly dated sources come before encyclopedia overviews; 百度百科 is extremely low priority for live facts.");
-    sections.push("- Research memory rule: keep a running evidence ledger. Search results are discovery only, and the next `web_fetch` should target the strongest unfetched candidate URL from the ledger instead of restarting the topic from scratch.");
-  }
-  if (routedSkillIds.has("system-info")) {
-    sections.push("- system-info: use it for current local time, date, weekday, or host diagnostics. It can call `bash` commands such as `date`, `sw_vers`, `df -h`, or `uptime`.");
+    sections.push(`Relevant carry-forward skills from the immediate context: ${[...new Set(options?.routeHints?.stickySkillIds ?? [])].sort((a, b) => a.localeCompare(b)).join(", ")}.`);
   }
 
-  if (routedSkillIds.has("browser")) {
+  if (loadedSkillIdSet.has("web-search") || loadedSkillIdSet.has("web-fetch")) {
+    sections.push("Routing priority: when the user needs exact factual verification, current metrics, dates, or source-backed corrections, treat web_search as the default first step and only route web_fetch when a specific page still needs to be read.");
+    sections.push("Source priority: primary platform pages and clearly dated sources come before encyclopedia overviews; 百度百科 is extremely low priority for live facts.");
+    sections.push("Research memory rule: keep a running evidence ledger. Search results are discovery only, and the next web_fetch should target the strongest unfetched candidate URL from the ledger instead of restarting the topic from scratch.");
+  }
+
+  if (loadedSkillIdSet.has("system-info")) {
+    sections.push("system-info: use it for current local time, date, weekday, or host diagnostics. It can call bash commands such as date, sw_vers, df -h, or uptime.");
+  }
+
+  if (loadedSkillIdSet.has("browser")) {
     if (options?.browserRelayAvailable) {
-      sections.push("- Browser runtime status for this turn: a healthy visible Aliceloop Desktop Chrome relay is available right now.");
-      sections.push("- Browser backend policy: prefer the Chrome relay for browser tasks when it is healthy, and fall back to PinchTab only if the relay is unavailable.");
-      sections.push("- Do not claim that browser automation is headless, stateless, or unable to retain login data when using this relay. Use the visible Chrome path and reuse its persistent login session.");
+      sections.push("Browser runtime status for this turn: a healthy visible Aliceloop Desktop Chrome relay is available right now.");
     } else {
-      sections.push("- Browser runtime status for this turn: no healthy desktop relay is currently registered, so browser automation should use PinchTab instead of a local Playwright browser.");
+      sections.push("Browser runtime status for this turn: no healthy desktop relay is currently registered, so browser automation should use PinchTab instead of the relay.");
     }
-    sections.push("- Structured site rule: for supported platforms such as Bilibili, Xiaohongshu, and Twitter/X, stay on the browser tools by default instead of detouring through bash wrappers.");
-  }
-
-  if (routedSkillIds.has("twitter-media")) {
-    sections.push("- Twitter/X routing rule: for logged-in timeline/search/bookmarks/profile tasks, prefer the current browser session. Use public-link fetch only when the user only needs a tweet's public content.");
-  }
-
-  if (routedSkillIds.has("xiaohongshu")) {
-    sections.push("- Xiaohongshu routing rule: prefer the current browser session for profile/feed/note tasks, and only switch away when the browser path is unavailable.");
-  }
-
-  for (const skill of skills) {
-    const relativeSourcePath = relative(skillsRootDir, skill.sourcePath).replace(/\\/g, "/");
-    sections.push(`- ${skill.label}: ${skill.description} [${relativeSourcePath}]`);
   }
 
   return sections.join("\n");
+}
+
+export function buildSkillContextBlock(skills: SkillDefinition[], options?: BuildSkillContextBlockOptions) {
+  return [
+    buildStaticSkillCatalogBlock(),
+    buildSelectedSkillBodyBlock(skills).content,
+    buildSkillDynamicOverlay(skills, options),
+  ].filter(Boolean).join("\n\n");
 }

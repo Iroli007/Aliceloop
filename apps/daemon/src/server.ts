@@ -18,6 +18,7 @@ import {
   type ProviderKind,
   type ReasoningEffort,
   type SandboxPermissionProfile,
+  type ToolApprovalDecisionOption,
   type ProviderTransportKind,
   type SectionSpan,
   type SessionRole,
@@ -73,6 +74,7 @@ import {
 } from "./repositories/mcpServerRepository";
 import { getSandboxRun, listSandboxRuns } from "./repositories/sandboxRunRepository";
 import {
+  appendSessionEvent,
   addSessionMessageReaction,
   canAcceptClientTraffic,
   createAttachment,
@@ -94,6 +96,11 @@ import {
   updateSessionFocusState,
   updateSessionRollingSummary,
 } from "./repositories/sessionRepository";
+import {
+  enterSessionPlanMode,
+  exitSessionPlanMode,
+  getSessionPlanModeState,
+} from "./repositories/sessionPlanModeRepository";
 import {
   createProjectDirectory,
   deleteProjectDirectory,
@@ -123,6 +130,7 @@ import { generateImage } from "./services/imageGenerationService";
 import { listAvailableToolAdapterNames } from "./context/tools/toolRegistry";
 import {
   approveSessionToolApproval,
+  getPendingSessionQuestionApproval,
   rejectSessionToolApproval,
   ToolApprovalNotFoundError,
 } from "./services/sessionToolApprovalService";
@@ -189,6 +197,11 @@ interface CreateMessageBody {
   attachmentIds?: string[];
   deviceId: string;
   deviceType: DeviceType;
+}
+
+interface ResolveToolApprovalBody {
+  responseText?: string;
+  decisionOption?: ToolApprovalDecisionOption;
 }
 
 interface CreateAttachmentBody {
@@ -282,6 +295,11 @@ interface UpdateProjectBody {
 
 interface UpdateSessionProjectBody {
   projectId?: string | null;
+}
+
+interface UpdateSessionPlanModeBody {
+  planId?: string | null;
+  title?: string | null;
 }
 
 interface UpdateRuntimeSettingsBody {
@@ -1612,6 +1630,62 @@ export async function createServer() {
     return getSessionSnapshot(request.params.id);
   });
 
+  server.get<{ Params: SessionParams }>("/api/session/:id/plan-mode", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    return getSessionPlanModeState(request.params.id);
+  });
+
+  server.post<{ Params: SessionParams; Body: UpdateSessionPlanModeBody }>("/api/session/:id/plan-mode/enter", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    try {
+      const planMode = enterSessionPlanMode({
+        sessionId: request.params.id,
+        planId: request.body?.planId ?? null,
+        title: request.body?.title ?? null,
+      });
+      const event = appendSessionEvent(request.params.id, "plan_mode.updated", { planMode });
+      publishSessionEvent(event);
+      return planMode;
+    } catch (error) {
+      if (error instanceof Error && error.message === "plan_mode_plan_session_mismatch") {
+        return reply.code(400).send({
+          error: "plan_session_mismatch",
+        });
+      }
+
+      if (error instanceof Error && error.message.includes("Plan ")) {
+        return reply.code(404).send({
+          error: "plan_not_found",
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  server.post<{ Params: SessionParams }>("/api/session/:id/plan-mode/exit", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    const planMode = exitSessionPlanMode(request.params.id);
+    const event = appendSessionEvent(request.params.id, "plan_mode.updated", { planMode });
+    publishSessionEvent(event);
+    return planMode;
+  });
+
   server.get<{ Params: SessionParams }>("/api/session/:id/focus", async (request, reply) => {
     if (!hasSession(request.params.id)) {
       return reply.code(404).send({
@@ -1717,10 +1791,15 @@ export async function createServer() {
     }
   });
 
-  server.post<{ Params: ToolApprovalParams }>("/api/session/:id/tool-approvals/:approvalId/approve", async (request, reply) => {
+  server.post<{ Params: ToolApprovalParams; Body: ResolveToolApprovalBody }>("/api/session/:id/tool-approvals/:approvalId/approve", async (request, reply) => {
     try {
       return {
-        approval: approveSessionToolApproval(request.params.id, request.params.approvalId),
+        approval: approveSessionToolApproval(
+          request.params.id,
+          request.params.approvalId,
+          request.body?.responseText,
+          request.body?.decisionOption,
+        ),
       };
     } catch (error) {
       if (error instanceof ToolApprovalNotFoundError) {
@@ -1728,20 +1807,35 @@ export async function createServer() {
           error: "tool_approval_not_found",
         });
       }
+      if (error instanceof Error && error.message === "tool_approval_option_status_mismatch") {
+        return reply.code(400).send({
+          error: "tool_approval_option_status_mismatch",
+        });
+      }
 
       throw error;
     }
   });
 
-  server.post<{ Params: ToolApprovalParams }>("/api/session/:id/tool-approvals/:approvalId/reject", async (request, reply) => {
+  server.post<{ Params: ToolApprovalParams; Body: ResolveToolApprovalBody }>("/api/session/:id/tool-approvals/:approvalId/reject", async (request, reply) => {
     try {
       return {
-        approval: rejectSessionToolApproval(request.params.id, request.params.approvalId),
+        approval: rejectSessionToolApproval(
+          request.params.id,
+          request.params.approvalId,
+          request.body?.responseText,
+          request.body?.decisionOption,
+        ),
       };
     } catch (error) {
       if (error instanceof ToolApprovalNotFoundError) {
         return reply.code(404).send({
           error: "tool_approval_not_found",
+        });
+      }
+      if (error instanceof Error && error.message === "tool_approval_option_status_mismatch") {
+        return reply.code(400).send({
+          error: "tool_approval_option_status_mismatch",
         });
       }
 
@@ -1856,8 +1950,9 @@ export async function createServer() {
 
   server.post<{ Params: SessionParams; Body: CreateMessageBody }>("/api/session/:id/messages", async (request, reply) => {
     const { clientMessageId, content, role = "user", attachmentIds = [], deviceId, deviceType } = request.body;
+    const trimmedContent = content.trim();
 
-    if (!content.trim() && attachmentIds.length === 0) {
+    if (!trimmedContent && attachmentIds.length === 0) {
       return reply.code(400).send({
         error: "Message content or attachmentIds is required",
       });
@@ -1873,7 +1968,7 @@ export async function createServer() {
     const result = createSessionMessage({
       sessionId: request.params.id,
       clientMessageId,
-      content: content.trim(),
+      content: trimmedContent,
       role,
       attachmentIds,
       deviceId,
@@ -1885,15 +1980,27 @@ export async function createServer() {
 
     await syncSessionProjectHistory(request.params.id);
 
+    const lastEventSeq = result.events.at(-1)?.seq ?? getSessionSnapshot(request.params.id).lastEventSeq;
+
     if (role === "user" && result.created) {
-      abortAgentForSession(request.params.id);
+      const pendingQuestionApproval = trimmedContent ? getPendingSessionQuestionApproval(request.params.id) : null;
+      if (pendingQuestionApproval) {
+        approveSessionToolApproval(request.params.id, pendingQuestionApproval.id, content.trim());
+        return {
+          created: result.created,
+          message: result.message,
+          lastEventSeq,
+        };
+      }
+
+      abortAgentForSession(request.params.id, "interrupt");
       void runProviderReply(request.params.id);
     }
 
     return {
       created: result.created,
       message: result.message,
-      lastEventSeq: result.events.at(-1)?.seq ?? getSessionSnapshot(request.params.id).lastEventSeq,
+      lastEventSeq,
     };
   });
 
@@ -1996,10 +2103,13 @@ export async function createServer() {
     const binary = Buffer.from(contentBase64, "base64");
     const attachmentId = randomUUID();
     const safeName = sanitizeFileName(fileName);
-    const storagePath = join(getUploadsDir(), `${attachmentId}-${safeName}`);
+    const uploadsDir = getUploadsDir();
+    const runtimeSettings = getRuntimeSettings();
+    const storagePath = join(uploadsDir, `${attachmentId}-${safeName}`);
     const sandbox = createPermissionSandboxExecutor({
       label: `attachment:${request.params.id}:${fileName}`,
-      permissionProfile: "full-access",
+      permissionProfile: runtimeSettings.sandboxProfile,
+      workspaceRoot: uploadsDir,
     });
     await sandbox.writeBinaryFile({
       targetPath: storagePath,
@@ -2071,10 +2181,13 @@ export async function createServer() {
     }
 
     const safeFolderName = sanitizeFileName(folderName) || "folder";
-    const folderStoragePath = join(getUploadsDir(), `${randomUUID()}-${safeFolderName}`);
+    const uploadsDir = getUploadsDir();
+    const runtimeSettings = getRuntimeSettings();
+    const folderStoragePath = join(uploadsDir, `${randomUUID()}-${safeFolderName}`);
     const sandbox = createPermissionSandboxExecutor({
       label: `attachment-folder:${request.params.id}:${folderName}`,
-      permissionProfile: "full-access",
+      permissionProfile: runtimeSettings.sandboxProfile,
+      workspaceRoot: uploadsDir,
     });
 
     let totalBytes = 0;

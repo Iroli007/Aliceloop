@@ -91,7 +91,7 @@ export function startSchedulerService() {
               sessionId,
             });
 
-            abortAgentForSession(sessionId);
+            abortAgentForSession(sessionId, "interrupt");
             void runProviderReply(sessionId);
           } catch (error) {
             failCronJobRun({

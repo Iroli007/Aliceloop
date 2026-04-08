@@ -37,6 +37,7 @@ export interface SandboxExecutorOptions {
 }
 
 export interface SandboxElevatedApprovalInput {
+  toolCallId?: string;
   toolName: string;
   title: string;
   detail: string;
@@ -44,6 +45,23 @@ export interface SandboxElevatedApprovalInput {
   command: string;
   args: string[];
   cwd: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
+}
+
+export interface ToolApprovalStateTracker {
+  onRequested?: () => void;
+  onResolved?: (status: "approved" | "rejected", source: "user" | "abort" | "policy") => void;
+}
+
+export interface BashProgressUpdate {
+  stdout: string;
+  stderr: string;
+  streaming: true;
+  truncated?: boolean;
+}
+
+export interface BashProgressTracker {
+  onProgress?: (update: BashProgressUpdate) => void;
 }
 
 export interface ReadTextFileInput {
@@ -53,20 +71,28 @@ export interface ReadTextFileInput {
 export interface WriteBinaryFileInput {
   targetPath: string;
   content: Uint8Array;
+  toolCallId?: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
 }
 
 export interface WriteTextFileInput {
   targetPath: string;
   content: string;
+  toolCallId?: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
 }
 
 export interface EditTextFileInput {
   targetPath: string;
   transform: (content: string) => string;
+  toolCallId?: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
 }
 
 export interface DeletePathInput {
   targetPath: string;
+  toolCallId?: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
 }
 
 export interface RunBashInput {
@@ -75,6 +101,9 @@ export interface RunBashInput {
   script?: string;
   cwd?: string;
   timeoutMs?: number;
+  toolCallId?: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
+  progressTracker?: BashProgressTracker;
 }
 
 export interface ParsedBashCommand {
@@ -135,7 +164,13 @@ export interface SandboxRuntimeContext {
   maxBufferBytes: number;
   seatbeltEnabled: boolean;
   seenBashApprovalFingerprints: Set<string>;
-  requestBashApproval?: (input: { command: string; args: string[]; cwd: string }) => Promise<void>;
+  requestBashApproval?: (input: {
+    command: string;
+    args: string[];
+    cwd: string;
+    toolCallId?: string;
+    approvalStateTracker?: ToolApprovalStateTracker;
+  }) => Promise<void>;
   requestElevatedApproval?: (input: SandboxElevatedApprovalInput) => Promise<void>;
   noteCreatedFile?: (targetPath: string) => Promise<void> | void;
   canDeleteFile?: (targetPath: string) => Promise<boolean> | boolean;
