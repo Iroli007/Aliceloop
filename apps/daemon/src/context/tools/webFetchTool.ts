@@ -3,6 +3,7 @@ import { tool } from "ai";
 import TurndownService from "turndown";
 import { withDesktopRelayTab, navigateRelayTab, readRelayReadableContent } from "./desktopRelayResearch";
 import { logPerfTrace, nowMs, roundMs } from "../../runtime/perfTrace";
+import { STABLE_TOOL_PROVIDER_OPTIONS } from "./toolProviderOptions";
 
 const MAX_CONTENT_LENGTH = 50_000;
 const FETCH_TIMEOUT_MS = 15_000;
@@ -262,6 +263,7 @@ export async function fetchReadableWebContent(
 export function createWebFetchTool(sessionId = "web_fetch") {
   return {
     web_fetch: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Fetch the content of a public URL and return it as readable text. " +
         "HTML pages are converted to Markdown with boilerplate removed. " +

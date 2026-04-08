@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getDatabase } from "../db/client";
 
 export type PlanStatus = "draft" | "approved" | "archived";
+const planRetentionWindowMs = 7 * 24 * 60 * 60 * 1000;
 
 interface PlanRow {
   id: string;
@@ -79,7 +80,25 @@ function toPlanRecord(row: PlanRow): PlanRecord {
   };
 }
 
+function cleanupExpiredPlans() {
+  const cutoff = new Date(Date.now() - planRetentionWindowMs).toISOString();
+  const db = getDatabase();
+  db.prepare(
+    `
+      DELETE FROM plan_runs
+      WHERE updated_at < ?
+        AND id NOT IN (
+          SELECT active_plan_id
+          FROM session_plan_modes
+          WHERE active = 1
+            AND active_plan_id IS NOT NULL
+        )
+    `,
+  ).run(cutoff);
+}
+
 function getPlanRow(planId: string) {
+  cleanupExpiredPlans();
   const db = getDatabase();
   return db
     .prepare(
@@ -106,7 +125,16 @@ export function getPlan(planId: string) {
   return row ? toPlanRecord(row) : null;
 }
 
+export function getLatestPlan(sessionId: string, status?: PlanStatus) {
+  return listPlans({
+    sessionId,
+    status,
+    limit: 1,
+  })[0] ?? null;
+}
+
 export function listPlans(input: ListPlansInput = {}) {
+  cleanupExpiredPlans();
   const db = getDatabase();
   const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 50), 200));
   const sessionId = input.sessionId?.trim() || null;
@@ -157,6 +185,7 @@ export function listPlans(input: ListPlansInput = {}) {
 }
 
 export function createPlan(input: CreatePlanInput): PlanRecord {
+  cleanupExpiredPlans();
   const title = input.title.trim();
   if (!title) {
     throw new Error("plan_title_required");

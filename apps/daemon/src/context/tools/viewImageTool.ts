@@ -2,6 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { describeImageFile } from "../../services/multimodalAnalysisService";
+import { STABLE_TOOL_PROVIDER_OPTIONS } from "./toolProviderOptions";
 
 const DEFAULT_SESSION_ID = "default-image-session";
 const DEFAULT_IMAGE_PROMPT =
@@ -10,6 +11,7 @@ const DEFAULT_IMAGE_PROMPT =
 export function createViewImageTool(sessionId = DEFAULT_SESSION_ID): ToolSet {
   return {
     view_image: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Read and analyze a local image file from an absolute path. Use this for screenshots, photos, OCR-like questions, and uploaded image attachments.",
       inputSchema: z.object({

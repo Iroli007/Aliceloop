@@ -27,8 +27,8 @@ const providerDefinitions: ProviderDefinition[] = [
     id: "moonshot",
     label: "Moonshot (Kimi)",
     transport: "openai-compatible",
-    defaultBaseUrl: "https://api.moonshot.cn/v1",
-    defaultModel: "moonshot-v1-8k",
+    defaultBaseUrl: "https://api.moonshot.ai/v1",
+    defaultModel: "kimi-k2.5",
   },
   {
     id: "deepseek",
@@ -79,7 +79,7 @@ const providerDefinitionsById = new Map(providerDefinitions.map((definition) => 
 const toolModelRecommendationPatterns: Record<ProviderKind, RegExp[]> = {
   minimax: [/minimax.*highspeed/iu, /abab.*6\.5s-chat/iu],
   gemini: [/gemini-2\.0-flash/iu, /gemini-2\.5-flash-lite/iu, /gemini-2\.5-flash/iu, /gemini-1\.5-flash/iu],
-  moonshot: [/moonshot-v1-8k/iu, /moonshot.*8k/iu, /kimi.*8k/iu],
+  moonshot: [/^kimi-k2\.5$/iu, /^kimi-k2/iu, /moonshot-v1-8k/iu, /moonshot.*8k/iu, /kimi.*8k/iu],
   deepseek: [/^deepseek-chat$/iu, /deepseek-chat/iu],
   zhipu: [/glm-4-flash/iu, /glm-4-air/iu, /glm-5-flash/iu, /^glm-5$/iu],
   aihubmix: [/gpt-4o-mini/iu, /deepseek-chat/iu, /gemini-2\.0-flash/iu, /haiku/iu],

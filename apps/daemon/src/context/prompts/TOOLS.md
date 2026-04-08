@@ -2,10 +2,10 @@
 
 ## Architecture Rule
 
-- The six sandbox primitives `bash`, `grep`, `glob`, `read`, `write`, and `edit` are the always-on native tools.
-- Everything outside those six should arrive through the direct tool router or routed skill tools, not by silently expanding the primitive tool base.
+- No tool is always attached by default. The turn-level tool surface should come from direct tool routing, explicit runtime additions, and the `allowed-tools` declared by the routed skills.
+- Routed skills are the primary way to expand capability for a turn, so `allowed-tools` should be treated as the hard capability budget rather than optional decoration.
 - If the agent needs better capability coverage for a turn, improve skill selection quality or use `skill-hub` / `skill-search`; do not keep adding one-off permanent tools to the base layer.
-- Treat routed skill tools as turn-scoped capabilities. The existence of a skill in the catalog does not mean every skill tool is attached in every turn.
+- Treat routed skill tools outside that core surface as turn-scoped capabilities. The existence of a skill in the catalog does not mean every specialized skill tool is attached in every turn.
 - High-availability routing rule: preserve the relevant capability group across short continuation turns so critical routed skills do not disappear mid-workflow.
 - Do this by carrying forward the right routed skill group and its core companion skills for the current turn, not by loading the entire skill catalog.
 - Deep memory stays skill-driven: profile/fact recall and episodic history should be reached through the selected memory skills, not auto-injected into the prompt as a separate memory load layer.

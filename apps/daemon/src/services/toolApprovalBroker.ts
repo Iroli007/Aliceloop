@@ -1,4 +1,4 @@
-import type { ToolApproval, ToolApprovalStatus } from "@aliceloop/runtime-core";
+import type { ToolApproval, ToolApprovalDecisionOption, ToolApprovalStatus } from "@aliceloop/runtime-core";
 
 type ResolvedToolApprovalStatus = Extract<ToolApprovalStatus, "approved" | "rejected">;
 
@@ -9,7 +9,7 @@ interface CreatePendingToolApprovalOptions {
 
 interface PendingToolApprovalEntry {
   approval: ToolApproval;
-  settle: (status: ResolvedToolApprovalStatus) => ToolApproval | null;
+  settle: (status: ResolvedToolApprovalStatus, responseText?: string | null, decisionOption?: ToolApprovalDecisionOption | null) => ToolApproval | null;
 }
 
 const pendingToolApprovalsById = new Map<string, PendingToolApprovalEntry>();
@@ -39,6 +39,9 @@ export function createPendingToolApproval(
 ) {
   const approval: ToolApproval = {
     ...input,
+    kind: input.kind ?? "command",
+    question: input.question ?? null,
+    responseText: null,
     status: "pending",
     resolvedAt: null,
   };
@@ -51,7 +54,11 @@ export function createPendingToolApproval(
   let settled = false;
   let cleanupAbortListener = () => {};
 
-  const settle = (status: ResolvedToolApprovalStatus) => {
+  const settle = (
+    status: ResolvedToolApprovalStatus,
+    responseText?: string | null,
+    decisionOption?: ToolApprovalDecisionOption | null,
+  ) => {
     if (settled) {
       return null;
     }
@@ -63,6 +70,8 @@ export function createPendingToolApproval(
 
     const resolvedApproval: ToolApproval = {
       ...approval,
+      decisionOption: decisionOption ?? null,
+      responseText: responseText?.trim() ? responseText.trim() : null,
       status,
       resolvedAt: new Date().toISOString(),
     };
@@ -103,6 +112,10 @@ export function getPendingToolApproval(approvalId: string) {
   return pendingToolApprovalsById.get(approvalId)?.approval ?? null;
 }
 
+export function getFirstPendingQuestionApproval(sessionId: string) {
+  return listPendingToolApprovals(sessionId).find((approval) => approval.kind === "question" && approval.question) ?? null;
+}
+
 export function listPendingToolApprovals(sessionId: string) {
   const approvalIds = pendingToolApprovalIdsBySession.get(sessionId);
   if (!approvalIds) {
@@ -115,6 +128,11 @@ export function listPendingToolApprovals(sessionId: string) {
     .sort((left, right) => left.requestedAt.localeCompare(right.requestedAt));
 }
 
-export function resolvePendingToolApproval(approvalId: string, status: ResolvedToolApprovalStatus) {
-  return pendingToolApprovalsById.get(approvalId)?.settle(status) ?? null;
+export function resolvePendingToolApproval(
+  approvalId: string,
+  status: ResolvedToolApprovalStatus,
+  responseText?: string | null,
+  decisionOption?: ToolApprovalDecisionOption | null,
+) {
+  return pendingToolApprovalsById.get(approvalId)?.settle(status, responseText, decisionOption) ?? null;
 }

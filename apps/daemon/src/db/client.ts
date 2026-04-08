@@ -607,6 +607,7 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, "memories", "fact_state", "TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted'))");
   ensureColumn(db, "runtime_settings", "reasoning_effort", "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn(db, "runtime_settings", "auto_approve_tool_requests", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "runtime_settings", "tool_permission_rules_json", "TEXT NOT NULL DEFAULT '{\"allow\":[],\"deny\":[],\"ask\":[]}'");
   ensureColumn(db, "runtime_settings", "tool_provider_id", "TEXT");
   ensureColumn(db, "runtime_settings", "tool_model", "TEXT");
   ensureColumn(db, "runtime_settings", "recent_turns_count", "INTEGER NOT NULL DEFAULT 4");
@@ -638,6 +639,9 @@ function runMigrations(db: Database.Database) {
     ).run();
   }
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
+  db.prepare(
+    "UPDATE runtime_settings SET tool_permission_rules_json = '{\"allow\":[],\"deny\":[],\"ask\":[]}' WHERE COALESCE(tool_permission_rules_json, '') = ''",
+  ).run();
   db.prepare(
     "UPDATE runtime_settings SET recent_turns_count = 4 WHERE COALESCE(recent_turns_count, 0) < 1",
   ).run();

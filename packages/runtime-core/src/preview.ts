@@ -112,6 +112,13 @@ export const previewSessionSnapshot: SessionSnapshot = {
     updatedAt: "2026-03-17T07:28:00.000Z",
   },
   project: null,
+  planMode: {
+    sessionId: primarySessionId,
+    active: false,
+    activePlanId: null,
+    enteredAt: null,
+    updatedAt: null,
+  },
   focusState: {
     sessionId: primarySessionId,
     goal: "把 runtime 里 session、sandbox 和 artifact 的关系整理成一个能快速回看的结构。",
@@ -245,5 +252,6 @@ export const previewSessionThreads: SessionThreadSummary[] = [
     messageCount: previewSessionSnapshot.messages.length,
     latestMessagePreview: previewSessionSnapshot.messages.at(-1)?.content ?? null,
     latestMessageAt: previewSessionSnapshot.messages.at(-1)?.createdAt ?? null,
+    planMode: previewSessionSnapshot.planMode,
   },
 ];

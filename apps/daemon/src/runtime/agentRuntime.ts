@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
-import type { ReasoningEffort } from "@aliceloop/runtime-core";
-import { generateText, stepCountIs, streamText } from "ai";
+import { type ReasoningEffort } from "@aliceloop/runtime-core";
+import { generateText, stepCountIs, streamText, type ToolSet } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { refreshSessionRollingSummary } from "../context/session/rollingSummary";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
+import { buildAgentProviderOptions, getProviderRuntimeProfile, resolveProviderTransport } from "../providers/providerProfile";
 import { createProviderModel } from "../providers/providerModelFactory";
 import { publishSessionEvent } from "../realtime/sessionStreams";
 import {
@@ -30,13 +31,17 @@ import { createMemory } from "../context/memory/memoryRepository";
 import { maybeCreateArtifactFromReply } from "../services/artifactWriter";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
 import { enqueueSessionRun } from "../services/sessionRunQueue";
-import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
 import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
 import { saveStreamCheckpoint, clearStreamCheckpoint } from "./streamCheckpoint";
 import { ToolStateMachine, type ToolCallState } from "./toolStateMachine";
+import { wrapToolSetWithExecutionCoordinator } from "./toolExecutionCoordinator";
 import { repairTextToolCall } from "./toolCallRepair";
+import { decideAttemptOutcome } from "./recoveryDecision";
 import { inferSkillIdsForToolCall } from "../context/tools/toolSkillRouting";
+import { USE_SKILL_TOOL_NAME } from "../context/tools/useSkillTool";
+import { ASK_USER_QUESTION_TOOL_NAME } from "../context/tools/askUserQuestionTool";
+import { ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME, WRITE_PLAN_ARTIFACT_TOOL_NAME } from "../context/tools/planModeTools";
 import {
   cloneWorksetState,
   type SessionWorksetState,
@@ -89,16 +94,99 @@ function publishAssistantReply(sessionId: string, content: string, skills: strin
   void refreshSessionRollingSummary(sessionId).catch(() => {});
 }
 
+const GENERIC_AGENT_ERROR_MESSAGES = new Set([
+  "Agent call failed",
+  "No output generated.",
+  "No output generated. Check the stream for errors.",
+]);
+
+function tryExtractProviderResponseMessage(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+
+  const responseBody = "responseBody" in error && typeof error.responseBody === "string"
+    ? error.responseBody
+    : null;
+  if (!responseBody) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(responseBody) as {
+      error?: { message?: unknown };
+    };
+    return typeof parsed.error?.message === "string" ? parsed.error.message : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractAgentErrorDetail(error: unknown, depth = 0): string | null {
+  if (!error || depth > 4) {
+    return null;
+  }
+
+  const providerMessage = tryExtractProviderResponseMessage(error);
+  if (providerMessage) {
+    return providerMessage;
+  }
+
+  if (error && typeof error === "object") {
+    if ("lastError" in error) {
+      const nested = extractAgentErrorDetail(error.lastError, depth + 1);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    if ("cause" in error) {
+      const nested = extractAgentErrorDetail(error.cause, depth + 1);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    if ("errors" in error && Array.isArray(error.errors)) {
+      for (const nestedError of error.errors) {
+        const nested = extractAgentErrorDetail(nestedError, depth + 1);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  }
+
+  if (error instanceof Error) {
+    if (error.message && !GENERIC_AGENT_ERROR_MESSAGES.has(error.message.trim())) {
+      return error.message;
+    }
+  } else if (typeof error === "string" && !GENERIC_AGENT_ERROR_MESSAGES.has(error.trim())) {
+    return error;
+  }
+
+  return null;
+}
+
 function buildAssistantEventPayload(skills: string[], tools: string[]) {
   const payload: { skills?: string[]; tools?: string[] } = {};
   if (skills.length > 0) {
     payload.skills = skills;
   }
-  if (tools.length > 0) {
-    payload.tools = tools;
+  const visibleTools = tools.filter((toolName) => !INTERNAL_TOOL_NAMES.has(toolName));
+  if (visibleTools.length > 0) {
+    payload.tools = visibleTools;
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
 }
+
+const INTERNAL_TOOL_NAMES = new Set([
+  USE_SKILL_TOOL_NAME,
+  ASK_USER_QUESTION_TOOL_NAME,
+  ENTER_PLAN_MODE_TOOL_NAME,
+  EXIT_PLAN_MODE_TOOL_NAME,
+  WRITE_PLAN_ARTIFACT_TOOL_NAME,
+]);
 
 function createWorksetEntryState(): WorksetEntryState {
   return {
@@ -119,12 +207,21 @@ function normalizeAttachedNames(values: Iterable<string>) {
 }
 
 function isCountedToolCall(state: ToolCallState) {
+  if (INTERNAL_TOOL_NAMES.has(state.toolName)) {
+    return false;
+  }
   return ![
     "input-streaming",
     "input-available",
+    "queued",
+    "executing",
     "approval-requested",
     "approval-responded",
   ].includes(state.status);
+}
+
+function filterUserFacingToolNames(values: Iterable<string>) {
+  return [...new Set([...values].filter((toolName) => !INTERNAL_TOOL_NAMES.has(toolName)))];
 }
 
 function settleWorksetAfterTurn(input: {
@@ -271,108 +368,8 @@ function isBrowserToolName(toolName: string) {
   return toolName.startsWith("browser_");
 }
 
-function looksLikeBinaryTextDump(value: string) {
-  if (/data:image\/[a-z0-9.+-]+;base64,/iu.test(value)) {
-    return true;
-  }
-
-  return /[A-Za-z0-9+/=]{1800,}/u.test(value.replace(/\s+/g, ""));
-}
-
-function sanitizeAssistantTextForChat(value: string) {
-  const strippedAttachmentMarkers = value
-    .replace(/^\[(Attached files?|Attached directory tree|Attached file content):[^\n]*\]\s*$/gimu, "")
-    .trim();
-  const normalized = strippedAttachmentMarkers || value;
-
-  if (!looksLikeBinaryTextDump(normalized)) {
-    return normalized;
-  }
-
-  return [
-    "我没有返回可直接显示的真实图片附件。",
-    "如果需要二维码、登录页或截图，我应该打开真实页面并用 `browser_screenshot` 或受支持的截图链路把图片作为附件发回聊天，而不是粘贴 base64 / SVG 文本。",
-  ].join("\n");
-}
-
-function getRenderableAssistantText(providerId: string, value: string, final = false) {
-  const sanitized = sanitizeAssistantTextForChat(value);
-  const trimmed = sanitized.trimStart();
-  if (!trimmed) {
-    return sanitized;
-  }
-
-  if (!final && (/\[TOOL_CALL\]/iu.test(trimmed) || /<tool_call>/iu.test(trimmed))) {
-    return null;
-  }
-
-  if (providerId !== "minimax" || final) {
-    return sanitized;
-  }
-
-  const lowerTrimmed = trimmed.toLowerCase();
-  const minimaxPrelude = "minimax:tool_call";
-
-  if (minimaxPrelude.startsWith(lowerTrimmed)) {
-    return null;
-  }
-
-  if (lowerTrimmed.startsWith(minimaxPrelude)) {
-    return "";
-  }
-
-  return sanitized;
-}
-
 function isResearchToolName(toolName: string) {
   return toolName === "web_fetch" || toolName === "web_search";
-}
-
-function normalizeReasoningModelId(modelId: string) {
-  const normalized = modelId.trim().toLowerCase();
-  const lastSlashIndex = normalized.lastIndexOf("/");
-  return lastSlashIndex >= 0 ? normalized.slice(lastSlashIndex + 1) : normalized;
-}
-
-function resolveProviderTransport(config: StoredProviderConfig) {
-  if (config.transport !== "auto") {
-    return config.transport;
-  }
-
-  if (normalizeReasoningModelId(config.model).startsWith("claude")) {
-    return "anthropic" as const;
-  }
-
-  return "openai-compatible" as const;
-}
-
-function supportsReasoningEffort(config: StoredProviderConfig) {
-  if (resolveProviderTransport(config) !== "openai-compatible") {
-    return false;
-  }
-
-  const modelId = normalizeReasoningModelId(config.model);
-  return modelId.startsWith("o1")
-    || modelId.startsWith("o3")
-    || modelId.startsWith("o4-mini")
-    || (modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat"));
-}
-
-function mapReasoningEffortToOpenAI(effort: ReasoningEffort) {
-  return effort === "off" ? "none" : effort;
-}
-
-function buildAgentProviderOptions(config: StoredProviderConfig, reasoningEffort: ReasoningEffort) {
-  if (!supportsReasoningEffort(config)) {
-    return undefined;
-  }
-
-  return {
-    openai: {
-      reasoningEffort: mapReasoningEffortToOpenAI(reasoningEffort),
-      forceReasoning: true,
-    },
-  };
 }
 
 function extractBrowserToolPayload(value: unknown): { backend?: string; tabId?: string } {
@@ -579,6 +576,18 @@ function buildLocalFallbackReply(userMessage: string | null) {
     return "已收到你的消息。当前还没有配置可用的模型网关，所以这里先返回本地组装的 assistant 回复，确认 Aliceloop 的最小闭环已经打通。";
   }
 
+  const delegatedTaskMatch = normalized.match(
+    /^You are a delegated sub-agent working on behalf of another Aliceloop agent\.[\s\S]*?\nAssigned task:\n([\s\S]+)$/u,
+  );
+  if (delegatedTaskMatch) {
+    const assignedTask = delegatedTaskMatch[1]?.trim() ?? "";
+    return [
+      "Delegated task completed in local fallback mode.",
+      assignedTask ? `Task: ${assignedTask}` : null,
+      "No enabled model gateway with an API key is configured yet, so this is a local runtime confirmation rather than a real model-produced sub-agent result.",
+    ].filter(Boolean).join("\n");
+  }
+
   return [
     "已收到你的消息，Aliceloop 的最小闭环是通的。",
     `我收到的是：${normalized}`,
@@ -603,43 +612,33 @@ function summarizeUnknown(value: unknown, maxLength = 800) {
   }
 }
 
-function buildMiniMaxToolFallbackPrompt(toolName: string, input: Record<string, unknown>, output: unknown) {
-  return [
-    `You previously attempted to call the tool "${toolName}" with input: ${summarizeUnknown(input, 400) ?? "{}"}`,
-    `The tool returned: ${summarizeUnknown(output, 4000) ?? ""}`,
-    "Answer the user's original request directly in normal prose.",
-    "Do not emit XML, <tool> tags, or tool_call markup.",
-  ].join("\n\n");
-}
-
-async function executeMiniMaxTextToolCallFallback(
+async function executeTextToolCallFallback(
   run: AgentRun,
   stateMachine: ToolStateMachine,
   reasoningEffort: ReasoningEffort,
   assistantText: string,
+  tools: ToolSet,
 ) {
+  const providerProfile = getProviderRuntimeProfile(run.provider.id);
   const parsed = repairTextToolCall(assistantText);
   if (!parsed) {
     return null;
   }
 
-  const tool = run.context.tools[parsed.toolName] as { execute?: (input: unknown) => Promise<unknown> } | undefined;
+  const tool = tools[parsed.toolName] as { execute?: (input: unknown, options?: unknown) => Promise<unknown> } | undefined;
   if (!tool || typeof tool.execute !== "function") {
     const availableTools = Object.keys(run.context.tools);
-    const availablePreview = availableTools.slice(0, 12).join(", ");
     return {
-      replacementText: [
-        `MiniMax 尝试调用 \`${parsed.toolName}\`，但当前回合没有把这个工具加入工具集。`,
-        availablePreview
-          ? `当前已挂载的工具有：${availablePreview}${availableTools.length > 12 ? " 等" : ""}。`
-          : "当前回合没有挂载任何可执行工具。",
-      ].join("\n\n"),
+      replacementText: providerProfile.textToolCallFallback.buildMissingToolText(
+        parsed.toolName,
+        availableTools,
+      ),
       toolCallCount: 0,
       parsedMarkup: parsed.markup,
     };
   }
 
-  const toolCallId = `minimax-fallback-${randomUUID()}`;
+  const toolCallId = `${providerProfile.textToolCallFallback.toolCallIdPrefix}-${randomUUID()}`;
   stateMachine.start(toolCallId, parsed.toolName, parsed.input);
   stateMachine.markInputAvailable(toolCallId);
 
@@ -651,13 +650,17 @@ async function executeMiniMaxTextToolCallFallback(
     backend: predictedRuntime.backend,
     tabId: predictedRuntime.tabId,
     state: "input-available",
-    fallbackSource: "minimax_text_tool_call",
+    fallbackSource: providerProfile.textToolCallFallback.source,
   });
 
   const toolStartedAt = nowMs();
 
   try {
-    const output = await tool.execute(parsed.input);
+    const output = await tool.execute(parsed.input, {
+      toolCallId,
+      messages: run.context.messages,
+      abortSignal: run.abortController.signal,
+    });
     stateMachine.markOutputAvailable(toolCallId, output);
     stateMachine.complete(toolCallId);
 
@@ -671,7 +674,7 @@ async function executeMiniMaxTextToolCallFallback(
       backend: browserPayload.backend ?? predictedRuntime.backend,
       tabId: browserPayload.tabId ?? predictedRuntime.tabId,
       state: "output-available",
-      fallbackSource: "minimax_text_tool_call",
+      fallbackSource: providerProfile.textToolCallFallback.source,
     });
 
     void maybePublishToolImageAttachment(
@@ -695,7 +698,11 @@ async function executeMiniMaxTextToolCallFallback(
           },
           {
             role: "user",
-            content: buildMiniMaxToolFallbackPrompt(parsed.toolName, parsed.input, output),
+            content: providerProfile.textToolCallFallback.buildFollowupPrompt(
+              parsed.toolName,
+              parsed.input,
+              output,
+            ),
           },
         ],
         providerOptions: buildAgentProviderOptions(run.provider, reasoningEffort),
@@ -707,10 +714,10 @@ async function executeMiniMaxTextToolCallFallback(
     }
 
     if (!finalText) {
-      finalText = [
-        `已接住 MiniMax 的文本工具调用并执行了 \`${parsed.toolName}\`。`,
-        summarizeUnknown(output, 4000) ?? "",
-      ].filter(Boolean).join("\n\n");
+      finalText = providerProfile.textToolCallFallback.buildSuccessText(
+        parsed.toolName,
+        output,
+      );
     }
 
     return {
@@ -731,14 +738,15 @@ async function executeMiniMaxTextToolCallFallback(
       backend: predictedRuntime.backend,
       tabId: predictedRuntime.tabId,
       state: "output-error",
-      fallbackSource: "minimax_text_tool_call",
+      fallbackSource: providerProfile.textToolCallFallback.source,
     });
 
     return {
-      replacementText: [
-        `MiniMax 返回了文本形式的工具调用：${parsed.markup}`,
-        `我尝试按 AI-native fallback 执行 \`${parsed.toolName}\`，但失败了：${error instanceof Error ? error.message : String(error)}`,
-      ].join("\n\n"),
+      replacementText: providerProfile.textToolCallFallback.buildErrorText(
+        parsed.markup,
+        parsed.toolName,
+        error,
+      ),
       toolCallCount: 1,
       parsedMarkup: parsed.markup,
     };
@@ -747,23 +755,146 @@ async function executeMiniMaxTextToolCallFallback(
 
 interface CapabilityRecoveryRequest {
   additionalStickySkillIds: string[];
+  additionalSelectedSkillIds: string[];
   additionalToolNames: string[];
   reason: string;
 }
 
+function inferPlanModeTransitionRecoveryRequest(
+  toolCalls: ToolCallState[],
+  planModeActive: boolean,
+): CapabilityRecoveryRequest | null {
+  for (const toolCall of toolCalls) {
+    if (toolCall.status !== "output-available" && toolCall.status !== "done") {
+      continue;
+    }
+
+    const payload = extractJsonObject<{ kind?: unknown; status?: unknown }>(toolCall.output);
+    const kind = typeof payload?.kind === "string" ? payload.kind : null;
+    const status = typeof payload?.status === "string" ? payload.status : null;
+
+    if (!planModeActive && kind === ENTER_PLAN_MODE_TOOL_NAME && status === "entered") {
+      return buildCapabilityRecoveryRequest("enter_plan_mode", {
+        selectedSkillIds: [],
+        toolNames: [],
+      });
+    }
+
+    if (planModeActive && kind === EXIT_PLAN_MODE_TOOL_NAME && status === "exited") {
+      return buildCapabilityRecoveryRequest("exit_plan_mode", {
+        selectedSkillIds: [],
+        toolNames: [],
+      });
+    }
+  }
+
+  return null;
+}
+
 const MAX_CAPABILITY_RECOVERY_ATTEMPTS = 3;
+const USE_SKILL_RECOVERY_LIMIT = 2;
+const META_SKILL_IDS = new Set(["skill-hub", "skill-search"]);
+const MISSING_COMMAND_TOOL_ALIASES = new Map<string, string>([
+  ["web_search", "web_search"],
+  ["WebSearch", "web_search"],
+  ["web_fetch", "web_fetch"],
+  ["WebFetch", "web_fetch"],
+  ["chrome_relay_status", "chrome_relay_status"],
+  ["ChromeRelayStatus", "chrome_relay_status"],
+  ["chrome_relay_list_tabs", "chrome_relay_list_tabs"],
+  ["ChromeRelayListTabs", "chrome_relay_list_tabs"],
+  ["chrome_relay_open", "chrome_relay_open"],
+  ["ChromeRelayOpen", "chrome_relay_open"],
+  ["chrome_relay_navigate", "chrome_relay_navigate"],
+  ["ChromeRelayNavigate", "chrome_relay_navigate"],
+  ["chrome_relay_read", "chrome_relay_read"],
+  ["ChromeRelayRead", "chrome_relay_read"],
+  ["chrome_relay_read_dom", "chrome_relay_read_dom"],
+  ["ChromeRelayReadDom", "chrome_relay_read_dom"],
+  ["chrome_relay_click", "chrome_relay_click"],
+  ["ChromeRelayClick", "chrome_relay_click"],
+  ["chrome_relay_type", "chrome_relay_type"],
+  ["ChromeRelayType", "chrome_relay_type"],
+  ["chrome_relay_screenshot", "chrome_relay_screenshot"],
+  ["ChromeRelayScreenshot", "chrome_relay_screenshot"],
+  ["chrome_relay_scroll", "chrome_relay_scroll"],
+  ["ChromeRelayScroll", "chrome_relay_scroll"],
+  ["chrome_relay_eval", "chrome_relay_eval"],
+  ["ChromeRelayEval", "chrome_relay_eval"],
+  ["chrome_relay_back", "chrome_relay_back"],
+  ["ChromeRelayBack", "chrome_relay_back"],
+  ["chrome_relay_forward", "chrome_relay_forward"],
+  ["ChromeRelayForward", "chrome_relay_forward"],
+  ["task_delegation", "task_delegation"],
+  ["TaskDelegation", "task_delegation"],
+  ["task_output", "task_output"],
+  ["TaskOutput", "task_output"],
+]);
+const MISSING_COMMAND_TOKEN_PATTERN = new RegExp(
+  `\\b(${[...MISSING_COMMAND_TOOL_ALIASES.keys()].sort((left, right) => right.length - left.length).join("|")})\\b`,
+  "u",
+);
 
 function buildCapabilityRecoveryRequest(
   reason: string,
   input: {
     skillIds?: string[];
+    selectedSkillIds?: string[];
     toolNames?: string[];
   },
 ): CapabilityRecoveryRequest {
   return {
-    additionalStickySkillIds: [...new Set([...(input.skillIds ?? []), "skill-search", "skill-hub"])],
+    additionalStickySkillIds: [...new Set(input.skillIds ?? [])],
+    additionalSelectedSkillIds: [...new Set(input.selectedSkillIds ?? [])],
     additionalToolNames: [...new Set(input.toolNames ?? [])],
     reason,
+  };
+}
+
+function inferUseSkillRecoveryRequest(
+  toolCalls: ToolCallState[],
+  attachedSkillIds: Iterable<string>,
+): CapabilityRecoveryRequest | null {
+  const attachedSkillSet = new Set(attachedSkillIds);
+  const loadedSkillIds: string[] = [];
+  const seenSkillIds = new Set<string>();
+
+  for (const toolCall of toolCalls) {
+    if (toolCall.toolName !== USE_SKILL_TOOL_NAME) {
+      continue;
+    }
+    if (toolCall.status !== "output-available" && toolCall.status !== "done") {
+      continue;
+    }
+
+    const payload = extractJsonObject<{ kind?: unknown; skillId?: unknown; status?: unknown }>(toolCall.output);
+    const kind = typeof payload?.kind === "string" ? payload.kind : null;
+    const skillId = typeof payload?.skillId === "string" ? payload.skillId : null;
+    const status = typeof payload?.status === "string" ? payload.status : null;
+
+    if (kind !== USE_SKILL_TOOL_NAME || !skillId || status !== "loaded" || attachedSkillSet.has(skillId)) {
+      continue;
+    }
+    if (seenSkillIds.has(skillId)) {
+      continue;
+    }
+    seenSkillIds.add(skillId);
+    loadedSkillIds.push(skillId);
+  }
+
+  if (loadedSkillIds.length === 0) {
+    return null;
+  }
+
+  const selectedSkillIds = [
+    ...loadedSkillIds.filter((skillId) => !META_SKILL_IDS.has(skillId)),
+    ...loadedSkillIds.filter((skillId) => META_SKILL_IDS.has(skillId)),
+  ].slice(0, USE_SKILL_RECOVERY_LIMIT);
+  return {
+    additionalStickySkillIds: [],
+    additionalSelectedSkillIds: selectedSkillIds,
+    additionalToolNames: [],
+    reason: `use_skill:${selectedSkillIds.join(",")}`,
   };
 }
 
@@ -780,15 +911,86 @@ function inferStickySkillsForToolName(toolName: string) {
     return ["web-search"];
   }
 
-  if (toolName === "web_fetch") {
+  if (toolName === "web_fetch" || toolName.startsWith("chrome_relay_")) {
     return ["web-fetch"];
   }
 
-  if (toolName.startsWith("browser_") || toolName.startsWith("chrome_relay_")) {
+  if (toolName.startsWith("browser_")) {
     return ["browser"];
   }
 
   return [];
+}
+
+function extractMissingCommandToolName(toolCall: ToolCallState) {
+  if (toolCall.toolName !== "bash" || toolCall.status !== "output-error") {
+    return null;
+  }
+
+  const input = typeof toolCall.input === "object" && toolCall.input ? toolCall.input as Record<string, unknown> : null;
+  const texts = [
+    toolCall.error,
+    typeof toolCall.output === "string" ? toolCall.output : null,
+    typeof input?.command === "string" ? input.command : null,
+    typeof input?.script === "string" ? input.script : null,
+  ];
+
+  for (const text of texts) {
+    if (!text) {
+      continue;
+    }
+    const match = text.match(MISSING_COMMAND_TOKEN_PATTERN);
+    if (!match) {
+      continue;
+    }
+
+    return MISSING_COMMAND_TOOL_ALIASES.get(match[1] ?? "") ?? null;
+  }
+
+  return null;
+}
+
+function inferMissingCommandRecoveryRequest(
+  toolCalls: ToolCallState[],
+  attachedSkillIds: Iterable<string>,
+  attachedToolNames: Iterable<string>,
+): CapabilityRecoveryRequest | null {
+  const attachedSkillSet = new Set(attachedSkillIds);
+  const attachedToolSet = new Set(attachedToolNames);
+  const selectedSkillIds = new Set<string>();
+  const toolNames = new Set<string>();
+
+  for (const toolCall of toolCalls) {
+    const missingToolName = extractMissingCommandToolName(toolCall);
+    if (!missingToolName) {
+      continue;
+    }
+
+    for (const skillId of inferStickySkillsForToolName(missingToolName)) {
+      if (!attachedSkillSet.has(skillId)) {
+        selectedSkillIds.add(skillId);
+      }
+    }
+    if (!attachedToolSet.has(missingToolName)) {
+      toolNames.add(missingToolName);
+    }
+  }
+
+  if (selectedSkillIds.size === 0 && toolNames.size === 0) {
+    return null;
+  }
+
+  const selected = [...selectedSkillIds].slice(0, USE_SKILL_RECOVERY_LIMIT);
+  const tools = [...toolNames];
+  const reasonParts = [
+    selected.length > 0 ? `skills:${selected.join(",")}` : null,
+    tools.length > 0 ? `tools:${tools.join(",")}` : null,
+  ].filter(Boolean);
+
+  return buildCapabilityRecoveryRequest(`missing_command:${reasonParts.join("|")}`, {
+    selectedSkillIds: selected,
+    toolNames: tools,
+  });
 }
 
 function extractReferencedToolNameFromAssistantText(text: string) {
@@ -912,8 +1114,6 @@ function inferCapabilityRecoveryRequest(
 type RuntimeEventType =
   | "tool.call.started"
   | "tool.call.completed"
-  | "tool.approval.requested"
-  | "tool.approval.resolved"
   | "tool.state.change";
 
 function publishRuntimeEvent(
@@ -1051,7 +1251,7 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
         });
         publishRuntimeNotice(sessionId, detail);
       } else {
-        const detail = error instanceof Error ? error.message : "Agent call failed";
+        const detail = extractAgentErrorDetail(error) ?? (error instanceof Error ? error.message : "Agent call failed");
         publishJob({
           id: jobId,
           sessionId,
@@ -1083,6 +1283,7 @@ interface StreamResult {
     resolvedToolCallCount: number;
     providerMetadataPreview: string | null;
   };
+  earlyRecovery?: CapabilityRecoveryRequest | null;
 }
 
 async function executeStreamAttempt(
@@ -1092,12 +1293,29 @@ async function executeStreamAttempt(
   const requestStartedAt = nowMs();
   const toolCallInputs = new Map<string, unknown>();
   const runtimeSettings = getRuntimeSettings();
+  const toolNames = Object.keys(run.context.tools);
+  const onlyInternalToolsAttached = toolNames.length > 0
+    && toolNames.every((toolName) => INTERNAL_TOOL_NAMES.has(toolName));
+  const effectiveReasoningEffort: ReasoningEffort = onlyInternalToolsAttached ? "low" : runtimeSettings.reasoningEffort;
+  const maxStepCount = onlyInternalToolsAttached
+    ? Math.min(4, run.context.safetyConfig.maxIterations)
+    : run.context.safetyConfig.maxIterations;
+  const attemptAbortController = new AbortController();
+  const streamAbortSignal = AbortSignal.any([
+    run.abortController.signal,
+    attemptAbortController.signal,
+  ]);
+  let earlyRecovery: CapabilityRecoveryRequest | null = null;
 
   // Tool state machine for tracking tool call lifecycle
   const stateMachine = new ToolStateMachine();
+  const scheduledTools = wrapToolSetWithExecutionCoordinator(run.context.tools, stateMachine);
 
   // Publish state changes as session events
   stateMachine.onStateChange((state) => {
+    if (INTERNAL_TOOL_NAMES.has(state.toolName)) {
+      return;
+    }
     publishRuntimeEvent(run.sessionId, "tool.state.change", {
       toolCallId: state.toolCallId,
       toolName: state.toolName,
@@ -1112,10 +1330,10 @@ async function executeStreamAttempt(
     model: createProviderModel(run.provider),
     system: run.context.systemPrompt,
     messages: run.context.messages,
-    tools: run.context.tools,
-    providerOptions: buildAgentProviderOptions(run.provider, runtimeSettings.reasoningEffort),
-    stopWhen: stepCountIs(run.context.safetyConfig.maxIterations),
-    abortSignal: run.abortController.signal,
+    tools: scheduledTools,
+    providerOptions: buildAgentProviderOptions(run.provider, effectiveReasoningEffort),
+    stopWhen: stepCountIs(maxStepCount),
+    abortSignal: streamAbortSignal,
     prepareStep({ steps }) {
       if (steps.length !== 0 || !run.context.firstStepToolChoice) {
         return undefined;
@@ -1136,25 +1354,17 @@ async function executeStreamAttempt(
       stateMachine.start(toolCall.toolCallId, toolCall.toolName, toolCall.input);
       stateMachine.markInputAvailable(toolCall.toolCallId);
 
-      // Check if this tool needs approval
-      if (!runtimeSettings.autoApproveToolRequests && stateMachine.needsApproval(toolCall.toolName)) {
-        // Publish approval request event
-        publishRuntimeEvent(run.sessionId, "tool.approval.requested", {
+      if (!INTERNAL_TOOL_NAMES.has(toolCall.toolName)) {
+        const predictedRuntime = predictToolBackend(run.sessionId, toolCall.toolName);
+        publishRuntimeEvent(run.sessionId, "tool.call.started", {
           toolCallId: toolCall.toolCallId,
           toolName: toolCall.toolName,
           inputPreview: summarizeUnknown(toolCall.input),
+          backend: predictedRuntime.backend,
+          tabId: predictedRuntime.tabId,
+          state: "input-available",
         });
       }
-
-      const predictedRuntime = predictToolBackend(run.sessionId, toolCall.toolName);
-      publishRuntimeEvent(run.sessionId, "tool.call.started", {
-        toolCallId: toolCall.toolCallId,
-        toolName: toolCall.toolName,
-        inputPreview: summarizeUnknown(toolCall.input),
-        backend: predictedRuntime.backend,
-        tabId: predictedRuntime.tabId,
-        state: "input-available",
-      });
     },
     experimental_onToolCallFinish(event) {
       run.safety.checkActive();
@@ -1168,31 +1378,53 @@ async function executeStreamAttempt(
       // Update tool state machine
       if (event.success) {
         stateMachine.markOutputAvailable(event.toolCall.toolCallId, event.output);
+        const completedState = stateMachine.get(event.toolCall.toolCallId);
+        const transitionRecovery = completedState
+          ? inferPlanModeTransitionRecoveryRequest([completedState], run.context.planModeActive)
+          : null;
+        if (transitionRecovery && !earlyRecovery) {
+          earlyRecovery = transitionRecovery;
+          attemptAbortController.abort();
+        }
       } else {
         stateMachine.markError(event.toolCall.toolCallId, event.error);
+        const failedState = stateMachine.get(event.toolCall.toolCallId);
+        const missingToolName = failedState ? extractMissingCommandToolName(failedState) : null;
+        if (missingToolName && !earlyRecovery) {
+          earlyRecovery = inferMissingCommandRecoveryRequest(
+            failedState ? [failedState] : [],
+            run.context.routedSkillIds,
+            filterUserFacingToolNames(Object.keys(run.context.tools)),
+          );
+          if (earlyRecovery) {
+            attemptAbortController.abort();
+          }
+        }
       }
       stateMachine.complete(event.toolCall.toolCallId);
 
-      publishRuntimeEvent(run.sessionId, "tool.call.completed", {
-        toolCallId: event.toolCall.toolCallId,
-        toolName: event.toolCall.toolName,
-        success: event.success,
-        resultPreview,
-        durationMs: event.durationMs,
-        backend: completedBackend,
-        tabId: completedTabId,
-        state: event.success ? "output-available" : "output-error",
-      });
-      logPerfTrace("tool_call", {
-        sessionId: run.sessionId,
-        toolCallId: event.toolCall.toolCallId,
-        toolName: event.toolCall.toolName,
-        success: event.success ? 1 : 0,
-        durationMs: typeof event.durationMs === "number" ? roundMs(event.durationMs) : null,
-        browserBackend: completedBackend,
-        tabId: completedTabId,
-      });
-      if (event.success) {
+      if (!INTERNAL_TOOL_NAMES.has(event.toolCall.toolName)) {
+        publishRuntimeEvent(run.sessionId, "tool.call.completed", {
+          toolCallId: event.toolCall.toolCallId,
+          toolName: event.toolCall.toolName,
+          success: event.success,
+          resultPreview,
+          durationMs: event.durationMs,
+          backend: completedBackend,
+          tabId: completedTabId,
+          state: event.success ? "output-available" : "output-error",
+        });
+        logPerfTrace("tool_call", {
+          sessionId: run.sessionId,
+          toolCallId: event.toolCall.toolCallId,
+          toolName: event.toolCall.toolName,
+          success: event.success ? 1 : 0,
+          durationMs: typeof event.durationMs === "number" ? roundMs(event.durationMs) : null,
+          browserBackend: completedBackend,
+          tabId: completedTabId,
+        });
+      }
+      if (event.success && !INTERNAL_TOOL_NAMES.has(event.toolCall.toolName)) {
         void maybePublishToolImageAttachment(
           run.sessionId,
           event.toolCall.toolName,
@@ -1205,14 +1437,35 @@ async function executeStreamAttempt(
   });
   const streamSetupMs = roundMs(nowMs() - requestStartedAt);
 
-  const { text, timings, diagnostics, assistantMessageId } = await consumeTextStream(
-    run,
-    stream,
-    stateMachine,
-    runtimeSettings.reasoningEffort,
-    requestStartedAt,
-    existingAssistantMessageId ?? null,
-  );
+  let consumed;
+  try {
+    consumed = await consumeTextStream(
+      run,
+      stream,
+      stateMachine,
+      scheduledTools,
+      effectiveReasoningEffort,
+      requestStartedAt,
+      existingAssistantMessageId ?? null,
+      attemptAbortController.signal,
+      () => earlyRecovery,
+    );
+  } catch (error) {
+    if (attemptAbortController.signal.aborted && earlyRecovery) {
+      consumed = {
+        text: "",
+        assistantMessageId: existingAssistantMessageId ?? null,
+        timings: {},
+        diagnostics: {
+          resolvedToolCallCount: 0,
+          providerMetadataPreview: null,
+        },
+      };
+    } else {
+      throw error;
+    }
+  }
+  const { text, timings, diagnostics, assistantMessageId } = consumed;
   return {
     text,
     timings: {
@@ -1221,7 +1474,8 @@ async function executeStreamAttempt(
     },
     diagnostics,
     assistantMessageId,
-    attachedToolNames: Object.keys(run.context.tools),
+    earlyRecovery,
+    attachedToolNames: filterUserFacingToolNames(Object.keys(run.context.tools)),
     toolCalls: stateMachine.getAll(),
   };
 }
@@ -1232,12 +1486,16 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   let finalResult: StreamResult | null = null;
   const startingWorksetState = getSessionWorksetState(run.sessionId);
   const accumulatedStickySkillIds = new Set<string>();
+  const accumulatedSelectedSkillIds = new Set<string>();
   const accumulatedToolNames = new Set<string>();
   const accumulatedAttachedSkillIds = new Set<string>();
   const accumulatedAttachedToolNames = new Set<string>();
   const accumulatedToolCalls: ToolCallState[] = [];
   const attemptedRecoveryReasons = new Set<string>();
   const latestUserMessage = getLatestUserMessage(run.sessionId);
+  let hiddenAttemptCount = 0;
+  let hiddenAttemptMs = 0;
+  let visibleAttemptCount = 0;
 
   try {
     for (let attempt = 0; attempt < MAX_CAPABILITY_RECOVERY_ATTEMPTS; attempt += 1) {
@@ -1257,40 +1515,100 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
       }
       accumulatedToolCalls.push(...result.toolCalls);
 
-      const recovery = inferCapabilityRecoveryRequest(
+      const recovery = result.earlyRecovery ?? inferUseSkillRecoveryRequest(
+        result.toolCalls,
+        run.context.routedSkillIds,
+      ) ?? inferPlanModeTransitionRecoveryRequest(
+        result.toolCalls,
+        run.context.planModeActive,
+      ) ?? inferMissingCommandRecoveryRequest(
+        result.toolCalls,
+        run.context.routedSkillIds,
+        result.attachedToolNames,
+      ) ?? inferCapabilityRecoveryRequest(
         latestUserMessage,
         result.text,
         result.attachedToolNames,
         result.diagnostics?.resolvedToolCallCount ?? 0,
       );
-      const isLastAttempt = attempt >= MAX_CAPABILITY_RECOVERY_ATTEMPTS - 1;
-      if (!recovery || attemptedRecoveryReasons.has(recovery.reason) || isLastAttempt) {
-        if (
-          lastResult
-          && (lastResult.diagnostics?.resolvedToolCallCount ?? 0) === 0
-          && looksLikeCapabilitySeekingReply(lastResult.text)
-        ) {
-          lastResult = {
-            ...lastResult,
-            text: buildCapabilityFailureReply(latestUserMessage, result.attachedToolNames),
-          };
-        }
-        finalResult = lastResult;
-        break;
-      }
-
-      attemptedRecoveryReasons.add(recovery.reason);
-      for (const skillId of recovery.additionalStickySkillIds) {
-        accumulatedStickySkillIds.add(skillId);
-      }
-      for (const toolName of recovery.additionalToolNames) {
-        accumulatedToolNames.add(toolName);
-      }
-
-      run.context = await loadContext(run.sessionId, run.abortController.signal, {
-        additionalStickySkillIds: [...accumulatedStickySkillIds],
-        additionalToolNames: [...accumulatedToolNames],
+      const decision = decideAttemptOutcome({
+        attempt,
+        maxAttempts: MAX_CAPABILITY_RECOVERY_ATTEMPTS,
+        resolvedToolCallCount: result.diagnostics?.resolvedToolCallCount ?? 0,
+        recoveryReason: recovery?.reason ?? null,
+        attemptedRecoveryReasons,
+        capabilitySeekingReply: looksLikeCapabilitySeekingReply(result.text),
+        capabilityFailureText: buildCapabilityFailureReply(
+          latestUserMessage,
+          result.attachedToolNames,
+        ),
       });
+
+      const attemptStreamMs = typeof result.timings.streamTotalMs === "number"
+        ? result.timings.streamTotalMs
+        : 0;
+      const isHiddenAttempt = !result.assistantMessageId;
+      if (isHiddenAttempt) {
+        hiddenAttemptCount += 1;
+        hiddenAttemptMs += attemptStreamMs;
+      } else {
+        visibleAttemptCount += 1;
+      }
+
+      logPerfTrace("agent_attempt", {
+        sessionId: run.sessionId,
+        attempt,
+        routedSkills: run.context.routedSkillIds.join(","),
+        attachedTools: result.attachedToolNames.join(","),
+        toolSurfaceKey: typeof run.context.timings.toolSurfaceKey === "string" ? run.context.timings.toolSurfaceKey : null,
+        skillBlockKey: typeof run.context.timings.skillBlockKey === "string" ? run.context.timings.skillBlockKey : null,
+        firstTokenMs: typeof result.timings.firstTokenMs === "number" ? result.timings.firstTokenMs : null,
+        streamTotalMs: attemptStreamMs,
+        resolvedToolCallCount: result.diagnostics?.resolvedToolCallCount ?? 0,
+        assistantVisible: isHiddenAttempt ? 0 : 1,
+        recoveryReason: recovery?.reason ?? null,
+        decision: decision.kind,
+      });
+
+      switch (decision.kind) {
+        case "reload_context": {
+          if (!recovery) {
+            finalResult = lastResult;
+            break;
+          }
+
+          attemptedRecoveryReasons.add(recovery.reason);
+          for (const skillId of recovery.additionalStickySkillIds) {
+            accumulatedStickySkillIds.add(skillId);
+          }
+          for (const skillId of recovery.additionalSelectedSkillIds) {
+            accumulatedSelectedSkillIds.add(skillId);
+          }
+          for (const toolName of recovery.additionalToolNames) {
+            accumulatedToolNames.add(toolName);
+          }
+
+          run.context = await loadContext(run.sessionId, run.abortController.signal, {
+            additionalStickySkillIds: [...accumulatedStickySkillIds],
+            additionalSelectedSkillIds: [...accumulatedSelectedSkillIds],
+            additionalToolNames: [...accumulatedToolNames],
+          });
+          continue;
+        }
+
+        case "replace_text":
+          finalResult = {
+            ...lastResult,
+            text: decision.text,
+          };
+          break;
+
+        case "accept":
+          finalResult = lastResult;
+          break;
+      }
+
+      break;
     }
   } finally {
     settleWorksetAfterTurn({
@@ -1317,11 +1635,25 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   ) {
     return {
       ...fallbackResult,
+      timings: {
+        ...fallbackResult.timings,
+        hiddenAttemptCount,
+        hiddenAttemptMs: roundMs(hiddenAttemptMs),
+        visibleAttemptCount,
+      },
       text: buildCapabilityFailureReply(latestUserMessage, [...accumulatedToolNames]),
     };
   }
 
-  return fallbackResult;
+  return {
+    ...fallbackResult,
+    timings: {
+      ...fallbackResult.timings,
+      hiddenAttemptCount,
+      hiddenAttemptMs: roundMs(hiddenAttemptMs),
+      visibleAttemptCount,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1334,9 +1666,12 @@ async function consumeTextStream(
   run: AgentRun,
   stream: Awaited<ReturnType<typeof streamText>>,
   stateMachine: ToolStateMachine,
+  scheduledTools: ToolSet,
   reasoningEffort: ReasoningEffort,
   requestStartedAt: number,
   existingAssistantMessageId: string | null,
+  attemptAbortSignal: AbortSignal,
+  getEarlyRecovery: () => CapabilityRecoveryRequest | null,
 ): Promise<{
   text: string;
   assistantMessageId: string | null;
@@ -1351,18 +1686,45 @@ async function consumeTextStream(
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let firstTokenMs: number | null = null;
   let resolvedToolCalls: unknown[] = [];
-  const attachedToolNames = Object.keys(run.context.tools);
-  let fallbackToolCallCount = 0;
+  const attachedToolNames = filterUserFacingToolNames(Object.keys(run.context.tools));
+  const deferAssistantMessageCreation = attachedToolNames.length === 0;
+  const providerProfile = getProviderRuntimeProfile(run.provider.id);
+  let abortedForRecovery = false;
 
   function getChatContent(final = false) {
-    return getRenderableAssistantText(run.provider.id, text, final);
+    return providerProfile.renderAssistantText(text, final);
+  }
+
+  function ensureAssistantMessage(content: string) {
+    if (assistantMessageId) {
+      return;
+    }
+
+    if (firstTokenMs === null) {
+      firstTokenMs = roundMs(nowMs() - requestStartedAt);
+    }
+
+    const messageResult = createSessionMessage({
+      sessionId: run.sessionId,
+      clientMessageId: assistantClientMessageId,
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content,
+      attachmentIds: [],
+      eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+    });
+
+    assistantMessageId = messageResult.message.id;
+    for (const event of messageResult.events) {
+      publishSessionEvent(event);
+    }
   }
 
   function flush() {
     if (!assistantMessageId || !pendingFlush) return;
     pendingFlush = false;
     const content = getChatContent();
-    if (content === null) {
+    if (content === null || !content.trim()) {
       return;
     }
     const updateResult = updateSessionMessage({
@@ -1374,48 +1736,54 @@ async function consumeTextStream(
     publishSessionEvent(updateResult.event);
   }
 
-  for await (const delta of stream.textStream) {
-    run.safety.checkActive();
-    if (!delta) continue;
+  stateMachine.onStateChange((state) => {
+    if (assistantMessageId || deferAssistantMessageCreation) {
+      return;
+    }
+    if (INTERNAL_TOOL_NAMES.has(state.toolName)) {
+      return;
+    }
+    if (state.status !== "executing" && state.status !== "output-available" && state.status !== "output-error") {
+      return;
+    }
 
-    text += delta;
+    ensureAssistantMessage("…");
+  });
 
-    // 保存checkpoint，防止中断丢失进度
-    saveStreamCheckpoint(run.sessionId, text);
+  try {
+    for await (const delta of stream.textStream) {
+      run.safety.checkActive();
+      if (!delta) continue;
 
-    if (!assistantMessageId) {
-      const content = getChatContent();
-      if (content === null || !content) {
+      text += delta;
+
+      // 保存checkpoint，防止中断丢失进度
+      saveStreamCheckpoint(run.sessionId, text);
+
+      if (!assistantMessageId && !deferAssistantMessageCreation) {
+        const content = getChatContent();
+        if (content === null || !content) {
+          continue;
+        }
+
+        ensureAssistantMessage(content);
         continue;
       }
 
-      firstTokenMs = roundMs(nowMs() - requestStartedAt);
-      // First delta: create the message immediately
-      const messageResult = createSessionMessage({
-        sessionId: run.sessionId,
-        clientMessageId: assistantClientMessageId,
-        deviceId: "runtime-agent",
-        role: "assistant",
-        content,
-        attachmentIds: [],
-        eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
-      });
-
-      assistantMessageId = messageResult.message.id;
-      for (const event of messageResult.events) {
-        publishSessionEvent(event);
+      // Subsequent deltas: debounce updates
+      pendingFlush = true;
+      if (!flushTimer) {
+        flushTimer = setTimeout(() => {
+          flush();
+          flushTimer = null;
+        }, DEBOUNCE_MS);
       }
-      continue;
     }
-
-    // Subsequent deltas: debounce updates
-    pendingFlush = true;
-    if (!flushTimer) {
-      flushTimer = setTimeout(() => {
-        flush();
-        flushTimer = null;
-      }, DEBOUNCE_MS);
+  } catch (error) {
+    if (!attemptAbortSignal.aborted || !getEarlyRecovery()) {
+      throw error;
     }
+    abortedForRecovery = true;
   }
 
   // Flush any remaining content after the stream ends
@@ -1425,32 +1793,45 @@ async function consumeTextStream(
   }
   if (pendingFlush) flush();
 
-  resolvedToolCalls = await stream.toolCalls;
+  if (!abortedForRecovery) {
+    resolvedToolCalls = await stream.toolCalls;
+  }
 
-  if (resolvedToolCalls.length === 0 && text.trim()) {
-    const fallback = await executeMiniMaxTextToolCallFallback(
+  if (!abortedForRecovery && resolvedToolCalls.length === 0 && text.trim()) {
+    const fallback = await executeTextToolCallFallback(
       run,
       stateMachine,
       reasoningEffort,
       text,
+      scheduledTools,
     );
 
     if (fallback) {
-      fallbackToolCallCount = fallback.toolCallCount;
       text = fallback.replacementText;
     }
   }
 
+  const resolvedVisibleToolCallCount = stateMachine.getAll().filter((state) => isCountedToolCall(state)).length;
+
   // Handle tool-only replies with no text
-  if (!text.trim()) {
-    if (resolvedToolCalls.length > 0) {
-      text = `已完成 ${resolvedToolCalls.length} 次工具调用。`;
+  if (!abortedForRecovery && !text.trim()) {
+    if (resolvedVisibleToolCallCount > 0) {
+      text = `已完成 ${resolvedVisibleToolCallCount} 次工具调用。`;
     }
   }
 
   const finalContent = getChatContent(true);
+  const preserveExistingAssistantContent = Boolean(existingAssistantMessageId)
+    && !text.trim()
+    && resolvedVisibleToolCallCount === 0;
+  let persistedAssistantContent: string | null = null;
 
-  if (assistantMessageId && typeof finalContent === "string") {
+  if (
+    assistantMessageId
+    && typeof finalContent === "string"
+    && !preserveExistingAssistantContent
+    && finalContent.trim()
+  ) {
     const updateResult = updateSessionMessage({
       sessionId: run.sessionId,
       messageId: assistantMessageId,
@@ -1458,6 +1839,7 @@ async function consumeTextStream(
       eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
     });
     publishSessionEvent(updateResult.event);
+    persistedAssistantContent = finalContent;
   }
 
   // Handle late message creation (text appeared after stream end, or tool-only fallback)
@@ -1475,6 +1857,7 @@ async function consumeTextStream(
     for (const event of messageResult.events) {
       publishSessionEvent(event);
     }
+    persistedAssistantContent = finalContent;
   }
 
   await syncSessionProjectHistory(run.sessionId);
@@ -1483,16 +1866,28 @@ async function consumeTextStream(
   clearStreamCheckpoint(run.sessionId);
 
   // Log cache statistics if available
-  const metadata = await stream.providerMetadata;
+  let metadata: Awaited<typeof stream.providerMetadata> | null = null;
+  if (!abortedForRecovery) {
+    metadata = await stream.providerMetadata;
+  }
   let cacheCreationInputTokens: number | null = null;
   let cacheReadInputTokens: number | null = null;
   if (metadata?.anthropic) {
+    const usage = metadata.anthropic.usage as Record<string, unknown> | null | undefined;
     cacheCreationInputTokens = typeof metadata.anthropic.cacheCreationInputTokens === "number"
       ? metadata.anthropic.cacheCreationInputTokens
-      : null;
-    cacheReadInputTokens = typeof metadata.anthropic.cacheReadInputTokens === "number"
-      ? metadata.anthropic.cacheReadInputTokens
-      : null;
+      : typeof usage?.cache_creation_input_tokens === "number"
+        ? usage.cache_creation_input_tokens
+        : typeof usage?.cacheCreationInputTokens === "number"
+          ? usage.cacheCreationInputTokens
+          : null;
+    cacheReadInputTokens = typeof (metadata.anthropic as { cacheReadInputTokens?: unknown }).cacheReadInputTokens === "number"
+      ? (metadata.anthropic as { cacheReadInputTokens: number }).cacheReadInputTokens
+      : typeof usage?.cache_read_input_tokens === "number"
+        ? usage.cache_read_input_tokens
+        : typeof usage?.cacheReadInputTokens === "number"
+          ? usage.cacheReadInputTokens
+          : null;
     if (cacheCreationInputTokens || cacheReadInputTokens) {
       console.log(`[Cache] write=${cacheCreationInputTokens ?? 0} read=${cacheReadInputTokens ?? 0}`);
     }
@@ -1508,7 +1903,7 @@ async function consumeTextStream(
       cacheReadInputTokens,
     },
     diagnostics: {
-      resolvedToolCallCount: Array.isArray(resolvedToolCalls) ? resolvedToolCalls.length + fallbackToolCallCount : fallbackToolCallCount,
+      resolvedToolCallCount: resolvedVisibleToolCallCount,
       providerMetadataPreview: summarizeUnknown(metadata),
     },
   };
@@ -1617,12 +2012,15 @@ export async function runAgent(sessionId: string) {
 
 const activeAgents = new Map<string, AbortController>();
 
-export function abortAgentForSession(sessionId: string) {
+export function abortAgentForSession(
+  sessionId: string,
+  reason: "abort" | "interrupt" = "abort",
+) {
   const controller = activeAgents.get(sessionId);
   if (!controller) {
     return false;
   }
 
-  controller.abort();
+  controller.abort(reason);
   return true;
 }

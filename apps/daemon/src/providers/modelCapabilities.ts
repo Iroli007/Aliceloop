@@ -1,24 +1,9 @@
 import type { StoredProviderConfig } from "../repositories/providerRepository";
+import { resolveProviderTransport } from "./providerProfile";
 
 export interface ModelCapabilities {
   audioInput: boolean;
   imageInput: boolean;
-}
-
-function normalizeModelName(model: string | null | undefined) {
-  return model?.trim().toLowerCase() ?? "";
-}
-
-function resolveEffectiveTransport(config: StoredProviderConfig) {
-  if (config.transport !== "auto") {
-    return config.transport;
-  }
-
-  if (normalizeModelName(config.model).startsWith("claude")) {
-    return "anthropic" as const;
-  }
-
-  return "openai-compatible" as const;
 }
 
 export function deriveModelCapabilities(config: StoredProviderConfig | null): ModelCapabilities {
@@ -29,7 +14,7 @@ export function deriveModelCapabilities(config: StoredProviderConfig | null): Mo
     };
   }
 
-  const transport = resolveEffectiveTransport(config);
+  const transport = resolveProviderTransport(config);
   return {
     // OpenAI-compatible stacks can usually expose a transcription path even when
     // the configured chat model itself is text-first, so treat this as audio-capable

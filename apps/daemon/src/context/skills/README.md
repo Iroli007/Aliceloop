@@ -40,7 +40,7 @@ They are not executable endpoints by themselves. Runnable capabilities live in:
 Memory-layer skill map:
 
 - Conversation Buffer: prompt-only, not a skill
-- Task Working Memory: `tasks`, `continue`, `plan-mode`, `todo`, `scheduler`, `notebook`
+- Task Working Memory: `tasks`, `plan-mode`, `todo`, `scheduler`, `notebook`
 - Profile / Fact Memory: `memory-management`
 - Episodic History Recall: `memory-management`
 - Thread Administration: `thread-management`

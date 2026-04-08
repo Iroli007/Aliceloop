@@ -28,6 +28,8 @@ const toolActivityLabelMap: Record<string, string> = {
   edit: "Editing files",
   grep: "Searching file contents",
   glob: "Scanning files",
+  task_delegation: "Delegating a task",
+  task_output: "Checking delegated task output",
   view_image: "Inspecting an image",
   bash: "Running shell commands",
   shell: "Running shell commands",

@@ -5,23 +5,11 @@ allowed-tools:
   - bash
   - web_search
   - web_fetch
-  - ChromeRelayStatus
 ---
 
 # Web Search Skill
 
 Search the web using the built-in `web_search` tool. On Aliceloop this is the built-in research path for current information, fact-checking, and source discovery.
-
-## Relay Check
-
-Before searching, check whether Chrome Relay is healthy:
-
-```text
-ChromeRelayStatus()
-```
-
-- If relay is healthy, keep it available for follow-up pages that may need authenticated browser access later
-- If relay is not healthy, continue with `web_search` normally; search itself should not block on relay
 
 ## Web Search Tool (Primary)
 
@@ -49,19 +37,15 @@ web_fetch(url="https://example.com/article")
 If `web_search` or `web_fetch` are not enough because a page needs login, captcha, or multi-step interaction, fall back to the browser skill:
 
 ```text
-browser_navigate(url="https://example.com")
-browser_snapshot()
+use_skill(skill="browser")
 ```
 
-If the page needs clicks, typing, or screenshots, continue with the native browser tools:
+Then follow the browser skill's CLI workflow with `bash` and inspect outputs/files with `read`:
 
 ```text
-browser_click(ref="...")
-browser_type(ref="...", text="...")
-browser_screenshot()
+pinchtab nav https://example.com
+pinchtab snap -i
 ```
-
-The browser skill prefers a visible Aliceloop Desktop Chrome relay with persistent login state when available, and otherwise falls back to the local browser backend. For supported structured site adapters, the browser path may also use OpenCLI after the native browser path is ruled out.
 
 ## Tips
 

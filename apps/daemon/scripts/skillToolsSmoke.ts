@@ -133,6 +133,7 @@ async function main() {
   assert(availableCatalogSkills.length > 0, "skill catalog should expose at least one available skill");
   assert(skillCatalog.some((skill) => skill.id === "skill-hub"), "skill-hub should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "skill-search"), "skill-search should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "task-delegation"), "task-delegation should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "music-listener"), "music-listener should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "video-reader"), "video-reader should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "twitter-media"), "twitter-media should be present in the catalog");
@@ -141,6 +142,7 @@ async function main() {
   assert(skillCatalog.every((skill) => skill.id !== "travel"), "travel should no longer be present in the catalog");
   assert(availableCatalogSkills.some((skill) => skill.id === "skill-hub"), "skill-hub should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "skill-search"), "skill-search should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "task-delegation"), "task-delegation should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "twitter-media"), "twitter-media should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "music-listener"), "music-listener should be active");
@@ -256,6 +258,7 @@ async function main() {
   assert.equal("web_fetch" in baseAndSkillTools, false, "web_fetch should not be injected into the default toolset");
   assert.equal("web_search" in baseAndSkillTools, false, "web_search should not be injected into the default toolset");
   assert.equal("view_image" in baseAndSkillTools, false, "view_image should not be injected into the default toolset");
+  assert.equal("use_skill" in baseAndSkillTools, true, "use_skill should always be available as the skill entry point");
 
   const bareFetchSession = createSession("bare fetch smoke");
   createSessionMessage({
@@ -293,6 +296,8 @@ async function main() {
       "web_fetch",
       "web_search",
       "view_image",
+      "task_delegation",
+      "task_output",
     ]),
   );
   assert.equal(typeof directResolved.browser_find, "object", "resolveSkillTools should return requested browser_find");
@@ -307,6 +312,8 @@ async function main() {
   assert.equal(typeof directResolved.web_fetch, "object", "resolveSkillTools should return requested web_fetch");
   assert.equal(typeof directResolved.web_search, "object", "resolveSkillTools should return requested web_search");
   assert.equal(typeof directResolved.view_image, "object", "resolveSkillTools should return requested view_image");
+  assert.equal(typeof directResolved.task_delegation, "object", "resolveSkillTools should return requested task_delegation");
+  assert.equal(typeof directResolved.task_output, "object", "resolveSkillTools should return requested task_output");
 
   const session = createSession("skill tools smoke");
   createSessionMessage({
@@ -362,6 +369,7 @@ async function main() {
   assert.equal("web_search" in context.tools, false, "generic turns should not inject web tools");
   assert.equal("view_image" in context.tools, false, "generic turns should not inject image tools");
   assert.equal("document_ingest" in context.tools, false, "generic turns should not inject document_ingest");
+  assert.equal("use_skill" in context.tools, true, "live context should always expose use_skill as the skill entry point");
   assert.equal(context.firstStepToolChoice, undefined, "generic turns should not force an initial tool");
   assert.match(
     contextSystemPrompt,
@@ -373,6 +381,25 @@ async function main() {
     /No extra local skill was selected for this turn\./i,
     "system prompt should clarify when no selected skill guidance is attached for the current turn",
   );
+  assert.match(
+    contextSystemPrompt,
+    /call `use_skill` with its exact skill id before continuing/i,
+    "system prompt should instruct the model to call use_skill instead of emitting raw skill tags",
+  );
+
+  const forcedThreadContext = await loadContext(session.id, controller.signal, {
+    additionalSelectedSkillIds: ["thread-management"],
+  });
+  assert(
+    forcedThreadContext.routedSkillIds.includes("thread-management"),
+    "forced selected skills should be attached to the next context pass",
+  );
+  for (const allowedTool of getSkillDefinition("thread-management")?.allowedTools ?? []) {
+    assert(
+      allowedTool in forcedThreadContext.tools,
+      `forced selected thread-management should attach allowed tool ${allowedTool}`,
+    );
+  }
 
   const imageSession = createSession("image attachment smoke");
   const imagePath = join(tempDataDir, "view-image-smoke.png");

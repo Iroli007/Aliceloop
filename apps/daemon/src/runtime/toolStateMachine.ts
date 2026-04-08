@@ -12,6 +12,8 @@
 export type ToolCallStatus =
   | "input-streaming"   // 输入正在流式传输
   | "input-available"    // 输入已完成
+  | "queued"             // 等待调度执行
+  | "executing"          // 已开始执行
   | "approval-requested" // 等待用户批准
   | "approval-responded" // 用户已响应
   | "output-available"  // 输出可用
@@ -93,6 +95,76 @@ export class ToolStateMachine {
     return updated;
   }
 
+  markQueued(toolCallId: string): ToolCallState | null {
+    const state = this.states.get(toolCallId);
+    if (!state) return null;
+
+    const updated: ToolCallState = {
+      ...state,
+      status: "queued",
+      updatedAt: Date.now(),
+    };
+    this.emit(updated);
+    return updated;
+  }
+
+  markExecuting(toolCallId: string): ToolCallState | null {
+    const state = this.states.get(toolCallId);
+    if (!state) return null;
+
+    const updated: ToolCallState = {
+      ...state,
+      status: "executing",
+      updatedAt: Date.now(),
+    };
+    this.emit(updated);
+    return updated;
+  }
+
+  markProgress(toolCallId: string, output: unknown): ToolCallState | null {
+    const state = this.states.get(toolCallId);
+    if (!state) return null;
+    if (state.status === "permission-denied" || state.status === "output-error" || state.status === "done") {
+      return state;
+    }
+
+    const updated: ToolCallState = {
+      ...state,
+      status: "executing",
+      output,
+      updatedAt: Date.now(),
+    };
+    this.emit(updated);
+    return updated;
+  }
+
+  markApprovalRequested(toolCallId: string): ToolCallState | null {
+    const state = this.states.get(toolCallId);
+    if (!state) return null;
+
+    const updated: ToolCallState = {
+      ...state,
+      status: "approval-requested",
+      updatedAt: Date.now(),
+    };
+    this.emit(updated);
+    return updated;
+  }
+
+  markApprovalResponded(toolCallId: string, approvalOption?: string): ToolCallState | null {
+    const state = this.states.get(toolCallId);
+    if (!state) return null;
+
+    const updated: ToolCallState = {
+      ...state,
+      status: "approval-responded",
+      approvalOption,
+      updatedAt: Date.now(),
+    };
+    this.emit(updated);
+    return updated;
+  }
+
   async requestApproval(toolCallId: string): Promise<ToolCallState | null> {
     const state = this.states.get(toolCallId);
     if (!state || !this.approvalHandler) return null;
@@ -149,6 +221,7 @@ export class ToolStateMachine {
   markError(toolCallId: string, error: unknown): ToolCallState | null {
     const state = this.states.get(toolCallId);
     if (!state) return null;
+    if (state.status === "permission-denied") return state;
 
     const updated: ToolCallState = {
       ...state,
@@ -163,6 +236,12 @@ export class ToolStateMachine {
   complete(toolCallId: string): ToolCallState | null {
     const state = this.states.get(toolCallId);
     if (!state) return null;
+    if (state.status === "permission-denied" || state.status === "output-error") {
+      return state;
+    }
+    if (state.status !== "output-available") {
+      return state;
+    }
 
     const updated: ToolCallState = {
       ...state,

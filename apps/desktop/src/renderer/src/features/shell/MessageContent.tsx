@@ -1,3 +1,4 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -6,7 +7,7 @@ interface MessageContentProps {
   renderMarkdown?: boolean;
 }
 
-export function MessageContent({ content, renderMarkdown = false }: MessageContentProps) {
+function MessageContentInner({ content, renderMarkdown = false }: MessageContentProps) {
   if (!renderMarkdown) {
     return <>{content}</>;
   }
@@ -17,3 +18,8 @@ export function MessageContent({ content, renderMarkdown = false }: MessageConte
     </ReactMarkdown>
   );
 }
+
+export const MessageContent = memo(
+  MessageContentInner,
+  (prev, next) => prev.content === next.content && prev.renderMarkdown === next.renderMarkdown,
+);

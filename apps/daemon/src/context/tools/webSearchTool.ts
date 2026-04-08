@@ -3,6 +3,7 @@ import { z } from "zod";
 import { withDesktopRelayTab, navigateRelayTab, readRelaySearchResults } from "./desktopRelayResearch";
 import { logPerfTrace, nowMs, roundMs } from "../../runtime/perfTrace";
 import { fetchReadableWebContent, summarizeReadableText } from "./webFetchTool";
+import { STABLE_TOOL_PROVIDER_OPTIONS } from "./toolProviderOptions";
 
 const DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
 const SEARCH_TIMEOUT_MS = 30_000;
@@ -709,6 +710,7 @@ function buildSearchUrl(query: string, domains: string[]) {
 export function createWebSearchTool(sessionId = "web_search") {
   return {
     web_search: tool({
+      providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
         "Search the public web for fresh information and source discovery. " +
         "It splits the query into up to three keyword lanes, returns up to 10 ranked results, and can enrich each result with fetched summaries. " +
