@@ -115,7 +115,6 @@ async function main() {
   });
 
   const researchSession = createSession("loadContext benchmark research");
-  clearSessionSkillCache(researchSession.id);
   createSessionMessage({
     sessionId: researchSession.id,
     clientMessageId: "bench-research-user-1",
@@ -126,7 +125,6 @@ async function main() {
   });
 
   const continuationSession = createSession("loadContext benchmark continuation");
-  clearSessionSkillCache(continuationSession.id);
   createSessionMessage({
     sessionId: continuationSession.id,
     clientMessageId: "bench-continuation-user-1",

@@ -40,6 +40,7 @@ export function SettingsPanel() {
   async function saveRuntimePreferences() {
     setReasoningNotice(null);
     const result = await runtimeSettings.save({
+      sandboxProfile: "full-access",
       reasoningEffort: reasoningEffortInput,
       autoApproveToolRequests: permissionModeInput === "bypassPermissions",
     });
@@ -48,7 +49,7 @@ export function SettingsPanel() {
       setReasoningNotice(message);
     } else {
       setReasoningNotice(
-        `当前权限模式：${permissionModeInput === "bypassPermissions" ? "全绿灯" : "自动裁决"}；推理强度：${formatReasoningEffortLabel(reasoningEffortInput)}`,
+        `当前权限模式：${permissionModeInput === "bypassPermissions" ? "完全访问" : "auto模式"}；推理强度：${formatReasoningEffortLabel(reasoningEffortInput)}`,
       );
     }
   }
@@ -86,12 +87,12 @@ export function SettingsPanel() {
           <h3 className="settings-section-title">权限</h3>
           <div className="settings-panel">
             <div className="settings-panel__heading">
-              <span>{permissionModeInput === "bypassPermissions" ? "全绿灯" : "自动裁决"}</span>
+              <span>{permissionModeInput === "bypassPermissions" ? "完全访问" : "auto模式"}</span>
             </div>
             <div className="provider-notice">
               {permissionModeInput === "bypassPermissions"
                 ? "工具请求默认直接通过，只有显式 deny 规则会拦住它。"
-                : "工具请求默认走自动裁决；显式 ask 规则会弹一次确认，其余请求直接通过。"}
+                : "工具请求默认走 auto 模式；显式 ask 规则和明显危险的 bash 才会弹一次确认，其余请求直接通过。"}
             </div>
             {runtimeSettings.error ? <div className="provider-notice provider-notice--error">{runtimeSettings.error}</div> : null}
             <div className="sandbox-profile-list sandbox-profile-list--compact">
@@ -100,7 +101,7 @@ export function SettingsPanel() {
                 className={`sandbox-profile-card sandbox-profile-card--compact${permissionModeInput === "bypassPermissions" ? " sandbox-profile-card--active" : ""}`}
                 onClick={() => setPermissionModeInput("bypassPermissions")}
               >
-                <strong>全绿灯</strong>
+                <strong>完全访问</strong>
                 <span>默认直通，不再单独拦工具。</span>
               </button>
               <button
@@ -108,8 +109,8 @@ export function SettingsPanel() {
                 className={`sandbox-profile-card sandbox-profile-card--compact${permissionModeInput === "auto" ? " sandbox-profile-card--active" : ""}`}
                 onClick={() => setPermissionModeInput("auto")}
               >
-                <strong>自动裁决</strong>
-                <span>命中 ask 规则时才停一下，其余直接通过。</span>
+                <strong>auto模式</strong>
+                <span>命中 ask 规则或危险 bash 时才停一下，其余直接通过。</span>
               </button>
             </div>
           </div>

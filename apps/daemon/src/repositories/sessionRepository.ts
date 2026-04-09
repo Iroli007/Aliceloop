@@ -50,6 +50,7 @@ interface SessionRow {
   id: string;
   title: string;
   projectId: string | null;
+  hidden: number;
   createdAt: string;
   updatedAt: string;
   worksetStateJson: string | null;
@@ -845,6 +846,7 @@ function getSessionRow(sessionId: string): SessionRow | undefined {
           id,
           title,
           project_id AS projectId,
+          hidden,
           created_at AS createdAt,
           updated_at AS updatedAt,
           workset_state_json AS worksetStateJson
@@ -1168,6 +1170,7 @@ function findReusableDraftSession(projectId: string | null): SessionThreadSummar
           FROM session_messages
           WHERE session_messages.session_id = sessions.id
         )
+          AND COALESCE(sessions.hidden, 0) = 0
           AND NOT EXISTS (
             SELECT 1
             FROM attachments
@@ -1236,8 +1239,11 @@ export function listSessionThreads(): SessionThreadSummary[] {
             ORDER BY created_at DESC, id DESC
             LIMIT 1
           )
-        WHERE COALESCE(message_counts.messageCount, 0) > 0
+        WHERE COALESCE(sessions.hidden, 0) = 0
+          AND (
+            COALESCE(message_counts.messageCount, 0) > 0
           OR COALESCE(plan_mode.active, 0) = 1
+          )
         ORDER BY sessions.updated_at DESC, sessions.created_at DESC
       `,
     )
@@ -1299,6 +1305,7 @@ export function listHistoricalSessionCandidates(
             LIMIT 1
           )
         WHERE sessions.id <> ?
+          AND COALESCE(sessions.hidden, 0) = 0
           AND (
             COALESCE(message_counts.messageCount, 0) > 0
             OR COALESCE(plan_mode.active, 0) = 1
@@ -1464,7 +1471,8 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
             ORDER BY created_at DESC, id DESC
             LIMIT 1
           )
-        WHERE matched_message.id IS NOT NULL
+        WHERE COALESCE(sessions.hidden, 0) = 0
+          AND matched_message.id IS NOT NULL
         ORDER BY matched_message.created_at DESC, sessions.updated_at DESC, sessions.created_at DESC
         LIMIT ?
       `,
@@ -1479,18 +1487,19 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
 }
 
 export function createSession(
-  input: string | { title?: string; projectId?: string | null } = {},
+  input: string | { title?: string; projectId?: string | null; hidden?: boolean } = {},
 ): SessionThreadSummary {
   const normalizedInput = typeof input === "string" ? { title: input } : input;
   const projectId = normalizedInput.projectId === undefined
     ? getDefaultProjectDirectory().id
     : normalizedInput.projectId;
+  const hidden = normalizedInput.hidden === true;
 
   if (projectId) {
     getProjectDirectory(projectId);
   }
 
-  if (!normalizedInput.title?.trim()) {
+  if (!hidden && !normalizedInput.title?.trim()) {
     const reusableDraft = findReusableDraftSession(projectId ?? null);
     if (reusableDraft) {
       return reusableDraft;
@@ -1500,7 +1509,7 @@ export function createSession(
   const db = getDatabase();
   const now = new Date().toISOString();
   const id = randomUUID();
-  const countRow = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+  const countRow = db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE COALESCE(hidden, 0) = 0").get() as { count: number };
   const nextTitle = normalizedInput.title?.trim()
     ? normalizedInput.title.trim()
     : countRow.count === 0
@@ -1510,12 +1519,12 @@ export function createSession(
   db.prepare(
     `
       INSERT INTO sessions (
-        id, title, project_id, created_at, updated_at
+        id, title, project_id, hidden, created_at, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?
       )
     `,
-  ).run(id, nextTitle, projectId ?? null, now, now);
+  ).run(id, nextTitle, projectId ?? null, hidden ? 1 : 0, now, now);
 
   return {
     id,

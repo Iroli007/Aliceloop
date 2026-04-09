@@ -14,6 +14,35 @@ export interface ToolPermissionRequest {
   commandLine?: string;
 }
 
+const singleSubcommandPrefixCommands = new Set([
+  "git",
+  "cargo",
+  "go",
+  "kubectl",
+  "brew",
+  "pip",
+  "pip3",
+  "make",
+  "uv",
+]);
+
+const nestedSubcommandPrefixCommands = new Map<string, Set<string>>([
+  ["npm", new Set(["run", "exec", "create", "workspace"])],
+  ["pnpm", new Set(["run", "exec", "create", "dlx", "workspace"])],
+  ["yarn", new Set(["run", "exec", "create", "workspace"])],
+  ["bun", new Set(["run", "create", "x"])],
+  ["docker", new Set(["compose"])],
+]);
+
+const scriptEntrypointPrefixCommands = new Set([
+  "node",
+  "python",
+  "python3",
+  "tsx",
+  "ts-node",
+  "deno",
+]);
+
 function normalizeResolvedPath(value: string) {
   return resolve(value);
 }
@@ -59,6 +88,52 @@ export function findMatchingToolPermissionRule(
 
 function normalizeRuleValue(value: string | undefined) {
   return value?.trim() || undefined;
+}
+
+function getMeaningfulArgs(args: string[]) {
+  return args.filter((arg) => arg && !arg.startsWith("-"));
+}
+
+function shouldKeepExactBashCommandLine(command: string, args: string[]) {
+  if (command === "sh" || command === "bash" || command === "zsh" || command === "fish") {
+    return args.some((arg) => arg === "-c" || arg === "-lc" || arg === "--command");
+  }
+
+  return false;
+}
+
+function buildRememberedBashCommandPrefix(
+  approval: Pick<ToolApproval, "command" | "args" | "commandLine">,
+) {
+  const command = approval.command.trim();
+  const commandLine = approval.commandLine?.trim() || "";
+  if (!commandLine || !command) {
+    return commandLine || undefined;
+  }
+
+  if (shouldKeepExactBashCommandLine(command, approval.args)) {
+    return commandLine;
+  }
+
+  const meaningfulArgs = getMeaningfulArgs(approval.args);
+  if (meaningfulArgs.length === 0) {
+    return command;
+  }
+
+  const nestedPrefixes = nestedSubcommandPrefixCommands.get(command);
+  if (nestedPrefixes?.has(meaningfulArgs[0] ?? "") && meaningfulArgs[1]) {
+    return [command, meaningfulArgs[0], meaningfulArgs[1]].join(" ");
+  }
+
+  if (singleSubcommandPrefixCommands.has(command)) {
+    return [command, meaningfulArgs[0]].join(" ");
+  }
+
+  if (scriptEntrypointPrefixCommands.has(command)) {
+    return [command, meaningfulArgs[0]].join(" ");
+  }
+
+  return commandLine;
 }
 
 export function toolPermissionRuleEquals(left: ToolPermissionRule, right: ToolPermissionRule) {
@@ -122,7 +197,7 @@ export function buildToolPermissionRequestFromApproval(approval: Pick<ToolApprov
 }
 
 export function buildToolPermissionRuleFromApproval(
-  approval: Pick<ToolApproval, "toolName" | "cwd" | "commandLine" | "args">,
+  approval: Pick<ToolApproval, "toolName" | "cwd" | "commandLine" | "args" | "command">,
   decisionOption: ToolApprovalDecisionOption,
 ): { behavior: "allow" | "deny"; rule: ToolPermissionRule } | null {
   const request = buildToolPermissionRequestFromApproval(approval);
@@ -156,12 +231,15 @@ export function buildToolPermissionRuleFromApproval(
   }
 
   if (request.commandLine) {
+    const commandPrefix = request.toolName === "bash" && behavior === "allow"
+      ? buildRememberedBashCommandPrefix(approval) ?? request.commandLine
+      : request.commandLine;
     return {
       behavior,
       rule: {
         toolName: request.toolName,
         ...(request.cwd ? { cwdPrefix: request.cwd } : {}),
-        commandPrefix: request.commandLine,
+        commandPrefix,
       },
     };
   }

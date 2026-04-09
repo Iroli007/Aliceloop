@@ -23,8 +23,8 @@ const toolLabelMap: Record<string, string> = {
   grep: "Grep",
   read: "Read",
   skill: "Skill",
-  task_delegation: "Task delegation",
-  task_output: "TaskOutput",
+  agent: "Agent",
+  task_output: "Background Agent",
   web_fetch: "Web Fetch",
   web_search: "Web Search",
   write: "Write",
@@ -820,6 +820,38 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
     return "调用技能";
   }
 
+  if (entry.toolName === "agent") {
+    const prompt = isRecord(resolvedInput)
+      ? pickFirstString(resolvedInput, ["prompt"])
+      : typeof resolvedInput === "string"
+        ? resolvedInput
+        : null;
+    const runInBackground = isRecord(resolvedInput) && resolvedInput.run_in_background === true;
+    const mode = isRecord(resolvedInput) ? pickFirstString(resolvedInput, ["mode"]) : null;
+    const modeLabel = mode === "subagent" ? "子代理" : "分叉代理";
+    if (prompt) {
+      return `${runInBackground ? `后台${modeLabel}` : modeLabel}: ${compactInline(prompt, 28)}`;
+    }
+    return runInBackground ? `启动后台${modeLabel}` : `运行${modeLabel}`;
+  }
+
+  if (entry.toolName === "task_output") {
+    const resolvedOutput = resolveEntryOutput(entry);
+    if (isRecord(resolvedOutput)) {
+      const status = pickFirstString(resolvedOutput, ["status"]);
+      if (status === "completed") {
+        return "读取后台子代理结果";
+      }
+      if (status === "failed") {
+        return "后台子代理失败";
+      }
+      if (status === "running" || status === "queued") {
+        return "查看后台子代理状态";
+      }
+    }
+    return "查看后台子代理";
+  }
+
   if (entry.toolName === "bash") {
     if (typeof resolvedInput === "string") {
       const trimmed = resolvedInput.trim();
@@ -897,10 +929,10 @@ function getPrimaryDetailLabel(toolName: string) {
     case "write":
     case "edit":
       return "路径";
-    case "task_delegation":
+    case "agent":
       return "任务";
     case "task_output":
-      return "任务 ID";
+      return "后台任务";
     default:
       return "参数";
   }

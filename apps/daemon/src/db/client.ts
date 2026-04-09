@@ -576,6 +576,61 @@ function hasTable(db: Database.Database, tableName: string) {
   return Boolean(row);
 }
 
+function backfillHiddenDelegatedSessions(db: Database.Database) {
+  if (!hasTable(db, "mission_runs")) {
+    return;
+  }
+
+  const rows = db.prepare(
+    `
+      SELECT task_ids_json AS taskIdsJson
+      FROM mission_runs
+    `,
+  ).all() as Array<{ taskIdsJson: string }>;
+
+  if (rows.length === 0) {
+    return;
+  }
+
+  const hiddenSessionIds = new Set<string>();
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.taskIdsJson) as unknown;
+      if (!Array.isArray(parsed)) {
+        continue;
+      }
+
+      for (const value of parsed) {
+        if (typeof value === "string" && value.trim()) {
+          hiddenSessionIds.add(value);
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (hiddenSessionIds.size === 0) {
+    return;
+  }
+
+  const updateHidden = db.prepare(
+    `
+      UPDATE sessions
+      SET hidden = 1
+      WHERE id = ?
+    `,
+  );
+
+  const transaction = db.transaction((sessionIds: string[]) => {
+    for (const sessionId of sessionIds) {
+      updateHidden.run(sessionId);
+    }
+  });
+
+  transaction([...hiddenSessionIds]);
+}
+
 function runMigrations(db: Database.Database) {
   db.exec(
     `
@@ -593,6 +648,7 @@ function runMigrations(db: Database.Database) {
     `,
   );
   ensureColumn(db, "sessions", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL");
+  ensureColumn(db, "sessions", "hidden", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "sessions", "workset_state_json", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "attachments", "original_path", "TEXT");
   ensureColumn(db, "study_artifacts", "body", "TEXT NOT NULL DEFAULT ''");
@@ -803,6 +859,7 @@ function runMigrations(db: Database.Database) {
       WHERE id IN ('event-1', 'event-2')
     `,
   ).run();
+  backfillHiddenDelegatedSessions(db);
 }
 
 function bootstrap(db: Database.Database) {

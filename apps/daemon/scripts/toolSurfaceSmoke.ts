@@ -9,6 +9,7 @@ type Scenario = {
   skillIds?: string[];
   additionalToolNames?: string[];
   expectedTools?: string[];
+  unexpectedTools?: string[];
   planModeActive?: boolean;
 };
 
@@ -67,12 +68,40 @@ async function main() {
   const mixedScenarios: Scenario[] = [
     {
       name: "base",
-      expectedTools: ["enter_plan_mode"],
+      expectedTools: ["agent", "enter_plan_mode"],
+      unexpectedTools: ["ask_user_question", "task_output"],
     },
     {
       name: "plan-mode-active",
       planModeActive: true,
-      expectedTools: ["exit_plan_mode", "write_plan_artifact"],
+      expectedTools: [
+        "exit_plan_mode",
+        "write_plan_artifact",
+        "web_search",
+        "web_fetch",
+        "view_image",
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_find",
+        "browser_wait",
+        "browser_scroll",
+        "browser_screenshot",
+        "browser_media_probe",
+        "browser_video_watch_start",
+        "browser_video_watch_poll",
+        "browser_video_watch_stop",
+        "chrome_relay_status",
+        "chrome_relay_list_tabs",
+        "chrome_relay_open",
+        "chrome_relay_navigate",
+        "chrome_relay_read",
+        "chrome_relay_read_dom",
+        "chrome_relay_screenshot",
+        "chrome_relay_scroll",
+        "chrome_relay_back",
+        "chrome_relay_forward",
+        "ask_user_question",
+      ],
     },
     {
       name: "browser+research",
@@ -147,14 +176,10 @@ async function main() {
       expectedTools: ["review_coach"],
     },
     {
-      name: "task-delegation-explicit",
-      query: "请用 task delegation 派个 coder 子代理去修这个 bug",
-      expectedTools: ["task_delegation", "task_output"],
-    },
-    {
-      name: "task-delegation-code-auto",
+      name: "task-output-not-auto",
       query: "帮我写个代码实现登录功能并顺手修一下这个 bug",
-      expectedTools: ["task_delegation", "task_output"],
+      expectedTools: ["agent"],
+      unexpectedTools: ["task_output"],
     },
   ];
 
@@ -164,7 +189,7 @@ async function main() {
     ...mixedScenarios,
   ];
 
-  assert.equal(scenarios.length, 61, "expected exactly 61 tool-surface scenarios");
+  assert.equal(scenarios.length, 60, "expected exactly 60 tool-surface scenarios");
 
   const defaultPrefix = [...DEFAULT_ATTACHED_TOOL_NAMES];
 
@@ -219,10 +244,29 @@ async function main() {
         !forwardNames.includes("use_skill"),
         `scenario ${scenario.name} should suppress use_skill while planning`,
       );
+      for (const blockedTool of [
+        "write",
+        "edit",
+        "browser_click",
+        "browser_type",
+        "browser_batch",
+        "chrome_relay_click",
+        "chrome_relay_type",
+        "chrome_relay_eval",
+      ]) {
+        assert(
+          !forwardNames.includes(blockedTool),
+          `scenario ${scenario.name} should not include plan-unsafe tool ${blockedTool}`,
+        );
+      }
     } else {
       assert(
         forwardNames.includes("use_skill"),
         `scenario ${scenario.name} should expose use_skill outside plan mode`,
+      );
+      assert(
+        !forwardNames.includes("ask_user_question"),
+        `scenario ${scenario.name} should not expose ask_user_question outside plan mode`,
       );
     }
 
@@ -239,6 +283,13 @@ async function main() {
       assert(
         forwardNames.includes(expectedTool),
         `scenario ${scenario.name} should include tool ${expectedTool}`,
+      );
+    }
+
+    for (const unexpectedTool of scenario.unexpectedTools ?? []) {
+      assert(
+        !forwardNames.includes(unexpectedTool),
+        `scenario ${scenario.name} should not include tool ${unexpectedTool}`,
       );
     }
   }

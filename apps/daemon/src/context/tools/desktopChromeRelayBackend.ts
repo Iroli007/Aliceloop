@@ -187,12 +187,24 @@ export async function ensureDesktopRelayTab(session: BrowserSessionRecord) {
   }
 
   const tabId = pickPreferredRelayTab(tabs);
-  if (!tabId) {
+  if (tabId) {
+    session.tabId = tabId;
+    return tabId;
+  }
+
+  const opened = await requestDesktopRelay<{ tabId?: string | null }>(session, "/tabs/open", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  const openedTabId = typeof opened?.tabId === "string" && opened.tabId.trim()
+    ? opened.tabId.trim()
+    : null;
+  if (!openedTabId) {
     throw new Error("Desktop Chrome relay did not return an available tab id.");
   }
 
-  session.tabId = tabId;
-  return tabId;
+  session.tabId = openedTabId;
+  return openedTabId;
 }
 
 export function isDesktopBrowserUnavailableError(error: unknown): error is DesktopBrowserUnavailableError {

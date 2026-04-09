@@ -5,6 +5,7 @@ import { type ReasoningEffort } from "@aliceloop/runtime-core";
 import { generateText, stepCountIs, streamText, type ToolSet } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
+import { getSkillDefinition } from "../context/skills/skillLoader";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { refreshSessionRollingSummary } from "../context/session/rollingSummary";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
@@ -577,7 +578,7 @@ function buildLocalFallbackReply(userMessage: string | null) {
   }
 
   const delegatedTaskMatch = normalized.match(
-    /^You are a delegated sub-agent working on behalf of another Aliceloop agent\.[\s\S]*?\nAssigned task:\n([\s\S]+)$/u,
+    /^(?:You are a delegated sub-agent working on behalf of another Aliceloop agent\.|You are a fork of the parent Aliceloop agent\.)[\s\S]*?\n(?:Assigned task|Assigned subtask):\n([\s\S]+)$/u,
   );
   if (delegatedTaskMatch) {
     const assignedTask = delegatedTaskMatch[1]?.trim() ?? "";
@@ -825,10 +826,6 @@ const MISSING_COMMAND_TOOL_ALIASES = new Map<string, string>([
   ["ChromeRelayBack", "chrome_relay_back"],
   ["chrome_relay_forward", "chrome_relay_forward"],
   ["ChromeRelayForward", "chrome_relay_forward"],
-  ["task_delegation", "task_delegation"],
-  ["TaskDelegation", "task_delegation"],
-  ["task_output", "task_output"],
-  ["TaskOutput", "task_output"],
 ]);
 const MISSING_COMMAND_TOKEN_PATTERN = new RegExp(
   `\\b(${[...MISSING_COMMAND_TOOL_ALIASES.keys()].sort((left, right) => right.length - left.length).join("|")})\\b`,
@@ -998,6 +995,30 @@ function extractReferencedToolNameFromAssistantText(text: string) {
   return toolMatch?.[1] ?? null;
 }
 
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function extractReferencedSkillIdFromAssistantText(
+  text: string,
+  attachedSkillIds: Iterable<string>,
+) {
+  const attached = new Set(attachedSkillIds);
+  const candidates = ["web-search", "web-fetch", "browser", "file-manager"];
+
+  for (const skillId of candidates) {
+    if (attached.has(skillId) || !getSkillDefinition(skillId)) {
+      continue;
+    }
+
+    if (new RegExp(`\\b${escapeRegex(skillId)}\\b`, "u").test(text)) {
+      return skillId;
+    }
+  }
+
+  return null;
+}
+
 function inferIntentDrivenRecoveryRequest(
   userMessage: string | null,
   attachedToolNames: string[],
@@ -1007,17 +1028,6 @@ function inferIntentDrivenRecoveryRequest(
   }
 
   const attached = new Set(attachedToolNames);
-
-  if (
-    /https?:\/\/|查一下|搜一下|搜索|查查|最新|今天|今日|news|latest|today|发布了什么|发了什么|fact-check|research/iu.test(userMessage)
-    && (!attached.has("web_search") || !attached.has("web_fetch"))
-  ) {
-    const missingToolNames = ["web_search", "web_fetch"].filter((toolName) => !attached.has(toolName));
-    return buildCapabilityRecoveryRequest("user_intent:research", {
-      skillIds: ["web-search", "web-fetch"],
-      toolNames: missingToolNames,
-    });
-  }
 
   if (
     /浏览器|browser|网页|页面|网站|打开|登录|扫码|截图|click|tab|chrome|b站|bilibili|x\.com|twitter|小红书/iu.test(userMessage)
@@ -1045,6 +1055,40 @@ function looksLikeCapabilitySeekingReply(text: string) {
   return /我需要先(?:查看|查询|看看|搜索)|让我先(?:查看|查询|看看|搜索)|可用的 skill|需要通过 skill 路由|不是直接挂载的基座工具|工具集|没加载|未挂载|unavailable|not available/u.test(text);
 }
 
+function inferAssistantCapabilityRecoveryRequest(
+  assistantText: string,
+  attachedToolNames: string[],
+): CapabilityRecoveryRequest | null {
+  if (!looksLikeCapabilitySeekingReply(assistantText)) {
+    return null;
+  }
+
+  const attached = new Set(attachedToolNames);
+
+  if (
+    /(?:搜索|research|search).{0,18}(?:工具|技能|tool|skill)|(?:网页读取|网页抓取|web[\s_-]?(?:search|fetch))|(?:需要|先|加载|路由).{0,12}(?:搜索|research|search)/iu.test(assistantText)
+  ) {
+    if (attached.has("web_search")) {
+      return null;
+    }
+
+    return buildCapabilityRecoveryRequest("assistant_capability:research", {
+      selectedSkillIds: ["web-search"],
+    });
+  }
+
+  if (
+    /(?:浏览器|browser).{0,18}(?:工具|技能|tool|skill)|chrome relay|(?:需要|先|加载|路由).{0,12}(?:浏览器|browser)|页面操作|网页操作|browser_/iu.test(assistantText)
+    && !attachedToolNames.some((toolName) => toolName.startsWith("browser_") || toolName.startsWith("chrome_relay_"))
+  ) {
+    return buildCapabilityRecoveryRequest("assistant_capability:browser", {
+      selectedSkillIds: ["browser"],
+    });
+  }
+
+  return null;
+}
+
 function buildCapabilityFailureReply(
   userMessage: string | null,
   attachedToolNames: string[],
@@ -1067,6 +1111,7 @@ function buildCapabilityFailureReply(
 function inferCapabilityRecoveryRequest(
   userMessage: string | null,
   assistantText: string,
+  attachedSkillIds: Iterable<string>,
   attachedToolNames: string[],
   resolvedToolCallCount: number,
 ): CapabilityRecoveryRequest | null {
@@ -1087,6 +1132,16 @@ function inferCapabilityRecoveryRequest(
     });
   }
 
+  const referencedSkillId = extractReferencedSkillIdFromAssistantText(
+    assistantText,
+    attachedSkillIds,
+  );
+  if (referencedSkillId && looksLikeCapabilitySeekingReply(assistantText)) {
+    return buildCapabilityRecoveryRequest(`referenced_missing_skill:${referencedSkillId}`, {
+      selectedSkillIds: [referencedSkillId],
+    });
+  }
+
   const referencedToolName = extractReferencedToolNameFromAssistantText(assistantText);
   if (
     referencedToolName
@@ -1098,6 +1153,14 @@ function inferCapabilityRecoveryRequest(
       skillIds: inferStickySkillsForToolName(referencedToolName),
       toolNames: [referencedToolName],
     });
+  }
+
+  const assistantCapabilityRecovery = inferAssistantCapabilityRecoveryRequest(
+    assistantText,
+    attachedToolNames,
+  );
+  if (assistantCapabilityRecovery) {
+    return assistantCapabilityRecovery;
   }
 
   if (
@@ -1279,6 +1342,7 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
 interface StreamResult {
   text: string;
   timings: Record<string, number | null>;
+  assistantMessageId?: string | null;
   diagnostics?: {
     resolvedToolCallCount: number;
     providerMetadataPreview: string | null;
@@ -1503,6 +1567,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
       assistantMessageId = result.assistantMessageId;
       lastResult = {
         text: result.text,
+        assistantMessageId: result.assistantMessageId,
         timings: result.timings,
         diagnostics: result.diagnostics,
       };
@@ -1528,6 +1593,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
       ) ?? inferCapabilityRecoveryRequest(
         latestUserMessage,
         result.text,
+        run.context.routedSkillIds,
         result.attachedToolNames,
         result.diagnostics?.resolvedToolCallCount ?? 0,
       );
@@ -1622,6 +1688,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
 
   const fallbackResult = finalResult ?? lastResult ?? {
     text: "",
+    assistantMessageId,
     timings: {},
     diagnostics: {
       resolvedToolCallCount: 0,
@@ -1629,24 +1696,54 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
     },
   };
 
+  let finalText = fallbackResult.text;
+
   if (
     (fallbackResult.diagnostics?.resolvedToolCallCount ?? 0) === 0
     && looksLikeCapabilitySeekingReply(fallbackResult.text)
   ) {
-    return {
-      ...fallbackResult,
-      timings: {
-        ...fallbackResult.timings,
-        hiddenAttemptCount,
-        hiddenAttemptMs: roundMs(hiddenAttemptMs),
-        visibleAttemptCount,
-      },
-      text: buildCapabilityFailureReply(latestUserMessage, [...accumulatedToolNames]),
-    };
+    finalText = buildCapabilityFailureReply(latestUserMessage, [...accumulatedToolNames]);
+  }
+
+  const shouldPersistFinalText = finalText.trim().length > 0
+    && (finalText !== (lastResult?.text ?? "") || !assistantMessageId);
+  if (shouldPersistFinalText) {
+    const eventPayload = buildAssistantEventPayload(
+      [...accumulatedAttachedSkillIds],
+      [...accumulatedAttachedToolNames],
+    );
+
+    if (assistantMessageId) {
+      const updateResult = updateSessionMessage({
+        sessionId: run.sessionId,
+        messageId: assistantMessageId,
+        content: finalText,
+        eventPayload,
+      });
+      publishSessionEvent(updateResult.event);
+    } else {
+      const messageResult = createSessionMessage({
+        sessionId: run.sessionId,
+        clientMessageId: `agent-assistant-final-${randomUUID()}`,
+        deviceId: "runtime-agent",
+        role: "assistant",
+        content: finalText,
+        attachmentIds: [],
+        eventPayload,
+      });
+      assistantMessageId = messageResult.message.id;
+      for (const event of messageResult.events) {
+        publishSessionEvent(event);
+      }
+    }
+
+    await syncSessionProjectHistory(run.sessionId);
   }
 
   return {
     ...fallbackResult,
+    text: finalText,
+    assistantMessageId,
     timings: {
       ...fallbackResult.timings,
       hiddenAttemptCount,
@@ -1690,6 +1787,11 @@ async function consumeTextStream(
   const deferAssistantMessageCreation = attachedToolNames.length === 0;
   const providerProfile = getProviderRuntimeProfile(run.provider.id);
   let abortedForRecovery = false;
+
+  function shouldHideAssistantAttemptText() {
+    const resolvedVisibleToolCallCount = stateMachine.getAll().filter((state) => isCountedToolCall(state)).length;
+    return resolvedVisibleToolCallCount === 0 && looksLikeCapabilitySeekingReply(text);
+  }
 
   function getChatContent(final = false) {
     return providerProfile.renderAssistantText(text, final);
@@ -1763,6 +1865,9 @@ async function consumeTextStream(
       if (!assistantMessageId && !deferAssistantMessageCreation) {
         const content = getChatContent();
         if (content === null || !content) {
+          continue;
+        }
+        if (shouldHideAssistantAttemptText()) {
           continue;
         }
 
@@ -1843,7 +1948,7 @@ async function consumeTextStream(
   }
 
   // Handle late message creation (text appeared after stream end, or tool-only fallback)
-  if (!assistantMessageId && finalContent) {
+  if (!assistantMessageId && finalContent && !shouldHideAssistantAttemptText()) {
     const messageResult = createSessionMessage({
       sessionId: run.sessionId,
       clientMessageId: assistantClientMessageId,

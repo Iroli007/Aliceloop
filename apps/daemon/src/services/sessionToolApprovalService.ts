@@ -79,7 +79,12 @@ function maybeAutoResolveByStoredRule(input: {
   commandLine: string;
   kind: "command" | "question";
   approvalStateTracker?: ToolApprovalStateTracker;
+  skipStoredRuleAutoResolve?: boolean;
 }) {
+  if (input.skipStoredRuleAutoResolve) {
+    return null;
+  }
+
   if (input.kind !== "command") {
     return null;
   }
@@ -126,6 +131,7 @@ export async function requestSessionToolApproval(input: {
   approvalStateTracker?: ToolApprovalStateTracker;
   kind?: "command" | "question";
   question?: SessionQuestionPrompt | null;
+  skipStoredRuleAutoResolve?: boolean;
 }) {
   if (input.abortSignal.aborted) {
     throw new Error("Agent loop aborted before tool approval was requested.");
@@ -232,7 +238,7 @@ export async function requestSessionUserQuestion(input: {
       description: option.description?.trim() || null,
     }))
     .filter((option) => option.label.length > 0)
-    .slice(0, 4);
+    .slice(0, 3);
 
   if (normalizedOptions.length < 2) {
     throw new Error("ask_user_question_requires_at_least_two_options");

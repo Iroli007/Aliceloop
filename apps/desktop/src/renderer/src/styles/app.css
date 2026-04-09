@@ -2146,11 +2146,11 @@ button {
   margin-left: 4px;
   border: none;
   border-radius: 12px;
-  background: linear-gradient(180deg, rgba(28, 33, 46, 0.98), rgba(16, 20, 30, 0.98));
+  background: rgba(255, 255, 255, 0.96);
   box-shadow:
-    inset 0 0 0 1px rgba(104, 144, 255, 0.14),
-    0 10px 24px rgba(15, 23, 42, 0.14);
-  color: #7bb0ff;
+    inset 0 0 0 1px rgba(152, 211, 229, 0.3),
+    0 8px 18px rgba(15, 23, 42, 0.08);
+  color: #63b8cf;
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -2164,25 +2164,51 @@ button {
 
 .composer__plan-mode-btn:hover {
   transform: translateY(-1px);
-  box-shadow:
-    inset 0 0 0 1px rgba(104, 144, 255, 0.2),
-    0 14px 28px rgba(15, 23, 42, 0.18);
-  color: #9bc4ff;
 }
 
-.composer__plan-mode-btn--inactive {
+.composer__plan-mode-btn--plan {
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow:
+    inset 0 0 0 1px rgba(152, 211, 229, 0.3),
+    0 8px 18px rgba(15, 23, 42, 0.08);
+  color: #63b8cf;
+}
+
+.composer__plan-mode-btn--plan:hover {
+  box-shadow:
+    inset 0 0 0 1px rgba(128, 201, 223, 0.4),
+    0 12px 24px rgba(15, 23, 42, 0.1);
+  color: #4eaac4;
+}
+
+.composer__plan-mode-btn--bypass {
   background: rgba(255, 255, 255, 0.94);
   box-shadow:
-    inset 0 0 0 1px rgba(96, 165, 250, 0.18),
+    inset 0 0 0 1px rgba(244, 168, 185, 0.22),
     0 8px 18px rgba(15, 23, 42, 0.08);
-  color: #3b82f6;
+  color: #e78aa0;
 }
 
-.composer__plan-mode-btn--inactive:hover {
+.composer__plan-mode-btn--bypass:hover {
   box-shadow:
-    inset 0 0 0 1px rgba(96, 165, 250, 0.26),
+    inset 0 0 0 1px rgba(236, 153, 176, 0.34),
     0 12px 24px rgba(15, 23, 42, 0.1);
-  color: #2563eb;
+  color: #dc6f8e;
+}
+
+.composer__plan-mode-btn--auto {
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    inset 0 0 0 1px rgba(246, 213, 120, 0.34),
+    0 8px 18px rgba(15, 23, 42, 0.08);
+  color: #d8ad44;
+}
+
+.composer__plan-mode-btn--auto:hover {
+  box-shadow:
+    inset 0 0 0 1px rgba(240, 199, 85, 0.44),
+    0 12px 24px rgba(15, 23, 42, 0.1);
+  color: #c69423;
 }
 
 .composer__plan-mode-btn:disabled {
@@ -2195,6 +2221,10 @@ button {
   width: 18px;
   height: 18px;
   flex: none;
+  padding: 2px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.18);
 }
 
 .composer__dropdown-wrapper {
@@ -2229,6 +2259,21 @@ button {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 100ms ease;
+}
+
+.composer__dropdown-item-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer__dropdown-item-main .composer__plan-mode-btn-icon {
+  width: 16px;
+  height: 16px;
+  padding: 1px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.16);
 }
 
 .composer__dropdown-item:hover {
