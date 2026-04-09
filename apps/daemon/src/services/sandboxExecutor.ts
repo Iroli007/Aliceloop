@@ -46,7 +46,6 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
     requestBashApproval: options.requestBashApproval,
     requestElevatedApproval: options.requestElevatedApproval,
     noteCreatedFile: options.noteCreatedFile,
-    canDeleteFile: options.canDeleteFile,
     noteDeletedFile: options.noteDeletedFile,
   };
 

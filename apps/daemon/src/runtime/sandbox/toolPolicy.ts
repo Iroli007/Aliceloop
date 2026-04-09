@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { normalizeSandboxPermissionProfile } from "@aliceloop/runtime-core";
 import { getDataDir, getUploadsDir } from "../../db/client";
+import { isOutputRedirectOp, parseBashScriptAst } from "./bashAst";
 import {
   type ParsedBashCommand,
   type NormalizedBashPolicyInput,
@@ -360,7 +361,7 @@ function tokenizeShellWords(input: string) {
   return tokens;
 }
 
-function collectPathArguments(command: string, args: string[]): CollectedPathArgument[] {
+export function collectPathArguments(command: string, args: string[]): CollectedPathArgument[] {
   const nonFlagArgs = args.filter((arg) => arg && !arg.startsWith("-"));
   switch (command) {
     case "cat":
@@ -437,38 +438,66 @@ function isPathAllowedForAccess(
   return policy.allowedWriteRoots ? isPathAllowed(targetPath, policy.allowedWriteRoots) : true;
 }
 
+function assertPathAccess(
+  policy: SandboxToolPolicy,
+  targetPath: string,
+  access: PathArgumentAccess,
+) {
+  if (isPathAllowedForAccess(policy, targetPath, access)) {
+    return;
+  }
+
+  const reason = access === "read"
+    ? "read path"
+    : access === "execute"
+      ? "executable path"
+      : "write path";
+  const guidance = access === "read"
+    ? "this command is confined to the configured workspace read roots"
+    : access === "execute"
+      ? "this command is confined to the configured workspace roots"
+      : "this command is confined to the configured workspace write roots";
+  throw new SandboxViolationError(
+    `bash denied for ${reason} outside allowed roots: ${targetPath}; ${guidance}`,
+  );
+}
+
 export function buildSandboxToolPolicy(options: SandboxExecutorOptions): SandboxToolPolicy {
   const permissionProfile = normalizeSandboxPermissionProfile(options.permissionProfile);
   const fullAccess = permissionProfile === "full-access";
+  const keepFilesystemBoundaryInFullAccess = fullAccess && options.keepFilesystemBoundaryInFullAccess === true;
+  const enforceWorkspaceBoundary = !fullAccess || keepFilesystemBoundaryInFullAccess;
   const workspaceRoot = options.workspaceRoot?.trim();
-  const workspaceReadRoots = !fullAccess && workspaceRoot
+  const workspaceReadRoots = enforceWorkspaceBoundary && workspaceRoot
     ? uniqueRoots([workspaceRoot, ...(options.extraReadRoots ?? [])])
     : null;
-  const workspaceWriteRoots = !fullAccess && workspaceRoot
+  const workspaceWriteRoots = enforceWorkspaceBoundary && workspaceRoot
     ? uniqueRoots([workspaceRoot, ...(options.extraWriteRoots ?? [])])
     : null;
-  const workspaceCwdRoots = !fullAccess && workspaceRoot
+  const workspaceCwdRoots = enforceWorkspaceBoundary && workspaceRoot
     ? uniqueRoots([workspaceRoot, ...(options.extraCwdRoots ?? [])])
     : null;
+  const supportsElevatedActions = permissionProfile === "development"
+    || Boolean(options.supportsElevatedActionsInFullAccess);
 
   return {
     label: options.label,
     permissionProfile,
     fullAccess,
-    elevatedAccess: permissionProfile === "development" ? "elevated" : "standard",
-    supportsElevatedActions: permissionProfile === "development",
+    elevatedAccess: supportsElevatedActions ? "elevated" : "standard",
+    supportsElevatedActions,
     requiresBashApproval: !fullAccess && Boolean(options.requestBashApproval),
-    allowedReadRoots: fullAccess
+    allowedReadRoots: fullAccess && !keepFilesystemBoundaryInFullAccess
       ? null
       : workspaceReadRoots
         ? workspaceReadRoots
         : uniqueRoots([...defaultAllowedReadRoots, ...(options.extraReadRoots ?? [])]),
-    allowedWriteRoots: fullAccess
+    allowedWriteRoots: fullAccess && !keepFilesystemBoundaryInFullAccess
       ? null
       : workspaceWriteRoots
         ? workspaceWriteRoots
         : uniqueRoots([...defaultAllowedWriteRoots, ...(options.extraWriteRoots ?? [])]),
-    allowedCwdRoots: fullAccess
+    allowedCwdRoots: fullAccess && !keepFilesystemBoundaryInFullAccess
       ? null
       : workspaceCwdRoots
         ? workspaceCwdRoots
@@ -567,21 +596,7 @@ export function assertCommandArguments(
   const pathLikeArgs = collectPathArguments(input.command, input.args);
   for (const { value, access } of pathLikeArgs) {
     const candidatePath = resolve(input.cwd, value);
-    if (!isPathAllowedForAccess(policy, candidatePath, access)) {
-      const reason = access === "read"
-        ? "read path"
-        : access === "execute"
-          ? "executable path"
-          : "write path";
-      const guidance = access === "read"
-        ? "this command is confined to the configured workspace read roots"
-        : access === "execute"
-          ? "this command is confined to the configured workspace roots"
-          : "this command is confined to the configured workspace write roots";
-      throw new SandboxViolationError(
-        `bash denied for ${reason} outside allowed roots: ${value}; ${guidance}`,
-      );
-    }
+    assertPathAccess(policy, candidatePath, access);
   }
 }
 
@@ -596,6 +611,10 @@ export function assertBashExecution(policy: SandboxToolPolicy, input: Normalized
         args: shellCommand.args,
         cwd: input.cwd,
       });
+      for (const redirect of shellCommand.redirects ?? []) {
+        const access: PathArgumentAccess = isOutputRedirectOp(redirect.op) ? "write" : "read";
+        assertPathAccess(policy, resolve(input.cwd, redirect.target), access);
+      }
     }
     return;
   }
@@ -608,13 +627,32 @@ export function assertBashExecution(policy: SandboxToolPolicy, input: Normalized
   });
 }
 
-export function parseShellScriptCommandsForPolicy(script: string): ParsedBashCommand[] {
-  assertSupportedShellScript(script);
+export function parseShellScriptCommandsForPolicy(
+  script: string,
+  options?: { allowRedirects?: boolean },
+): ParsedBashCommand[] {
+  const parsed = parseBashScriptAst(script);
+  if (parsed.kind === "too-complex") {
+    throw new SandboxViolationError(
+      `bash denied for unsupported shell feature in script: ${parsed.reason}; use simple commands, pipes, &&, ||, or ; only`,
+      { allowElevatedFallback: false },
+    );
+  }
 
-  return splitShellCommands(script)
-    .map((segment) => tokenizeShellWords(segment))
-    .filter((tokens) => tokens.length > 0)
-    .map(([command, ...args]) => ({ command, args }));
+  for (const command of parsed.commands) {
+    if (!options?.allowRedirects && command.redirects.length > 0) {
+      throw new SandboxViolationError(
+        "bash denied for unsupported shell feature in script: redirection; use simple commands, pipes, &&, ||, or ; only",
+        { allowElevatedFallback: false },
+      );
+    }
+  }
+
+  return parsed.commands.map((command) => ({
+    command: command.command,
+    args: command.args,
+    redirects: command.redirects,
+  }));
 }
 
 export function getDefaultSandboxRoots() {

@@ -4,15 +4,14 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { tool, type ToolExecutionOptions } from "ai";
-import type { createPermissionSandboxExecutor } from "../../services/sandboxExecutor";
-import type { BashProgressTracker, ToolApprovalStateTracker } from "../../runtime/sandbox/types";
+import type { BashProgressTracker, PermissionSandboxExecutor, ToolApprovalStateTracker } from "../../runtime/sandbox/types";
 import { getSandboxProjectRoot, isPathAllowed } from "../../runtime/sandbox/toolPolicy";
 import { normalizeBashInput } from "./bashInputNormalizer";
 import { STABLE_TOOL_PROVIDER_OPTIONS } from "./toolProviderOptions";
 
 const execFileAsync = promisify(execFile);
 
-type SandboxExecutor = ReturnType<typeof createPermissionSandboxExecutor>;
+type SandboxExecutor = PermissionSandboxExecutor;
 type SandboxedToolExecutionOptions = ToolExecutionOptions & {
   approvalStateTracker?: ToolApprovalStateTracker;
   bashProgressTracker?: BashProgressTracker;
@@ -166,7 +165,7 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           .optional()
           .describe("Maximum number of lines to return (default 500)"),
       }),
-      execute: async ({ filePath, offset: rawOffset, limit: rawLimit }) => {
+      execute: async ({ filePath, offset: rawOffset, limit: rawLimit }, options?: SandboxedToolExecutionOptions) => {
         const resolvedPath = resolve(filePath);
         // 通配符检查直接返回错误提示
         if (hasWildcard(filePath)) {
@@ -176,7 +175,11 @@ export function createSandboxTools(sandbox: SandboxExecutor) {
           );
         }
 
-        const content = await sandbox.readTextFile({ targetPath: resolvedPath });
+        const content = await sandbox.readTextFile({
+          targetPath: resolvedPath,
+          toolCallId: options?.toolCallId,
+          approvalStateTracker: options?.approvalStateTracker,
+        });
         const allLines = content.split("\n");
         const totalLines = allLines.length;
         const offset = rawOffset ?? 0;

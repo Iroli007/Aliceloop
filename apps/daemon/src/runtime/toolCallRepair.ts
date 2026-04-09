@@ -99,6 +99,15 @@ function normalizeToolName(rawToolName: string) {
 }
 
 function buildNormalizedInput(toolName: string, attributes: Record<string, unknown>) {
+  if (toolName === "use_skill") {
+    const skill = pickStringAttribute(attributes, "skill", "skillId", "skill_id", "name");
+    if (!skill) {
+      return null;
+    }
+
+    return { skill };
+  }
+
   if (toolName === "web_search") {
     const query = pickStringAttribute(attributes, "query");
     if (!query) {
@@ -360,9 +369,15 @@ function parseJsonToolCall(text: string): RepairedToolCall | null {
     }
 
     const inputCandidate = parsed.parameters ?? parsed.input ?? parsed.args;
-    const input = inputCandidate && typeof inputCandidate === "object"
+    const rawInput = inputCandidate && typeof inputCandidate === "object"
       ? inputCandidate as Record<string, unknown>
       : {};
+    const input = toolName === "use_skill"
+      ? buildNormalizedInput(toolName, rawInput)
+      : rawInput;
+    if (!input) {
+      return null;
+    }
 
     return {
       source: "tool_call_json",

@@ -10,6 +10,7 @@ import {
   type SessionPlanModeState,
   type SessionRollingSummary,
   type SessionSnapshot,
+  type TaskNotification,
   type SessionThreadSummary,
   type StudyArtifact,
   type ToolApproval,
@@ -677,6 +678,20 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
       return {
         ...snapshot,
         jobs: upsertJob(snapshot.jobs, job),
+      };
+    }
+    case "task.notification": {
+      const notification = (event.payload as { notification?: TaskNotification }).notification;
+      if (!notification) {
+        return snapshot;
+      }
+
+      return {
+        ...snapshot,
+        session: {
+          ...snapshot.session,
+          updatedAt: event.createdAt,
+        },
       };
     }
     case "attachment.ready": {

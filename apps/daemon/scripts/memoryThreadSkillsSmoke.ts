@@ -114,10 +114,10 @@ async function main() {
       scopedMemoryContext.routedSkillIds.includes("memory-management"),
       "scoped recall turns should still route memory-management",
     );
-    assert.deepEqual(
+    assert.equal(
       scopedMemoryContext.firstStepToolChoice,
-      { type: "tool", toolName: "bash" },
-      "memory-management turns should keep the original bash-first workflow",
+      undefined,
+      "memory-management turns should not force a first-step tool when the stable base tools are already attached",
     );
     assert.match(
       scopedMemoryPrompt,
@@ -150,10 +150,10 @@ async function main() {
       false,
       "thread-management turns should stay separate from memory-management",
     );
-    assert.deepEqual(
+    assert.equal(
       threadManagementContext.firstStepToolChoice,
-      { type: "tool", toolName: "bash" },
-      "thread-management turns should keep the original bash-first CLI workflow",
+      undefined,
+      "thread-management turns should not force a first-step tool when the stable base tools are already attached",
     );
     assert.equal(typeof threadManagementContext.tools.bash, "object", "thread-management turns should keep bash attached");
     assert.equal(typeof threadManagementContext.tools.read, "object", "thread-management turns should keep read attached");

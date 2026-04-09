@@ -18,9 +18,11 @@ async function main() {
   try {
     const [
       { loadContext },
-      { createSession, getSessionSnapshot, updateSessionFocusState },
+      { buildSessionContextFragments },
+      { createSession, createSessionMessage, getSessionSnapshot, updateSessionFocusState },
     ] = await Promise.all([
       import("../src/context/index.ts"),
+      import("../src/context/session/sessionContext.ts"),
       import("../src/repositories/sessionRepository.ts"),
     ]);
 
@@ -50,6 +52,103 @@ async function main() {
     assert.match(prompt, /把 session focus state 接进 prompt 主链路。/u);
     assert.match(prompt, /先补 snapshot 和 prompt/u);
     assert.match(prompt, /还没有自动维护逻辑/u);
+
+    const researchSession = createSession("session continuation smoke");
+    createSessionMessage({
+      sessionId: researchSession.id,
+      clientMessageId: "user-1",
+      deviceId: "smoke",
+      role: "user",
+      content: "帮我生成一个桌宠吧",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: researchSession.id,
+      clientMessageId: "assistant-1",
+      deviceId: "smoke",
+      role: "assistant",
+      content: "计划已更新。",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: researchSession.id,
+      clientMessageId: "user-2",
+      deviceId: "smoke",
+      role: "user",
+      content: "Python 桌面应用",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: researchSession.id,
+      clientMessageId: "user-3",
+      deviceId: "smoke",
+      role: "user",
+      content: "查一下黄婷婷这个人，你客观评价一下它",
+      attachmentIds: [],
+    });
+
+    const researchFragments = buildSessionContextFragments(researchSession.id);
+    assert.equal(
+      researchFragments.recentConversationFocus.continuationLike,
+      false,
+      "fresh research requests with explicit new entities should not be treated as continuation-only follow-ups",
+    );
+    assert.equal(
+      researchFragments.recentConversationFocus.effectiveUserQuery,
+      "查一下黄婷婷这个人，你客观评价一下它",
+      "fresh research requests should not inherit unrelated anchors from the previous task",
+    );
+
+    await loadContext(researchSession.id, new AbortController().signal);
+
+    const threadManagementSession = createSession("thread management routing smoke");
+    createSessionMessage({
+      sessionId: threadManagementSession.id,
+      clientMessageId: "user-thread-1",
+      deviceId: "smoke",
+      role: "user",
+      content: "删除掉四月份的所有线程对话",
+      attachmentIds: [],
+    });
+
+    const threadManagementContext = await loadContext(threadManagementSession.id, new AbortController().signal);
+    assert.deepEqual(
+      threadManagementContext.routedSkillIds,
+      ["thread-management"],
+      "thread deletion requests should route to thread-management without notebook/scheduler drift",
+    );
+    assert.equal(
+      "task_output" in threadManagementContext.tools,
+      false,
+      "thread deletion requests should not attach task output tools",
+    );
+    assert.equal(
+      "agent" in threadManagementContext.tools,
+      true,
+      "agent should be part of the native tool surface without requiring a delegated-agent skill",
+    );
+
+    const explicitAgentSession = createSession("native agent tool smoke");
+    createSessionMessage({
+      sessionId: explicitAgentSession.id,
+      clientMessageId: "user-agent-1",
+      deviceId: "smoke",
+      role: "user",
+      content: "派个子代理去研究这个问题，并把结论回来告诉我",
+      attachmentIds: [],
+    });
+
+    const explicitAgentContext = await loadContext(explicitAgentSession.id, new AbortController().signal);
+    assert.equal(
+      "agent" in explicitAgentContext.tools,
+      true,
+      "explicit sub-agent requests should still have access to the native agent tool",
+    );
+    assert.equal(
+      explicitAgentContext.routedSkillIds.includes("delegated-agent"),
+      false,
+      "native agent usage should no longer depend on a delegated-agent skill route",
+    );
   } finally {
     rmSync(tempDataDir, { recursive: true, force: true });
   }

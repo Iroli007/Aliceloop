@@ -4,6 +4,7 @@ import type {
   SandboxPrimitive,
   SandboxRun,
 } from "@aliceloop/runtime-core";
+import type { ParsedBashRedirect } from "./bashAst";
 
 export class SandboxViolationError extends Error {
   allowElevatedFallback: boolean;
@@ -22,6 +23,8 @@ export interface SandboxExecutorOptions {
   permissionProfile?: SandboxPermissionProfile;
   autoApproveToolRequests?: boolean;
   workspaceRoot?: string;
+  keepFilesystemBoundaryInFullAccess?: boolean;
+  supportsElevatedActionsInFullAccess?: boolean;
   defaultCwd?: string;
   extraReadRoots?: string[];
   extraWriteRoots?: string[];
@@ -32,7 +35,6 @@ export interface SandboxExecutorOptions {
   requestBashApproval?: (input: { command: string; args: string[]; cwd: string }) => Promise<void>;
   requestElevatedApproval?: (input: SandboxElevatedApprovalInput) => Promise<void>;
   noteCreatedFile?: (targetPath: string) => Promise<void> | void;
-  canDeleteFile?: (targetPath: string) => Promise<boolean> | boolean;
   noteDeletedFile?: (targetPath: string) => Promise<void> | void;
 }
 
@@ -66,6 +68,8 @@ export interface BashProgressTracker {
 
 export interface ReadTextFileInput {
   targetPath: string;
+  toolCallId?: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
 }
 
 export interface WriteBinaryFileInput {
@@ -109,6 +113,7 @@ export interface RunBashInput {
 export interface ParsedBashCommand {
   command: string;
   args: string[];
+  redirects?: ParsedBashRedirect[];
 }
 
 export interface NormalizedBashPolicyInput {
@@ -173,7 +178,6 @@ export interface SandboxRuntimeContext {
   }) => Promise<void>;
   requestElevatedApproval?: (input: SandboxElevatedApprovalInput) => Promise<void>;
   noteCreatedFile?: (targetPath: string) => Promise<void> | void;
-  canDeleteFile?: (targetPath: string) => Promise<boolean> | boolean;
   noteDeletedFile?: (targetPath: string) => Promise<void> | void;
 }
 

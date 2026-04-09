@@ -70,6 +70,7 @@ export type SessionEventType =
   | "message.created"
   | "message.acked"
   | "message.updated"
+  | "task.notification"
   | "job.updated"
   | "artifact.created"
   | "artifact.block.created"
@@ -270,6 +271,20 @@ export interface SessionEvent<TPayload = Record<string, unknown>> {
   seq: number;
   type: SessionEventType;
   payload: TPayload;
+  createdAt: string;
+}
+
+export interface TaskNotification {
+  id: string;
+  taskId: string;
+  mode: "fork" | "subagent";
+  role: string | null;
+  status: "completed" | "failed";
+  title: string;
+  objective: string;
+  outputPath: string;
+  preview: string | null;
+  childSessionId: string;
   createdAt: string;
 }
 

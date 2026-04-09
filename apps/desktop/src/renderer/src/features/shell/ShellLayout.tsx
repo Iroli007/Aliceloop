@@ -6,8 +6,10 @@ import {
   type SessionEvent,
   type SessionFocusState,
   type SessionMessage,
+  type SessionPlanModeState,
   type ReasoningEffort,
   type SessionRollingSummary,
+  type TaskNotification,
   type ToolApproval,
   type ToolApprovalDecisionOption,
 } from "@aliceloop/runtime-core";
@@ -102,6 +104,69 @@ function ReasoningEffortIcon() {
       <path d="M9.5 8.5c1 .5 1.4 1.3 1.4 2.5s-.4 2-1.4 2.5" />
       <path d="M14.5 8.5c-1 .5-1.4 1.3-1.4 2.5s.4 2 1.4 2.5" />
       <path d="M10 17.5c.3 1.1 1 1.8 2 2.1 1-.3 1.7-1 2-2.1" />
+    </svg>
+  );
+}
+
+function ModeIcon({ mode }: { mode: "bypassPermissions" | "auto" | "plan" }) {
+  if (mode === "bypassPermissions") {
+    return (
+      <svg
+        className="composer__plan-mode-btn-icon"
+        viewBox="0 0 24 24"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path d="M4.5 6.2v11.6l7.4-5.8-7.4-5.8Z" />
+        <path d="M12.1 6.2v11.6l7.4-5.8-7.4-5.8Z" />
+      </svg>
+    );
+  }
+
+  if (mode === "auto") {
+    return (
+      <svg
+        className="composer__plan-mode-btn-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <rect x="4.5" y="4.5" width="8" height="8" rx="2.2" />
+        <path d="M6.8 8.5h3.4" />
+        <path d="M8.5 6.8v3.4" />
+        <path d="M15.2 7.2h4.3" />
+        <path d="M17.35 7.2v8.5" />
+        <path d="M14.4 10.1h5.9" />
+        <path d="M14.7 15.7h5.3" />
+        <path d="M9 15.4 6.7 19.2" />
+        <path d="M9 15.4 11.3 19.2" />
+        <path d="M5.7 19.2h6.6" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg
+      className="composer__plan-mode-btn-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4.5 6.5h7" />
+      <path d="M4.5 12h7" />
+      <path d="M4.5 17.5h7" />
+      <path d="M15.5 7.25 18 4.75" />
+      <path d="M18 7.25 15.5 4.75" />
+      <path d="M16.75 12h2.75" />
+      <path d="M15.25 17.5 16.5 18.75l3-3" />
     </svg>
   );
 }
@@ -214,7 +279,7 @@ function extractQuickReplyOptions(content: string) {
   }
 
   if (optionGroups.length > 0) {
-    return [...new Set(optionGroups[0] ?? [])].slice(0, 4);
+    return [...new Set(optionGroups[0] ?? [])].slice(0, 3);
   }
 
   const listOptions = lines
@@ -559,6 +624,14 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
         }
       }
     }
+
+    if (event.type === "task.notification") {
+      flush(event.seq - 0.5, event.createdAt);
+      finalizeTurn();
+      activeMessage = null;
+      currentContent = "";
+      lastEmittedContent = "";
+    }
   }
 
   const lastEvent = sessionEvents.at(-1);
@@ -589,6 +662,14 @@ type TimelineEntry =
       sortTime: string;
     }
   | {
+      kind: "plan-transition";
+      transition: "entered" | "exited";
+      planMode: SessionPlanModeState;
+      taskId: string | null;
+      sortSeq: number | null;
+      sortTime: string;
+    }
+  | {
       kind: "approval";
       approval: ToolApproval;
       sortSeq: number | null;
@@ -597,6 +678,12 @@ type TimelineEntry =
   | {
       kind: "tool";
       tool: ToolWorkflowEntry;
+      sortSeq: number | null;
+      sortTime: string;
+    }
+  | {
+      kind: "task-notification";
+      notification: TaskNotification;
       sortSeq: number | null;
       sortTime: string;
     };
@@ -638,8 +725,18 @@ type TimelineBlock =
       tools: ToolWorkflowEntry[];
     }
   | {
+      kind: "task-notification";
+      notification: TaskNotification;
+    }
+  | {
       kind: "active-plan";
       planMeta: PlanMessageMeta;
+    }
+  | {
+      kind: "plan-transition";
+      transition: "entered" | "exited";
+      planMode: SessionPlanModeState;
+      taskId: string | null;
     };
 
 function buildTimeline(
@@ -652,6 +749,7 @@ function buildTimeline(
 ): TimelineBlock[] {
   const messageSeqById = new Map<string, number>();
   const approvalSeqById = new Map<string, number>();
+  const entries: TimelineEntry[] = [];
 
   for (const event of sessionEvents) {
     if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
@@ -667,9 +765,40 @@ function buildTimeline(
         approvalSeqById.set(payload.approval.id, event.seq);
       }
     }
-  }
 
-  const entries: TimelineEntry[] = [];
+    if (event.type === "plan_mode.updated") {
+      const payload = event.payload as {
+        planMode?: SessionPlanModeState;
+        transition?: unknown;
+        taskId?: unknown;
+      };
+      if (
+        payload.planMode
+        && (payload.transition === "entered" || payload.transition === "exited")
+      ) {
+        entries.push({
+          kind: "plan-transition",
+          transition: payload.transition,
+          planMode: payload.planMode,
+          taskId: typeof payload.taskId === "string" ? payload.taskId : null,
+          sortSeq: event.seq,
+          sortTime: event.createdAt,
+        });
+      }
+    }
+
+    if (event.type === "task.notification") {
+      const payload = event.payload as { notification?: TaskNotification };
+      if (payload.notification) {
+        entries.push({
+          kind: "task-notification",
+          notification: payload.notification,
+          sortSeq: event.seq,
+          sortTime: event.createdAt,
+        });
+      }
+    }
+  }
 
   for (const message of messages) {
     if (message.role === "assistant") {
@@ -742,7 +871,9 @@ function buildTimeline(
       message: 0,
       approval: 1,
       tool: 2,
-      "active-plan": 3,
+      "task-notification": 3,
+      "plan-transition": 4,
+      "active-plan": 5,
     };
 
     return kindOrder[a.kind] - kindOrder[b.kind];
@@ -822,6 +953,15 @@ function buildTimeline(
       blocks.push({
         kind: "active-plan",
         planMeta: entry.planMeta,
+      });
+      continue;
+    }
+
+    if (entry.kind === "task-notification") {
+      flushAssistantTurn();
+      blocks.push({
+        kind: "task-notification",
+        notification: entry.notification,
       });
       continue;
     }
@@ -982,6 +1122,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [queuedAttachments, setQueuedAttachments] = useState<Attachment[]>([]);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [reasoningDropdownOpen, setReasoningDropdownOpen] = useState(false);
+  const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
@@ -1006,6 +1147,20 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
   const enabledProvider = configuredProviders.find((item) => item.enabled)
     ?? providers.find((item) => item.enabled) ?? null;
+  const currentModeLabel = conversation.planMode.active
+    ? (conversation.exitingPlanMode ? "计划中…" : "计划模式")
+    : (runtimeSettings.settings.autoApproveToolRequests ? "完全访问" : "auto模式");
+  const currentModeIcon = conversation.planMode.active
+    ? "plan" as const
+    : (runtimeSettings.settings.autoApproveToolRequests ? "bypassPermissions" as const : "auto" as const);
+  const currentModeButtonClassName = `composer__plan-mode-btn${
+    currentModeIcon === "plan"
+      ? " composer__plan-mode-btn--plan"
+      : currentModeIcon === "auto"
+        ? " composer__plan-mode-btn--auto"
+        : " composer__plan-mode-btn--bypass"
+  }`;
+  const modeSwitchDisabled = conversation.enteringPlanMode || conversation.exitingPlanMode || runtimeSettings.saving;
   const activeToolApproval = useMemo(() => {
     if (conversation.pendingCommandApprovals.length === 0) {
       return null;
@@ -1698,13 +1853,16 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       const stopResult = await conversation.stopResponse();
       if (!stopResult.ok && stopResult.error !== "当前没有正在输出的 agent。") {
         setComposerNotice(stopResult.error ?? "停止失败");
-        return;
+        return false;
       }
     }
     const result = await conversation.exitPlanMode();
     if (!result.ok) {
       setComposerNotice(result.error ?? "退出计划模式失败");
+      return false;
     }
+
+    return true;
   }
 
   async function handleEnterPlanMode() {
@@ -1713,12 +1871,45 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       const stopResult = await conversation.stopResponse();
       if (!stopResult.ok && stopResult.error !== "当前没有正在输出的 agent。") {
         setComposerNotice(stopResult.error ?? "停止失败");
-        return;
+        return false;
       }
     }
     const result = await conversation.enterPlanMode();
     if (!result.ok) {
       setComposerNotice(result.error ?? "进入计划模式失败");
+      return false;
+    }
+
+    return true;
+  }
+
+  async function handleSelectMode(mode: "bypassPermissions" | "auto" | "plan") {
+    setModeDropdownOpen(false);
+
+    if (mode === "plan") {
+      if (conversation.planMode.active) {
+        return;
+      }
+
+      await handleEnterPlanMode();
+      return;
+    }
+
+    if (conversation.planMode.active) {
+      const exited = await handleExitPlanMode();
+      if (!exited) {
+        return;
+      }
+    }
+
+    setComposerNotice(null);
+    const result = await runtimeSettings.save({
+      sandboxProfile: "full-access",
+      autoApproveToolRequests: mode === "bypassPermissions",
+    });
+
+    if (!result.ok) {
+      setComposerNotice(result.error ?? "保存权限模式失败");
     }
   }
 
@@ -2193,8 +2384,92 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     );
                   }
 
+                  if (entry.kind === "task-notification") {
+                    const notification = entry.notification;
+                    const modeLabel = notification.mode === "fork" ? "分叉代理" : "子代理";
+                    const statusLabel = notification.status === "completed" ? "已完成" : "已失败";
+                    return (
+                      <article
+                        key={`task-notification-${notification.id}`}
+                        className="workspace__message workspace__message--assistant workspace__message--plan"
+                      >
+                        <div className="workspace__message-body workspace__message-body--plan">
+                          <div className="workspace__plan-card-head">
+                            <div className="workspace__plan-card-copy">
+                              <span className="workspace__plan-card-eyebrow">后台任务通知</span>
+                              <strong className="workspace__plan-card-title">{`${modeLabel}${statusLabel}`}</strong>
+                            </div>
+                            <div className="workspace__plan-card-meta">
+                              <span className="workspace__plan-chip workspace__plan-chip--status">
+                                {notification.status}
+                              </span>
+                              {notification.role ? (
+                                <span className="workspace__plan-chip">{notification.role}</span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="workspace__plan-card-content">
+                            <MessageContent
+                              content={[
+                                `任务：${notification.objective}`,
+                                `结果文件：${notification.outputPath}`,
+                                notification.preview ? `摘要：${notification.preview}` : null,
+                                "需要完整内容时，直接用 read 读取结果文件。",
+                              ].filter(Boolean).join("\n")}
+                              renderMarkdown
+                            />
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  }
+
                   if (entry.kind === "tool") {
                     return <ToolWorkflowCard key={`tool-${entry.tool.toolCallId}`} entry={entry.tool} />;
+                  }
+
+                  if (entry.kind === "plan-transition") {
+                    const isEntering = entry.transition === "entered";
+                    return (
+                      <article
+                        key={`plan-transition-${entry.transition}-${entry.planMode.updatedAt ?? entry.planMode.enteredAt ?? entry.taskId ?? "current"}`}
+                        className="workspace__message workspace__message--assistant workspace__message--plan"
+                      >
+                        <div className="workspace__message-body workspace__message-body--plan">
+                          <div className="workspace__plan-card-head">
+                            <div className="workspace__plan-card-copy">
+                              <span className="workspace__plan-card-eyebrow">
+                                {isEntering ? "已进入计划模式" : "已退出计划模式"}
+                              </span>
+                              <strong className="workspace__plan-card-title">
+                                {isEntering ? "继续只做规划" : "开始执行计划"}
+                              </strong>
+                            </div>
+                            <div className="workspace__plan-card-meta">
+                              <span className="workspace__plan-chip workspace__plan-chip--status">
+                                {isEntering ? "仅更新草案" : "回到执行流"}
+                              </span>
+                              {entry.planMode.activePlanId ? (
+                                <span className="workspace__plan-chip">
+                                  {`#${entry.planMode.activePlanId.slice(0, 8)}`}
+                                </span>
+                              ) : null}
+                              {!isEntering && entry.taskId ? (
+                                <span className="workspace__plan-chip">任务已同步</span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="workspace__plan-card-content">
+                            <MessageContent
+                              content={isEntering
+                                ? "计划模式已经打开，接下来只更新计划草案和说明，不进入写入执行。"
+                                : "计划模式已经退出，当前计划已转为执行计划。接下来会按这份计划进入实现。"}
+                              renderMarkdown
+                            />
+                          </div>
+                        </div>
+                      </article>
+                    );
                   }
 
                   if (entry.kind === "active-plan") {
@@ -2544,7 +2819,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <button
                   type="button"
                   className="composer__toolbar-btn"
-                  onClick={() => { setModelDropdownOpen((v) => !v); setReasoningDropdownOpen(false); }}
+                  onClick={() => { setModelDropdownOpen((v) => !v); setReasoningDropdownOpen(false); setModeDropdownOpen(false); }}
                 >
                   <span className="composer__toolbar-btn-icon">⚡</span>
                   <span>{enabledProvider ? enabledProvider.label : "模型"}</span>
@@ -2582,7 +2857,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 <button
                   type="button"
                   className="composer__toolbar-btn"
-                  onClick={() => { setReasoningDropdownOpen((v) => !v); setModelDropdownOpen(false); }}
+                  onClick={() => { setReasoningDropdownOpen((v) => !v); setModelDropdownOpen(false); setModeDropdownOpen(false); }}
                 >
                   <span>{`推理 · ${formatReasoningEffortLabel(runtimeSettings.settings.reasoningEffort)}`}</span>
                   <span className="composer__toolbar-btn-caret">▾</span>
@@ -2613,40 +2888,63 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               </div>
 
               {conversation.planModeAvailable ? (
-                <button
-                  type="button"
-                  className={`composer__plan-mode-btn${conversation.planMode.active ? "" : " composer__plan-mode-btn--inactive"}`}
-                  onClick={() => {
-                    void (conversation.planMode.active ? handleExitPlanMode() : handleEnterPlanMode());
-                  }}
-                  disabled={conversation.planMode.active ? conversation.exitingPlanMode : conversation.enteringPlanMode}
-                  aria-label={conversation.planMode.active ? "退出计划模式" : "进入计划模式"}
-                  title={conversation.planMode.active ? "退出计划模式" : "进入计划模式"}
-                >
-                  <svg
-                    className="composer__plan-mode-btn-icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden="true"
+                <div className="composer__dropdown-wrapper">
+                  <button
+                    type="button"
+                    className={currentModeButtonClassName}
+                    onClick={() => {
+                      setModeDropdownOpen((value) => !value);
+                      setModelDropdownOpen(false);
+                      setReasoningDropdownOpen(false);
+                    }}
+                    disabled={modeSwitchDisabled}
+                    aria-label={`切换到${currentModeLabel}`}
+                    title={`切换到${currentModeLabel}`}
                   >
-                    <path d="M4.5 6.5h7" />
-                    <path d="M4.5 12h7" />
-                    <path d="M4.5 17.5h7" />
-                    <path d="M15.5 7.25 18 4.75" />
-                    <path d="M18 7.25 15.5 4.75" />
-                    <path d="M16.75 12h2.75" />
-                    <path d="M15.25 17.5 16.5 18.75l3-3" />
-                  </svg>
-                  <span>
-                    {conversation.planMode.active
-                      ? (conversation.exitingPlanMode ? "退出中…" : "计划")
-                      : (conversation.enteringPlanMode ? "进入中…" : "计划")}
-                  </span>
-                </button>
+                    <ModeIcon mode={currentModeIcon} />
+                    <span>{currentModeLabel}</span>
+                  </button>
+                  {modeDropdownOpen ? (
+                    <div className="composer__dropdown">
+                      <button
+                        type="button"
+                        className={`composer__dropdown-item${!conversation.planMode.active && runtimeSettings.settings.autoApproveToolRequests ? " composer__dropdown-item--active" : ""}`}
+                        onClick={() => {
+                          void handleSelectMode("bypassPermissions");
+                        }}
+                      >
+                        <span className="composer__dropdown-item-main">
+                          <ModeIcon mode="bypassPermissions" />
+                          <span>完全访问</span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`composer__dropdown-item${!conversation.planMode.active && !runtimeSettings.settings.autoApproveToolRequests ? " composer__dropdown-item--active" : ""}`}
+                        onClick={() => {
+                          void handleSelectMode("auto");
+                        }}
+                      >
+                        <span className="composer__dropdown-item-main">
+                          <ModeIcon mode="auto" />
+                          <span>auto模式</span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`composer__dropdown-item${conversation.planMode.active ? " composer__dropdown-item--active" : ""}`}
+                        onClick={() => {
+                          void handleSelectMode("plan");
+                        }}
+                      >
+                        <span className="composer__dropdown-item-main">
+                          <ModeIcon mode="plan" />
+                          <span>计划模式</span>
+                        </span>
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               ) : null}
 
               {conversation.isAwaitingToolApproval ? (

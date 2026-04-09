@@ -606,7 +606,6 @@ async function main() {
     );
     assert.equal(healthPayload.ok, true, "health payload should mark daemon as healthy");
     assert.equal(healthPayload.service, "aliceloop-daemon", "health payload should include service id");
-    assert(healthPayload.activeSkills.includes("plan-mode"), "health payload should expose active plan-mode skill");
     assert(healthPayload.activeSkills.includes("scheduler"), "health payload should expose active scheduler skill");
     assert(healthPayload.activeSkills.includes("skill-hub"), "health payload should expose active skill-hub skill");
     assert(healthPayload.activeSkills.includes("skill-search"), "health payload should expose active skill-search skill");

@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { parseShellScriptCommandsForPolicy } from "../../runtime/sandbox/toolPolicy";
+import { isOutputRedirectOp, parseBashScriptAst } from "../../runtime/sandbox/bashAst";
 import { normalizeBashInput } from "./bashInputNormalizer";
 
 export type ToolConcurrencyMode = "shared" | "exclusive";
@@ -267,9 +267,9 @@ const TOOL_CONTRACTS: Record<string, Partial<ToolExecutionContract>> = {
     loadBehavior: "deferred",
     resultBudgetChars: 12_000,
   },
-  task_delegation: {
+  agent: {
     concurrency: "exclusive",
-    interruptBehavior: "block",
+    interruptBehavior: "cancel",
     loadBehavior: "deferred",
     resultBudgetChars: 24_000,
   },
@@ -381,7 +381,7 @@ function isReadOnlyBashCommand(command: string, args: string[]) {
   return false;
 }
 
-function isReadOnlyBashInput(input: unknown) {
+export function isReadOnlyBashInput(input: unknown) {
   const normalized = normalizeBashInput(input) as {
     command?: string;
     args?: string[];
@@ -389,12 +389,18 @@ function isReadOnlyBashInput(input: unknown) {
   };
 
   if (normalized.script) {
-    try {
-      const commands = parseShellScriptCommandsForPolicy(normalized.script);
-      return commands.length > 0 && commands.every((command) => isReadOnlyBashCommand(command.command, command.args));
-    } catch {
+    const parsed = parseBashScriptAst(normalized.script);
+    if (parsed.kind !== "simple") {
       return false;
     }
+
+    return parsed.commands.length > 0 && parsed.commands.every((command) => {
+      if (command.redirects.some((redirect) => isOutputRedirectOp(redirect.op))) {
+        return false;
+      }
+
+      return isReadOnlyBashCommand(command.command, command.args);
+    });
   }
 
   if (!normalized.command) {

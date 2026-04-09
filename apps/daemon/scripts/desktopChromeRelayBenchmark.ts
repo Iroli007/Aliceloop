@@ -123,6 +123,7 @@ async function main() {
     { ChromeRelayService, createDefaultChromeRelayServiceOptions },
     { ChromeRelayHttpServer },
     { createSession, heartbeatDevice },
+    { getBrowserSession, setBrowserSessionPreference },
     { createBrowserTools },
     { createWebFetchTool },
     { createWebSearchTool },
@@ -130,6 +131,7 @@ async function main() {
     import("../../desktop/src/main/chromeRelayService.ts"),
     import("../../desktop/src/main/chromeRelayHttpServer.ts"),
     import("../src/repositories/sessionRepository.ts"),
+    import("../src/context/tools/browserSessionRegistry.ts"),
     import("../src/context/tools/browserTool.ts"),
     import("../src/context/tools/webFetchTool.ts"),
     import("../src/context/tools/webSearchTool.ts"),
@@ -157,6 +159,11 @@ async function main() {
     sessionId: desktopSession.id,
     capabilities: relayMeta,
   });
+  setBrowserSessionPreference(desktopSession.id, "desktop_chrome");
+  const browserSession = getBrowserSession(desktopSession.id);
+  browserSession.backend = "desktop_chrome";
+  browserSession.relayBaseUrl = relayBaseUrl;
+  browserSession.tabId = null;
 
   const desktopBrowserTools = createBrowserTools(desktopSession.id);
   const desktopFetchTool = createWebFetchTool(desktopSession.id).web_fetch;

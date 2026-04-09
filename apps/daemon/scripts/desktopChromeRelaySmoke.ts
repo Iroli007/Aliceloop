@@ -143,7 +143,7 @@ async function main() {
 
   const [
     { createSession, heartbeatDevice, getSessionSnapshot },
-    { setBrowserSessionPreference },
+    { getBrowserSession, setBrowserSessionPreference },
     { createBrowserTools },
     { createWebFetchTool },
     { createWebSearchTool },
@@ -168,6 +168,10 @@ async function main() {
   assert.equal(snapshot.devices[0]?.capabilities?.browserRelay?.backend, "desktop_chrome");
 
   setBrowserSessionPreference(session.id, "desktop_chrome");
+  const browserSession = getBrowserSession(session.id);
+  browserSession.backend = "desktop_chrome";
+  browserSession.relayBaseUrl = relayBaseUrl;
+  browserSession.tabId = null;
   const browserTools = createBrowserTools(session.id);
   const formUrl = `http://127.0.0.1:${address.port}/form`;
   const navigatePayload = JSON.parse(await browserTools.browser_navigate.execute({ url: formUrl }));

@@ -15,14 +15,14 @@ export function createAskUserQuestionTool(sessionId: string): ToolSet {
     [ASK_USER_QUESTION_TOOL_NAME]: tool({
       providerOptions: STABLE_TOOL_PROVIDER_OPTIONS,
       description:
-        "Ask the user a structured clarification question with 2-4 explicit options when requirements are ambiguous or a decision is needed. Prefer this over plain-text follow-up questions, especially in plan mode. The user can either click an option or type a custom freeform answer.",
+        "Ask the user a structured clarification question only when execution is genuinely blocked by an unresolved decision. Use 2-3 concrete, mutually exclusive options. Do not use this for speculative suggestions, fuzzy related-topic surfacing, or choices you can reasonably infer yourself. The user can either click an option or type a custom freeform answer.",
       inputSchema: z.object({
         header: z.string().min(1).max(24).describe("Short chip-style header for the question, such as 平台 or 范围"),
         question: z.string().min(1).max(200).describe("The actual question shown to the user"),
         options: z.array(z.object({
           label: z.string().min(1).max(32).describe("Short option label"),
           description: z.string().min(1).max(120).optional().describe("Optional short explanation for the option"),
-        })).min(2).max(4).describe("2-4 explicit options the user can choose from"),
+        })).min(2).max(3).describe("2-3 explicit options the user can choose from"),
         multiSelect: z.boolean().optional().describe("Allow selecting multiple options before sending"),
       }),
       execute: async ({ header, question, options, multiSelect }, executionOptions?: AskUserQuestionExecutionOptions) => {

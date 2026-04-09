@@ -85,7 +85,10 @@ export function createPlanModeToolSet(sessionId: string, planModeActive: boolean
         }
 
         const planMode = enterSessionPlanMode({ sessionId });
-        const event = appendSessionEvent(sessionId, "plan_mode.updated", { planMode });
+        const event = appendSessionEvent(sessionId, "plan_mode.updated", {
+          planMode,
+          transition: "entered",
+        });
         publishSessionEvent(event);
 
         return JSON.stringify({
@@ -137,7 +140,10 @@ export function createPlanModeToolSet(sessionId: string, planModeActive: boolean
         }
 
         const planMode = touchSessionPlanModeUpdatedAt(sessionId);
-        const event = appendSessionEvent(sessionId, "plan_mode.updated", { planMode });
+        const event = appendSessionEvent(sessionId, "plan_mode.updated", {
+          planMode,
+          transition: "updated",
+        });
         publishSessionEvent(event);
 
         return JSON.stringify({
@@ -194,7 +200,11 @@ export function createPlanModeToolSet(sessionId: string, planModeActive: boolean
         approvePlan(activePlanId);
         const planMode = exitSessionPlanMode(sessionId);
         const executionTask = syncExecutionTaskFromPlan(sessionId, activePlanId);
-        const event = appendSessionEvent(sessionId, "plan_mode.updated", { planMode });
+        const event = appendSessionEvent(sessionId, "plan_mode.updated", {
+          planMode,
+          transition: "exited",
+          taskId: executionTask?.id ?? null,
+        });
         publishSessionEvent(event);
 
         return JSON.stringify({

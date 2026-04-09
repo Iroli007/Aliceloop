@@ -46,6 +46,7 @@ async function main() {
       selectRelevantSkillDefinitions,
     },
     { routeToolNamesForTurn },
+    { repairTextToolCall },
   ] = await Promise.all([
     import("../src/services/sandboxExecutor.ts"),
     import("../src/context/tools/toolRegistry.ts"),
@@ -56,6 +57,7 @@ async function main() {
     import("../src/context/tools/viewImageTool.ts"),
     import("../src/context/skills/skillLoader.ts"),
     import("../src/context/tools/toolRouter.ts"),
+    import("../src/runtime/toolCallRepair.ts"),
   ]);
 
   resetSkillToolCache();
@@ -70,7 +72,6 @@ async function main() {
 
   let skillCatalog = listSkillDefinitions();
   let availableCatalogSkills = listActiveSkillDefinitions();
-  let plannedCatalogSkills = skillCatalog.filter((skill) => skill.status === "planned");
   assert.equal(
     listSkillDefinitions(),
     skillCatalog,
@@ -101,7 +102,6 @@ async function main() {
   resetSkillCatalogCache();
   skillCatalog = listSkillDefinitions();
   availableCatalogSkills = listActiveSkillDefinitions();
-  plannedCatalogSkills = skillCatalog.filter((skill) => skill.status === "planned");
 
   for (const skill of skillCatalog) {
     const source = readFileSync(skill.sourcePath, "utf8");
@@ -133,28 +133,23 @@ async function main() {
   assert(availableCatalogSkills.length > 0, "skill catalog should expose at least one available skill");
   assert(skillCatalog.some((skill) => skill.id === "skill-hub"), "skill-hub should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "skill-search"), "skill-search should be present in the catalog");
-  assert(skillCatalog.some((skill) => skill.id === "task-delegation"), "task-delegation should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "music-listener"), "music-listener should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "video-reader"), "video-reader should be present in the catalog");
-  assert(skillCatalog.some((skill) => skill.id === "twitter-media"), "twitter-media should be present in the catalog");
-  assert(skillCatalog.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be present in the catalog");
-  assert(skillCatalog.some((skill) => skill.id === "selfie"), "selfie should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "thread-management"), "thread-management should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "tasks"), "tasks should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "telegram"), "telegram should be present in the catalog");
+  assert(skillCatalog.some((skill) => skill.id === "screenshot"), "screenshot should be present in the catalog");
   assert(skillCatalog.every((skill) => skill.id !== "travel"), "travel should no longer be present in the catalog");
   assert(availableCatalogSkills.some((skill) => skill.id === "skill-hub"), "skill-hub should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "skill-search"), "skill-search should be active");
-  assert(availableCatalogSkills.some((skill) => skill.id === "task-delegation"), "task-delegation should be active");
-  assert(availableCatalogSkills.some((skill) => skill.id === "twitter-media"), "twitter-media should be active");
-  assert(availableCatalogSkills.some((skill) => skill.id === "xiaohongshu"), "xiaohongshu should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "music-listener"), "music-listener should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "video-reader"), "video-reader should be active");
-  assert(plannedCatalogSkills.some((skill) => skill.id === "selfie"), "selfie should remain planned until image references are supported");
+  assert(availableCatalogSkills.some((skill) => skill.id === "thread-management"), "thread-management should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "tasks"), "tasks should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "telegram"), "telegram should be active");
+  assert(availableCatalogSkills.some((skill) => skill.id === "screenshot"), "screenshot should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-fetch"), "web-fetch should remain available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-search"), "web-search should now be available");
-  const ruleOnlyRouting = selectRelevantSkillDefinitions("继续");
-  assert(
-    ruleOnlyRouting.some((skill) => skill.id === "continue"),
-    "rule-only continuation turns should still route the continue skill",
-  );
   const smallTalkRouting = selectRelevantSkillDefinitions("你就是a姐");
   assert.equal(
     smallTalkRouting.length,
@@ -243,15 +238,25 @@ async function main() {
     ["view_image"],
     "tool router should attach the image understanding tool from visual-inspection intent",
   );
+  assert.deepEqual(
+    routeToolNamesForTurn("打开浏览器访问这个页面，点击按钮并截图。"),
+    [],
+    "browser intent should stay in the skill-routing layer instead of direct tool routing",
+  );
   assert(
-    routeToolNamesForTurn("打开浏览器访问这个页面，点击按钮并截图。").includes("browser_snapshot"),
-    "tool router should attach browser tools from browser intent",
+    selectRelevantSkillDefinitions("打开浏览器访问这个页面，点击按钮并截图。").some((skill) => skill.id === "browser"),
+    "browser intent should still route the browser skill",
   );
   const baseAndSkillTools = buildToolSet(sandbox, []);
   assert.equal("time_now" in baseAndSkillTools, false, "time_now should not be part of the always-on base toolset");
   assert.equal("weather_now" in baseAndSkillTools, false, "weather_now should not be part of the always-on base toolset");
-  assert.equal("grep" in baseAndSkillTools, false, "base grep tool should not be injected when no skill or tool route requests it");
-  assert.equal("bash" in baseAndSkillTools, false, "base bash tool should not be injected when no skill or tool route requests it");
+  assert.equal("grep" in baseAndSkillTools, true, "base grep tool should be part of the always-on base toolset");
+  assert.equal("bash" in baseAndSkillTools, true, "base bash tool should be part of the always-on base toolset");
+  assert.equal("read" in baseAndSkillTools, true, "base read tool should be part of the always-on base toolset");
+  assert.equal("write" in baseAndSkillTools, true, "base write tool should be part of the always-on base toolset");
+  assert.equal("edit" in baseAndSkillTools, true, "base edit tool should be part of the always-on base toolset");
+  assert.equal("glob" in baseAndSkillTools, true, "base glob tool should be part of the always-on base toolset");
+  assert.equal("agent" in baseAndSkillTools, true, "native agent should be part of the default tool surface");
   assert.equal("browser_navigate" in baseAndSkillTools, false, "browser tools should not be injected into the default toolset");
   assert.equal("document_ingest" in baseAndSkillTools, false, "document_ingest should not be injected into the default toolset");
   assert.equal("review_coach" in baseAndSkillTools, false, "review_coach should not be injected into the default toolset");
@@ -296,7 +301,7 @@ async function main() {
       "web_fetch",
       "web_search",
       "view_image",
-      "task_delegation",
+      "agent",
       "task_output",
     ]),
   );
@@ -312,7 +317,7 @@ async function main() {
   assert.equal(typeof directResolved.web_fetch, "object", "resolveSkillTools should return requested web_fetch");
   assert.equal(typeof directResolved.web_search, "object", "resolveSkillTools should return requested web_search");
   assert.equal(typeof directResolved.view_image, "object", "resolveSkillTools should return requested view_image");
-  assert.equal(typeof directResolved.task_delegation, "object", "resolveSkillTools should return requested task_delegation");
+  assert.equal(typeof directResolved.agent, "object", "resolveSkillTools should return requested agent");
   assert.equal(typeof directResolved.task_output, "object", "resolveSkillTools should return requested task_output");
 
   const session = createSession("skill tools smoke");
@@ -363,12 +368,19 @@ async function main() {
   assert.equal(context.timings.attachmentRootsAggregated, 1, "loadContext should reuse attachment roots from the aggregated session context");
   assert.equal("time_now" in context.tools, false, "generic turns should not inject time_now");
   assert.equal("weather_now" in context.tools, false, "generic turns should not inject weather_now");
-  assert.equal("read" in context.tools, false, "generic turns should not inject base tools when nothing requests them");
+  assert.equal("bash" in context.tools, true, "generic turns should keep the stable bash base tool attached");
+  assert.equal("read" in context.tools, true, "generic turns should keep the stable read base tool attached");
+  assert.equal("write" in context.tools, true, "generic turns should keep the stable write base tool attached");
+  assert.equal("glob" in context.tools, true, "generic turns should keep the stable glob base tool attached");
+  assert.equal("grep" in context.tools, true, "generic turns should keep the stable grep base tool attached");
+  assert.equal("edit" in context.tools, true, "generic turns should keep the stable edit base tool attached");
+  assert.equal("agent" in context.tools, true, "generic turns should keep the native agent tool attached");
   assert.equal("browser_navigate" in context.tools, false, "generic turns should not inject browser tools");
   assert.equal("web_fetch" in context.tools, false, "generic turns should not inject web tools");
   assert.equal("web_search" in context.tools, false, "generic turns should not inject web tools");
   assert.equal("view_image" in context.tools, false, "generic turns should not inject image tools");
   assert.equal("document_ingest" in context.tools, false, "generic turns should not inject document_ingest");
+  assert.equal("enter_plan_mode" in context.tools, true, "live context should expose enter_plan_mode for ordinary execution turns");
   assert.equal("use_skill" in context.tools, true, "live context should always expose use_skill as the skill entry point");
   assert.equal(context.firstStepToolChoice, undefined, "generic turns should not force an initial tool");
   assert.match(
@@ -385,6 +397,19 @@ async function main() {
     contextSystemPrompt,
     /call `use_skill` with its exact skill id before continuing/i,
     "system prompt should instruct the model to call use_skill instead of emitting raw skill tags",
+  );
+  assert.deepEqual(
+    repairTextToolCall("<tool_call>{\"tool\":\"use-skill\",\"input\":{\"skillId\":\"web-search\"}}</tool_call>"),
+    {
+      source: "tool_call_json",
+      rawToolName: "use-skill",
+      toolName: "use_skill",
+      input: {
+        skill: "web-search",
+      },
+      markup: "<tool_call>{\"tool\":\"use-skill\",\"input\":{\"skillId\":\"web-search\"}}</tool_call>",
+    },
+    "text tool call repair should normalize use_skill markup so capability recovery stays structured",
   );
 
   const forcedThreadContext = await loadContext(session.id, controller.signal, {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
 import type { SkillDefinition } from "@aliceloop/runtime-core";
-import type { createPermissionSandboxExecutor } from "../../services/sandboxExecutor";
+import type { PermissionSandboxExecutor } from "../../runtime/sandbox/types";
 import type { SkillRouteHints } from "../skills/skillRouting";
 import { setBrowserSessionPreference } from "./browserSessionRegistry";
 import { createSandboxTools } from "./sandboxTools";
@@ -11,7 +11,7 @@ import { createAskUserQuestionTool } from "./askUserQuestionTool";
 import { createPlanModeToolSet } from "./planModeTools";
 import { createUseSkillTool } from "./useSkillTool";
 
-type SandboxExecutor = ReturnType<typeof createPermissionSandboxExecutor>;
+type SandboxExecutor = PermissionSandboxExecutor;
 
 interface BuildToolSetOptions {
   sessionId?: string;
@@ -24,13 +24,42 @@ interface BuildToolSetOptions {
 }
 
 export const DEFAULT_ATTACHED_TOOL_NAMES: readonly string[] = BASE_TOOL_ORDER;
-const ALWAYS_ATTACHED_NATIVE_TOOL_NAMES = ["task_delegation", "task_output"] as const;
-const PLAN_MODE_ALLOWED_TOOL_NAMES = new Set(["bash", "read", "glob", "grep"]);
+const PLAN_MODE_READONLY_TOOL_NAMES = [
+  "bash",
+  "read",
+  "glob",
+  "grep",
+  "web_search",
+  "web_fetch",
+  "view_image",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_find",
+  "browser_wait",
+  "browser_scroll",
+  "browser_screenshot",
+  "browser_media_probe",
+  "browser_video_watch_start",
+  "browser_video_watch_poll",
+  "browser_video_watch_stop",
+  "chrome_relay_status",
+  "chrome_relay_list_tabs",
+  "chrome_relay_open",
+  "chrome_relay_navigate",
+  "chrome_relay_read",
+  "chrome_relay_read_dom",
+  "chrome_relay_screenshot",
+  "chrome_relay_scroll",
+  "chrome_relay_back",
+  "chrome_relay_forward",
+] as const;
+const PLAN_MODE_ALLOWED_TOOL_NAMES = new Set<string>(PLAN_MODE_READONLY_TOOL_NAMES);
 export const STATIC_BASE_TOOL_BLOCK = [
   "Stable atomic tool base for every turn:",
   `- ${DEFAULT_ATTACHED_TOOL_NAMES.join(", ")}`,
   "These six tools are the long-lived execution substrate for this project.",
   "Skills should usually work through bash, read, and write. Use glob, grep, and edit only when the task truly needs file discovery, code search, or precise in-place edits.",
+  "The native `agent` tool is the coordination escape hatch for isolated fork/subagent work. Do not use it for ordinary single-thread tasks.",
   "Extra native tools are exceptions layered on top of this base, not the default path.",
 ].join("\n");
 export const BASE_TOOL_SCHEMA_KEY = createHash("sha1")
@@ -83,13 +112,13 @@ function collectRequestedToolNames(
   };
 
   if (options?.planModeActive) {
-    pushToolNames(DEFAULT_ATTACHED_TOOL_NAMES.filter((toolName) => PLAN_MODE_ALLOWED_TOOL_NAMES.has(toolName)));
+    pushToolNames(PLAN_MODE_READONLY_TOOL_NAMES);
     pushToolNames(sortToolNames(collectAllowedTools(activeSkills)).filter((toolName) => PLAN_MODE_ALLOWED_TOOL_NAMES.has(toolName)));
     return orderedNames;
   }
 
   pushToolNames(DEFAULT_ATTACHED_TOOL_NAMES);
-  pushToolNames(ALWAYS_ATTACHED_NATIVE_TOOL_NAMES);
+  pushToolNames(["agent"]);
   pushToolNames(routeToolNamesForTurn(options?.query, options?.routeHints, {
     hasImageAttachment: options?.hasImageAttachment,
   }));
@@ -137,7 +166,9 @@ export function buildToolSet(
 
   Object.assign(tools, resolveSkillTools(requested, { sessionId: options?.sessionId }));
   if (options?.sessionId) {
-    Object.assign(tools, createAskUserQuestionTool(options.sessionId));
+    if (options?.planModeActive) {
+      Object.assign(tools, createAskUserQuestionTool(options.sessionId));
+    }
     Object.assign(tools, createPlanModeToolSet(options.sessionId, options?.planModeActive ?? false));
   }
   if (!options?.planModeActive) {

@@ -1,3 +1,5 @@
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import type { ModelMessage, ToolChoice, ToolSet } from "ai";
 import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
@@ -16,7 +18,7 @@ import {
   getStaticSkillCatalogKey,
   selectRelevantSkillDefinitions,
 } from "./skills/skillLoader";
-import { mergeSkillRouteHints, needsBrowserAutomation, needsCameraCapture, needsEpisodicHistoryRecall, needsFileManagement, needsImageAnalysis, needsSystemInfo, needsWebFetch, needsWebResearch } from "./skills/skillRouting";
+import { inferStickySkillIdsFromContext, mergeSkillRouteHints, needsBrowserAutomation, needsCameraCapture, needsEpisodicHistoryRecall, needsFileManagement, needsImageAnalysis, needsSystemInfo, needsWebFetch, needsWebResearch } from "./skills/skillRouting";
 import { BASE_TOOL_SCHEMA_KEY, buildToolSet, computeToolSurfaceKey, DEFAULT_ATTACHED_TOOL_NAMES, STATIC_BASE_TOOL_BLOCK } from "./tools/toolRegistry";
 import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
@@ -26,12 +28,10 @@ import { getSessionWorksetState } from "../repositories/sessionRepository";
 import { getSessionPlanModeState } from "../repositories/sessionPlanModeRepository";
 import { getLatestPlan, getPlan } from "../repositories/planRepository";
 import {
-  isAliceloopGeneratedFile,
   markGeneratedFileDeleted,
   markSessionGeneratedFile,
 } from "../repositories/sessionGeneratedFileRepository";
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
-import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
 import {
   createAgentPermissionFrontdesk,
   createDefaultAgentPermissionContext,
@@ -43,6 +43,8 @@ import {
   getActiveWorksetToolNames,
 } from "./workset/worksetState";
 import { ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME, WRITE_PLAN_ARTIFACT_TOOL_NAME } from "./tools/planModeTools";
+import type { PermissionSandboxExecutor } from "../runtime/sandbox/types";
+import { decideAgentBashExecutionMode } from "./tools/bashSandboxDecision";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -168,11 +170,13 @@ function buildPlanModeReminder(sessionId: string, activePlanId: string | null) {
     "Plan mode is active for this thread.",
     `Current planning artifact: ${planRef}.`,
     "While plan mode is active, stay in planning: inspect code, analyze structure, clarify requirements, and update the bound plan record only.",
-    "Writable atomic tools are temporarily withheld for this turn; treat bash, read, glob, and grep as the only execution tools available during planning.",
+    "Read/search tools are available during planning: bash, read, glob, grep, web_search, web_fetch, view_image, and read-only browser/Chrome Relay inspection tools.",
+    "Writable atomic tools and browser click/type actions are temporarily withheld for this turn.",
     "Do not implement changes, edit repository files, or execute write-oriented bash commands until plan mode is explicitly exited.",
-    "If you need the user to choose between options or clarify scope, use `ask_user_question` instead of asking plain-text follow-up questions.",
+    "Use `ask_user_question` only when progress is genuinely blocked by a concrete user decision that you cannot safely infer.",
     "Ask one structured clarification at a time. Do not dump multiple categories of questions into one assistant reply.",
-    "When requirements are still ambiguous, end the turn with `ask_user_question` and wait for the user's answer before continuing.",
+    "Keep the options short, concrete, and mutually exclusive; never turn speculative related-topic guesses into a multiple-choice prompt.",
+    "When requirements are still ambiguous and you are blocked, end the turn with `ask_user_question` and wait for the user's answer before continuing.",
     "Keep clarifying requirements until the solution scope is concrete enough to execute confidently.",
     `When the plan is ready, call \`${WRITE_PLAN_ARTIFACT_TOOL_NAME}\` with a clear title, a short summary/goal, and at least two ordered implementation steps.`,
     `Keep using \`${WRITE_PLAN_ARTIFACT_TOOL_NAME}\` whenever the user asks to revise the plan. The plan artifact is the source of truth, not your freeform assistant prose.`,
@@ -205,12 +209,12 @@ function buildPlanArtifactBlock(sessionId: string, activePlanId: string | null, 
     steps,
     planModeActive
       ? "Keep this plan record updated while clarifying requirements."
-      : "Use this plan as the execution guide unless the user changes direction. Execute the steps in order; for larger steps, you may delegate sub-work with `task_delegation` and poll it with `task_output`.",
+      : "Use this plan as the execution guide unless the user changes direction. Execute the steps in order and prefer finishing the work in the current thread unless the user explicitly asks for delegated parallel work.",
   ].join("\n");
 }
 
 function createPlanModeSandboxExecutor(
-  sandbox: ReturnType<typeof createPermissionSandboxExecutor>,
+  sandbox: PermissionSandboxExecutor,
 ) {
   return {
     ...sandbox,
@@ -259,6 +263,134 @@ function createPlanModeSandboxExecutor(
         command: normalizedInput.command,
         args: normalizedInput.args,
       });
+    },
+  };
+}
+
+type PermissionPolicySnapshot = ReturnType<PermissionSandboxExecutor["describePolicy"]>;
+
+function createDirectFileExecutor(input: {
+  noteCreatedFile?: (targetPath: string) => Promise<void> | void;
+  noteDeletedFile?: (targetPath: string) => Promise<void> | void;
+}) {
+  return {
+    async readTextFile(options: Parameters<PermissionSandboxExecutor["readTextFile"]>[0]) {
+      return readFile(resolve(options.targetPath), "utf8");
+    },
+
+    async writeBinaryFile(options: Parameters<PermissionSandboxExecutor["writeBinaryFile"]>[0]) {
+      const targetPath = resolve(options.targetPath);
+      let createdNew = false;
+      try {
+        await lstat(targetPath);
+      } catch {
+        createdNew = true;
+      }
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, options.content);
+      if (createdNew) {
+        await input.noteCreatedFile?.(targetPath);
+      }
+      return targetPath;
+    },
+
+    async writeTextFile(options: Parameters<PermissionSandboxExecutor["writeTextFile"]>[0]) {
+      const targetPath = resolve(options.targetPath);
+      let createdNew = false;
+      try {
+        await lstat(targetPath);
+      } catch {
+        createdNew = true;
+      }
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, options.content, "utf8");
+      if (createdNew) {
+        await input.noteCreatedFile?.(targetPath);
+      }
+      return targetPath;
+    },
+
+    async editTextFile(options: Parameters<PermissionSandboxExecutor["editTextFile"]>[0]) {
+      const targetPath = resolve(options.targetPath);
+      const before = await readFile(targetPath, "utf8");
+      const after = options.transform(before);
+      await writeFile(targetPath, after, "utf8");
+      return after;
+    },
+
+    async deletePath(options: Parameters<PermissionSandboxExecutor["deletePath"]>[0]) {
+      const targetPath = resolve(options.targetPath);
+      const stats = await lstat(targetPath);
+      await rm(targetPath, {
+        force: false,
+        recursive: stats.isDirectory(),
+      });
+      if (!stats.isDirectory()) {
+        await input.noteDeletedFile?.(targetPath);
+      }
+      return targetPath;
+    },
+  };
+}
+
+function createAgentExecutionExecutor(input: {
+  label: string;
+  workspaceRoot: string;
+  defaultCwd: string;
+  noteCreatedFile?: (targetPath: string) => Promise<void> | void;
+  noteDeletedFile?: (targetPath: string) => Promise<void> | void;
+}): PermissionSandboxExecutor {
+  const fileExecutor = createDirectFileExecutor({
+    noteCreatedFile: input.noteCreatedFile,
+    noteDeletedFile: input.noteDeletedFile,
+  });
+  const bashSandbox = createPermissionSandboxExecutor({
+    label: `${input.label}:bash`,
+    permissionProfile: "full-access",
+    autoApproveToolRequests: true,
+    workspaceRoot: input.workspaceRoot,
+    keepFilesystemBoundaryInFullAccess: true,
+    supportsElevatedActionsInFullAccess: true,
+    extraReadRoots: [getSandboxProjectRoot(), getDataDir()],
+    defaultCwd: input.defaultCwd,
+    noteDeletedFile: input.noteDeletedFile,
+  });
+  const bashHost = createPermissionSandboxExecutor({
+    label: `${input.label}:bash-host`,
+    permissionProfile: "full-access",
+    autoApproveToolRequests: true,
+    defaultCwd: input.defaultCwd,
+    noteDeletedFile: input.noteDeletedFile,
+  });
+  const bashPolicy = bashSandbox.describePolicy();
+  const policy: PermissionPolicySnapshot = {
+    ...bashPolicy,
+    label: input.label,
+    allowedReadRoots: ["<all>"],
+    allowedWriteRoots: ["<all>"],
+    allowedCwdRoots: ["<all>"],
+    allowedCommands: ["<all>"],
+    runtimeReason: "Main agent files execute directly after frontdesk approval; bash is explicitly routed to a workspace sandbox or host execution based on workspace path usage.",
+    warnings: [
+      "main-agent file tools execute directly on the host after frontdesk approval",
+      "main-agent bash uses an explicit execution decision layer: workspace-local commands stay sandboxed, workspace-escaping commands run on the host",
+      "complex bash syntax still stays on the sandbox path first and can retry unsandboxed once when that sandbox blocks it",
+    ],
+  };
+
+  return {
+    ...fileExecutor,
+    async runBash(inputOptions) {
+      const executionMode = decideAgentBashExecutionMode(inputOptions, {
+        workspaceRoot: input.workspaceRoot,
+        defaultCwd: input.defaultCwd,
+      });
+      return executionMode === "host"
+        ? bashHost.runBash(inputOptions)
+        : bashSandbox.runBash(inputOptions);
+    },
+    describePolicy() {
+      return policy;
     },
   };
 }
@@ -320,8 +452,15 @@ export async function loadContext(
   timings.sessionWorksetActiveSkillCount = activeWorksetSkillIds.length;
   timings.sessionWorksetActiveToolCount = activeWorksetToolNames.length;
 
+  const queryIntentStickySkillIds = userQuery ? inferStickySkillIdsFromContext(userQuery) : [];
   const routeHints = mergeSkillRouteHints(
     recentConversationFocus.routeHints,
+    userQuery
+      ? {
+          stickySkillIds: queryIntentStickySkillIds,
+          reasons: ["query-intent"],
+        }
+      : null,
     activeWorksetSkillIds.length > 0
       ? {
           stickySkillIds: activeWorksetSkillIds,
@@ -438,28 +577,16 @@ export async function loadContext(
   const runtimeSettingsStartedAt = nowMs();
   const runtimeSettings = getRuntimeSettings();
   timings.runtimeSettingsMs = roundMs(nowMs() - runtimeSettingsStartedAt);
-  const autoApproveToolRequests = runtimeSettings.autoApproveToolRequests;
   const workspaceProject = getDefaultProjectDirectory();
 
   const sandboxStartedAt = nowMs();
-  const baseSandbox = createPermissionSandboxExecutor({
+  const baseSandbox = createAgentExecutionExecutor({
     label: `agent:${sessionId}`,
-    permissionProfile: "full-access",
-    autoApproveToolRequests,
     workspaceRoot: workspaceProject.path,
-    extraReadRoots: [getSandboxProjectRoot(), getDataDir()],
     defaultCwd: workspaceProject.path,
-    requestBashApproval: undefined,
-    requestElevatedApproval: (input) =>
-      requestSessionToolApproval({
-        sessionId,
-        abortSignal,
-        ...input,
-      }),
     noteCreatedFile: (targetPath) => {
       markSessionGeneratedFile(sessionId, targetPath);
     },
-    canDeleteFile: (targetPath) => isAliceloopGeneratedFile(targetPath),
     noteDeletedFile: (targetPath) => {
       markGeneratedFileDeleted(targetPath);
     },
@@ -474,6 +601,7 @@ export async function loadContext(
           ? "bypassPermissions"
           : "auto",
       rules: runtimeSettings.toolPermissionRules,
+      workspaceRoots: [workspaceProject.path],
     }),
   });
   const sandbox = planModeState.active ? createPlanModeSandboxExecutor(frontdeskSandbox) : frontdeskSandbox;

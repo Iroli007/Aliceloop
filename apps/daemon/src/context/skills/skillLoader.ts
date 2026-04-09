@@ -4,11 +4,13 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SkillDefinition, SkillMode, SkillStatus } from "@aliceloop/runtime-core";
 import {
+  inferStickySkillIdsFromContext,
   type SkillRouteHints,
   needsAudioAnalysis,
   needsBrowserAutomation,
   needsFileManagement,
   needsSystemInfo,
+  needsThreadManagement,
 } from "./skillRouting";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -399,6 +401,14 @@ function scoreSkillMatch(
   return score;
 }
 
+function needsSchedulerIntent(query: string) {
+  return /提醒|定时|cron|schedule|scheduler|稍后|晚点|明天|后天|每周|每天|每月|follow[- ]?up|到点|定期|周期/u.test(query);
+}
+
+function needsNotebookIntent(query: string) {
+  return /notebook|ipynb|jupyter|单元格|cell|笔记本/u.test(query);
+}
+
 function parseSkillFrontmatter(source: string, sourcePath: string): ParsedFrontmatter {
   const lines = source.split(/\r?\n/);
   if (lines[0]?.trim() !== "---") {
@@ -632,7 +642,10 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
   }
 
   const activeSkills = listActiveSkillDefinitions();
-  const stickySkillIds = new Set(hints?.stickySkillIds ?? []);
+  const stickySkillIds = new Set([
+    ...inferStickySkillIdsFromContext(normalizedQuery),
+    ...(hints?.stickySkillIds ?? []),
+  ]);
   const browserSceneBlocksLocalMediaSkills = needsBrowserAutomation(normalizedQuery);
 
   const tokenDocumentFrequency = buildTokenDocumentFrequency(activeSkills);
@@ -661,7 +674,7 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
 
   if (nonStickyEntries.length === 0) {
     return stickyEntries
-      .filter((entry) => entry.score >= 8)
+      .filter((entry) => entry.score >= 6)
       .slice(0, MAX_SELECTED_SKILLS)
       .map((entry) => entry.id);
   }
@@ -669,7 +682,7 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
   const topNonStickyScore = nonStickyEntries[0]?.score ?? 0;
   if (topNonStickyScore < 8) {
     return stickyEntries
-      .filter((entry) => entry.score >= 8)
+      .filter((entry) => entry.score >= 6)
       .slice(0, MAX_SELECTED_SKILLS)
       .map((entry) => entry.id);
   }
@@ -686,7 +699,7 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
   const orderedSelections: string[] = [];
 
   for (const entry of stickyEntries) {
-    if (entry.score < 8) {
+    if (entry.score < 6) {
       continue;
     }
     if (!selectedIds.has(entry.id)) {
@@ -710,12 +723,40 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
     return limitedSelections.filter((id) => id !== "system-info");
   }
 
+  if (limitedSelections.includes("thread-management") && limitedSelections.includes("scheduler") && !needsSchedulerIntent(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "scheduler");
+  }
+
+  if (limitedSelections.includes("thread-management") && limitedSelections.includes("notebook") && !needsNotebookIntent(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "notebook");
+  }
+
+  if (limitedSelections.includes("scheduler") && needsThreadManagement(normalizedQuery) && !needsSchedulerIntent(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "scheduler");
+  }
+
+  if (limitedSelections.includes("notebook") && needsThreadManagement(normalizedQuery) && !needsNotebookIntent(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "notebook");
+  }
+
   if (limitedSelections.includes("send-file") && limitedSelections.includes("music-listener") && !needsAudioAnalysis(normalizedQuery)) {
+    return limitedSelections.filter((id) => id !== "music-listener");
+  }
+
+  if (limitedSelections.includes("file-manager") && limitedSelections.includes("music-listener") && !needsAudioAnalysis(normalizedQuery)) {
     return limitedSelections.filter((id) => id !== "music-listener");
   }
 
   if (limitedSelections.includes("send-file") && limitedSelections.includes("file-manager") && !needsFileManagement(normalizedQuery)) {
     return limitedSelections.filter((id) => id !== "file-manager");
+  }
+
+  if (
+    limitedSelections.includes("memory-management")
+    && limitedSelections.includes("send-file")
+    && !/(?:发文件|发送文件|上传文件|send file|attach file|upload file)/iu.test(normalizedQuery)
+  ) {
+    return limitedSelections.filter((id) => id !== "send-file");
   }
 
   return limitedSelections;

@@ -5,6 +5,7 @@
 - No tool is always attached by default. The turn-level tool surface should come from direct tool routing, explicit runtime additions, and the `allowed-tools` declared by the routed skills.
 - Routed skills are the primary way to expand capability for a turn, so `allowed-tools` should be treated as the hard capability budget rather than optional decoration.
 - If the agent needs better capability coverage for a turn, improve skill selection quality or use `skill-hub` / `skill-search`; do not keep adding one-off permanent tools to the base layer.
+- If a needed capability is missing mid-turn, recover through `use_skill` or a valid tool call that the runtime can repair. Prefer that structured path over adding more query-specific routing matches just to rescue one special case.
 - Treat routed skill tools outside that core surface as turn-scoped capabilities. The existence of a skill in the catalog does not mean every specialized skill tool is attached in every turn.
 - High-availability routing rule: preserve the relevant capability group across short continuation turns so critical routed skills do not disappear mid-workflow.
 - Do this by carrying forward the right routed skill group and its core companion skills for the current turn, not by loading the entire skill catalog.
@@ -12,6 +13,7 @@
 - Skills must stay AI-native: describe capability boundaries, evidence preferences, and when to use the skill, not rigid step-by-step workflows.
 - Command examples inside a skill are affordances, not the skill's identity. The agent should start from user intent and choose the right commands or tools, not blindly replay a canned procedure.
 - Internal routing labels such as `web_search`, `web-fetch`, `memory-management`, `thread-management`, or "current turn tool set" are execution scaffolding, not normal user-facing answer content. Do not dump them into the reply unless the user explicitly asks for runtime diagnostics.
+- Do not narrate internal capability loading such as “I need to load the search skill/tool first”. Call `use_skill`, continue the task, and only talk to the user about the actual result.
 - Binary image attachments are not readable with `read`; use the routed `view_image` tool to inspect a local image file when the user asks what is shown in it.
 
 - Browser automation contract:

@@ -2,7 +2,7 @@ import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
 import { createChromeRelayTools } from "./chromeRelayTool";
 import { createManagedTaskTools } from "./managedTaskTools";
-import { createTaskDelegationTools } from "./taskDelegationTools";
+import { createAgentTools } from "./taskDelegationTools";
 import { createViewImageTool } from "./viewImageTool";
 import { createWebFetchTool } from "./webFetchTool";
 import { createWebSearchTool } from "./webSearchTool";
@@ -23,7 +23,7 @@ const cachedBrowserTools = new Map<string, ToolSet>();
 const cachedChromeRelayTools = new Map<string, ToolSet>();
 const cachedWebFetchTools = new Map<string, ToolSet>();
 const cachedWebSearchTools = new Map<string, ToolSet>();
-const cachedTaskDelegationTools = new Map<string, ToolSet>();
+const cachedAgentTools = new Map<string, ToolSet>();
 const cachedViewImageTools = new Map<string, ToolSet>();
 
 interface SkillToolFactoryOptions {
@@ -94,15 +94,15 @@ function getViewImageToolSet(sessionId?: string) {
   return tools;
 }
 
-function getTaskDelegationToolSet(sessionId?: string) {
+function getAgentToolSet(sessionId?: string) {
   const cacheKey = getSessionCacheKey(sessionId);
-  const existing = cachedTaskDelegationTools.get(cacheKey);
+  const existing = cachedAgentTools.get(cacheKey);
   if (existing) {
     return existing;
   }
 
-  const tools = createTaskDelegationTools(sessionId);
-  cachedTaskDelegationTools.set(cacheKey, tools);
+  const tools = createAgentTools(sessionId);
+  cachedAgentTools.set(cacheKey, tools);
   return tools;
 }
 
@@ -164,8 +164,8 @@ const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) =
   ["browser_video_watch_stop", (options) => getBrowserToolSet(options?.sessionId)],
   ["document_ingest", () => ({ document_ingest: getManagedTaskTools().document_ingest })],
   ["review_coach", () => ({ review_coach: getManagedTaskTools().review_coach })],
-  ["task_delegation", (options) => ({ task_delegation: getTaskDelegationToolSet(options?.sessionId).task_delegation })],
-  ["task_output", (options) => ({ task_output: getTaskDelegationToolSet(options?.sessionId).task_output })],
+  ["agent", (options) => ({ agent: getAgentToolSet(options?.sessionId).agent })],
+  ["task_output", (options) => ({ task_output: getAgentToolSet(options?.sessionId).task_output })],
   ["view_image", (options) => getViewImageToolSet(options?.sessionId)],
   ["web_fetch", (options) => getWebFetchToolSet(options?.sessionId)],
   ["web_search", (options) => getWebSearchToolSet(options?.sessionId)],
@@ -245,6 +245,6 @@ export function resetSkillToolCache() {
   cachedChromeRelayTools.clear();
   cachedWebFetchTools.clear();
   cachedWebSearchTools.clear();
-  cachedTaskDelegationTools.clear();
+  cachedAgentTools.clear();
   cachedViewImageTools.clear();
 }
