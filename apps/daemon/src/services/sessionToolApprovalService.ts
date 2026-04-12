@@ -5,6 +5,7 @@ import {
   appendRuntimeToolPermissionRule,
   getRuntimeSettings,
 } from "../repositories/runtimeSettingsRepository";
+import { getSessionPlanModeState } from "../repositories/sessionPlanModeRepository";
 import { appendSessionEvent } from "../repositories/sessionRepository";
 import { publishSessionEvent } from "../realtime/sessionStreams";
 import {
@@ -137,6 +138,15 @@ export async function requestSessionToolApproval(input: {
     throw new Error("Agent loop aborted before tool approval was requested.");
   }
 
+  if (input.kind === "question" && !getSessionPlanModeState(input.sessionId).active) {
+    input.approvalStateTracker?.onResolved?.("rejected", "policy");
+    throw new ToolApprovalRejectedError("ask_user_question is only available in plan mode.");
+  }
+  if (input.kind === "question" && (input.question?.multiSelect || (input.question?.options.length ?? 0) > 2)) {
+    input.approvalStateTracker?.onResolved?.("rejected", "policy");
+    throw new ToolApprovalRejectedError("ask_user_question must ask one small clarification at a time.");
+  }
+
   const commandLine = input.commandLine ?? summarizeCommandLine(input.command, input.args);
   const autoResolved = maybeAutoResolveByStoredRule({
     ...input,
@@ -222,84 +232,6 @@ export async function requestSessionBashApproval(input: {
   });
 }
 
-export async function requestSessionUserQuestion(input: {
-  sessionId: string;
-  toolCallId?: string;
-  header: string;
-  question: string;
-  options: SessionQuestionOption[];
-  multiSelect?: boolean;
-  abortSignal: AbortSignal;
-  approvalStateTracker?: ToolApprovalStateTracker;
-}) {
-  const normalizedOptions = input.options
-    .map((option) => ({
-      label: option.label.trim(),
-      description: option.description?.trim() || null,
-    }))
-    .filter((option) => option.label.length > 0)
-    .slice(0, 3);
-
-  if (normalizedOptions.length < 2) {
-    throw new Error("ask_user_question_requires_at_least_two_options");
-  }
-
-  const { approval, waitForResolution } = createPendingToolApproval(
-    {
-      id: randomUUID(),
-      sessionId: input.sessionId,
-      toolCallId: input.toolCallId ?? null,
-      toolName: "ask_user_question",
-      kind: "question",
-      title: input.header.trim() || "需要你确认一个选项",
-      detail: input.question.trim(),
-      commandLine: "",
-      command: "",
-      args: [],
-      cwd: "",
-      question: {
-        header: input.header.trim() || "问题",
-        question: input.question.trim(),
-        options: normalizedOptions,
-        multiSelect: input.multiSelect === true,
-      },
-      requestedAt: new Date().toISOString(),
-    },
-    {
-      abortSignal: input.abortSignal,
-      onResolved(resolvedApproval) {
-        if (resolvedApproval.status === "approved" || resolvedApproval.status === "rejected") {
-          input.approvalStateTracker?.onResolved?.(
-            resolvedApproval.status,
-            input.abortSignal.aborted ? "abort" : "user",
-          );
-        }
-        const event = appendSessionEvent(input.sessionId, "tool.approval.resolved", {
-          approval: resolvedApproval,
-        }, resolvedApproval.resolvedAt ?? new Date().toISOString());
-        publishSessionEvent(event);
-      },
-    },
-  );
-
-  const requestedEvent = appendSessionEvent(input.sessionId, "tool.approval.requested", {
-    approval,
-  }, approval.requestedAt);
-  publishSessionEvent(requestedEvent);
-  input.approvalStateTracker?.onRequested?.();
-
-  const resolvedApproval = await waitForResolution;
-  if (resolvedApproval.status === "approved" && resolvedApproval.responseText?.trim()) {
-    return resolvedApproval.responseText.trim();
-  }
-
-  if (input.abortSignal.aborted) {
-    throw new Error("Agent loop aborted while waiting for user answer.");
-  }
-
-  throw new ToolApprovalRejectedError("ask_user_question rejected by user");
-}
-
 function resolveSessionToolApproval(
   sessionId: string,
   approvalId: string,
@@ -350,5 +282,8 @@ export function rejectSessionToolApproval(
 }
 
 export function getPendingSessionQuestionApproval(sessionId: string) {
+  if (!getSessionPlanModeState(sessionId).active) {
+    return null;
+  }
   return getFirstPendingQuestionApproval(sessionId);
 }

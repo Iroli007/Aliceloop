@@ -28,20 +28,21 @@ const TASK_DEVICE_ID = "task-delegation-runtime";
 
 export interface TaskDelegationInput {
   sessionId: string;
-  mode?: DelegatedAgentMode;
   type?: DelegatedTaskRole;
   name?: string;
   prompt: string;
+  handoff?: {
+    goal?: string;
+    context?: string[];
+    artifactRefs?: string[];
+  };
   runInBackground?: boolean;
   abortSignal?: AbortSignal;
 }
 
-export type DelegatedAgentMode = "fork" | "subagent";
-
 export interface DelegatedTaskOutput {
   task_id: string;
   status: DelegatedTaskStatus;
-  mode: DelegatedAgentMode;
   output_path: string;
   result?: string;
   error?: string;
@@ -56,12 +57,12 @@ function summarizePrompt(value: string, maxLength = 56) {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength).trimEnd()}...` : normalized;
 }
 
-function buildTaskTitle(mode: DelegatedAgentMode, role: DelegatedTaskRole, prompt: string, name?: string) {
+function buildTaskTitle(role: DelegatedTaskRole, prompt: string, name?: string) {
   const label = name?.trim() || summarizePrompt(prompt);
-  if (mode === "fork") {
-    return `Agent · fork · ${label}`;
+  if (role === "general-purpose") {
+    return `Agent · ${label}`;
   }
-  return `Agent · subagent · ${role} · ${label}`;
+  return `Agent · ${role} · ${label}`;
 }
 
 function buildRoleInstruction(type: DelegatedTaskRole) {
@@ -78,53 +79,45 @@ function buildRoleInstruction(type: DelegatedTaskRole) {
   }
 }
 
-function formatRecentContextMessage(role: string, content: string) {
-  return `${role}: ${content.replace(/\s+/g, " ").trim()}`;
-}
+function buildSubagentPrompt(
+  type: DelegatedTaskRole,
+  prompt: string,
+  handoff?: {
+    goal?: string;
+    context?: string[];
+    artifactRefs?: string[];
+  },
+) {
+  const goal = handoff?.goal?.trim() || null;
+  const contextLines = (handoff?.context ?? []).map((item) => item.trim()).filter(Boolean);
+  const artifactRefs = (handoff?.artifactRefs ?? []).map((item) => item.trim()).filter(Boolean);
 
-function buildForkPrompt(sessionId: string, prompt: string) {
-  const snapshot = getSessionSnapshot(sessionId);
-  const recentMessages = snapshot.messages
-    .filter((message) => (message.role === "user" || message.role === "assistant") && message.content.trim())
-    .slice(-6)
-    .map((message) => formatRecentContextMessage(message.role, summarizePrompt(message.content, 200)));
-  const recentContextBlock = recentMessages.length > 0
-    ? recentMessages.join("\n")
-    : "(no recent parent-thread transcript available)";
-
-  return [
-    "You are a fork of the parent Aliceloop agent.",
-    "Treat the parent thread context below as inherited context.",
-    "Do not restate background unless it helps the final handoff.",
-    "Stay tightly focused on the assigned subtask.",
-    "Do not delegate further sub-tasks from this delegated run.",
-    "Return a concise final answer that the parent agent can relay directly.",
-    "",
-    snapshot.focusState.goal.trim() ? `Current parent goal: ${snapshot.focusState.goal.trim()}` : null,
-    "Recent parent context:",
-    recentContextBlock,
-    "",
-    "Assigned subtask:",
-    prompt.trim(),
-  ].filter((line): line is string => typeof line === "string" && line.length > 0).join("\n");
-}
-
-function buildSubagentPrompt(type: DelegatedTaskRole, prompt: string) {
   return [
     "You are a delegated sub-agent working on behalf of another Aliceloop agent.",
     buildRoleInstruction(type),
+    "You do not automatically inherit the parent conversation history.",
+    "Only rely on the explicit handoff provided below.",
     "Stay tightly focused on the assigned task.",
     "Work in this isolated thread and do not mention internal delegation mechanics unless the task requires it.",
     "Do not delegate further sub-tasks from this delegated run.",
     "Return a concise final answer that the parent agent can relay directly.",
     "",
+    goal ? `Goal: ${goal}` : null,
+    contextLines.length > 0
+      ? [
+        "Explicit context:",
+        ...contextLines.map((line) => `- ${line}`),
+      ].join("\n")
+      : null,
+    artifactRefs.length > 0
+      ? [
+        "Relevant artifacts:",
+        ...artifactRefs.map((line) => `- ${line}`),
+      ].join("\n")
+      : null,
     "Assigned task:",
     prompt.trim(),
-  ].join("\n");
-}
-
-function inferDelegatedAgentMode(task: Pick<DelegatedTaskRun, "title">): DelegatedAgentMode {
-  return task.title.startsWith("Agent · fork ·") ? "fork" : "subagent";
+  ].filter((line): line is string => typeof line === "string" && line.length > 0).join("\n");
 }
 
 function getLatestAssistantMessageContent(sessionId: string) {
@@ -172,7 +165,6 @@ function buildDelegatedOutputDocument(task: DelegatedTaskRun, output: DelegatedT
     `# Delegated Task Output`,
     "",
     `- Task ID: ${task.id}`,
-    `- Mode: ${output.mode}`,
     `- Role: ${task.role}`,
     `- Status: ${output.status}`,
     `- Parent Session: ${task.sessionId ?? "n/a"}`,
@@ -232,8 +224,7 @@ async function publishDelegatedCompletionNotice(task: DelegatedTaskRun, output: 
   const notification: TaskNotification = {
     id: `task-notification-${task.id}`,
     taskId: task.id,
-    mode: output.mode,
-    role: output.mode === "subagent" ? task.role : null,
+    role: task.role === "general-purpose" ? null : task.role,
     status: output.status === "failed" ? "failed" : "completed",
     title: task.title,
     objective: task.objective,
@@ -263,7 +254,6 @@ function resolveDelegatedTaskStatus(task: DelegatedTaskRun): DelegatedTaskOutput
     }
     return withOutputPath(task.id, {
       task_id: task.id,
-      mode: inferDelegatedAgentMode(task),
       status: "failed",
       error: providerJob.detail.trim() || "Delegated task failed.",
     });
@@ -275,7 +265,6 @@ function resolveDelegatedTaskStatus(task: DelegatedTaskRun): DelegatedTaskOutput
     }
     return withOutputPath(task.id, {
       task_id: task.id,
-      mode: inferDelegatedAgentMode(task),
       status: "completed",
       ...(result ? { result } : {}),
     });
@@ -287,7 +276,6 @@ function resolveDelegatedTaskStatus(task: DelegatedTaskRun): DelegatedTaskOutput
     }
     return withOutputPath(task.id, {
       task_id: task.id,
-      mode: inferDelegatedAgentMode(task),
       status: "running",
     });
   }
@@ -298,14 +286,12 @@ function resolveDelegatedTaskStatus(task: DelegatedTaskRun): DelegatedTaskOutput
     }
     return withOutputPath(task.id, {
       task_id: task.id,
-      mode: inferDelegatedAgentMode(task),
       status: "queued",
     });
   }
 
   return withOutputPath(task.id, {
     task_id: task.id,
-    mode: inferDelegatedAgentMode(task),
     status: task.status,
   });
 }
@@ -363,7 +349,7 @@ async function waitForDelegatedTaskByPolling(taskId: string, timeoutMs: number, 
 
   if (returnCurrentOnTimeout) {
     const timedOut = {
-      ...(latestResolved ?? withOutputPath(taskId, { task_id: taskId, mode: "subagent", status: "running" as const })),
+      ...(latestResolved ?? withOutputPath(taskId, { task_id: taskId, status: "running" as const })),
       timed_out: true,
     };
     if (latestTask) {
@@ -514,12 +500,9 @@ export async function runTaskDelegation(input: TaskDelegationInput): Promise<Del
   }
 
   const projectBinding = getSessionProjectBinding(input.sessionId);
-  const mode = input.mode === "subagent" ? "subagent" : "fork";
-  const role = mode === "subagent"
-    ? normalizeDelegatedTaskType(input.type ?? "general-purpose")
-    : "general-purpose";
+  const role = normalizeDelegatedTaskType(input.type ?? "general-purpose");
   const childSession = createSession({
-    title: buildTaskTitle(mode, role, prompt, input.name),
+    title: buildTaskTitle(role, prompt, input.name),
     projectId: projectBinding?.projectId ?? null,
     hidden: true,
   });
@@ -535,9 +518,7 @@ export async function runTaskDelegation(input: TaskDelegationInput): Promise<Del
   createSessionMessage({
     sessionId: childSession.id,
     clientMessageId: `task-delegation-${task.id}-${randomUUID()}`,
-    content: mode === "fork"
-      ? buildForkPrompt(input.sessionId, prompt)
-      : buildSubagentPrompt(role, prompt),
+    content: buildSubagentPrompt(role, prompt, input.handoff),
     role: "user",
     attachmentIds: [],
     deviceId: TASK_DEVICE_ID,
@@ -546,7 +527,6 @@ export async function runTaskDelegation(input: TaskDelegationInput): Promise<Del
   updateDelegatedTaskStatus(task.id, "running");
   await writeDelegatedOutputFile(getDelegatedTask(task.id) ?? task, withOutputPath(task.id, {
     task_id: task.id,
-    mode,
     status: "running",
   }));
   const runPromise = runProviderReply(childSession.id)
@@ -556,7 +536,6 @@ export async function runTaskDelegation(input: TaskDelegationInput): Promise<Del
       updateDelegatedTaskStatus(task.id, "failed");
       return withOutputPath(task.id, {
         task_id: task.id,
-        mode,
         status: "failed" as const,
         error: message,
       });
@@ -574,7 +553,6 @@ export async function runTaskDelegation(input: TaskDelegationInput): Promise<Del
     void finalizedPromise;
     return withOutputPath(task.id, {
       task_id: task.id,
-      mode,
       status: "running",
     });
   }

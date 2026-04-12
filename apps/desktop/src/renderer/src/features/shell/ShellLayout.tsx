@@ -665,7 +665,6 @@ type TimelineEntry =
       kind: "plan-transition";
       transition: "entered" | "exited";
       planMode: SessionPlanModeState;
-      taskId: string | null;
       sortSeq: number | null;
       sortTime: string;
     }
@@ -733,11 +732,10 @@ type TimelineBlock =
       planMeta: PlanMessageMeta;
     }
   | {
-      kind: "plan-transition";
-      transition: "entered" | "exited";
-      planMode: SessionPlanModeState;
-      taskId: string | null;
-    };
+    kind: "plan-transition";
+    transition: "entered" | "exited";
+    planMode: SessionPlanModeState;
+  };
 
 function buildTimeline(
   messages: import("@aliceloop/runtime-core").SessionMessage[],
@@ -770,7 +768,6 @@ function buildTimeline(
       const payload = event.payload as {
         planMode?: SessionPlanModeState;
         transition?: unknown;
-        taskId?: unknown;
       };
       if (
         payload.planMode
@@ -780,7 +777,6 @@ function buildTimeline(
           kind: "plan-transition",
           transition: payload.transition,
           planMode: payload.planMode,
-          taskId: typeof payload.taskId === "string" ? payload.taskId : null,
           sortSeq: event.seq,
           sortTime: event.createdAt,
         });
@@ -1233,8 +1229,11 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     return next;
   }, [conversation.messages, activePlanMeta]);
   const activeQuestionApproval = useMemo(() => {
+    if (!conversation.planMode.active) {
+      return null;
+    }
     return conversation.pendingQuestionApprovals[0] ?? null;
-  }, [conversation.pendingQuestionApprovals]);
+  }, [conversation.pendingQuestionApprovals, conversation.planMode.active]);
   const activeQuestionPrompt = activeQuestionApproval?.question ?? null;
   const activeDeleteApproval = activeToolApproval ? isDeleteToolApproval(activeToolApproval) : false;
   const composerHasText = composerDraft.trim().length > 0;
@@ -1252,7 +1251,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   }, [activePlanMeta?.planId, conversation.activePlan?.updatedAt]);
   const composerQuickReplies = useMemo(() => {
     if (
-      activeQuestionPrompt
+      !conversation.planMode.active
+      || activeQuestionPrompt
       || conversation.pending
       || conversation.pendingUpload
       || isComposerBusy
@@ -1270,6 +1270,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   }, [
     composerHasText,
     activeQuestionPrompt,
+    conversation.planMode.active,
     conversation.pending,
     conversation.pendingUpload,
     isComposerBusy,
@@ -2386,7 +2387,6 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
                   if (entry.kind === "task-notification") {
                     const notification = entry.notification;
-                    const modeLabel = notification.mode === "fork" ? "分叉代理" : "子代理";
                     const statusLabel = notification.status === "completed" ? "已完成" : "已失败";
                     return (
                       <article
@@ -2397,7 +2397,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                           <div className="workspace__plan-card-head">
                             <div className="workspace__plan-card-copy">
                               <span className="workspace__plan-card-eyebrow">后台任务通知</span>
-                              <strong className="workspace__plan-card-title">{`${modeLabel}${statusLabel}`}</strong>
+                              <strong className="workspace__plan-card-title">{`子代理${statusLabel}`}</strong>
                             </div>
                             <div className="workspace__plan-card-meta">
                               <span className="workspace__plan-chip workspace__plan-chip--status">
@@ -2432,7 +2432,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     const isEntering = entry.transition === "entered";
                     return (
                       <article
-                        key={`plan-transition-${entry.transition}-${entry.planMode.updatedAt ?? entry.planMode.enteredAt ?? entry.taskId ?? "current"}`}
+                        key={`plan-transition-${entry.transition}-${entry.planMode.updatedAt ?? entry.planMode.enteredAt ?? "current"}`}
                         className="workspace__message workspace__message--assistant workspace__message--plan"
                       >
                         <div className="workspace__message-body workspace__message-body--plan">
@@ -2453,9 +2453,6 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                                 <span className="workspace__plan-chip">
                                   {`#${entry.planMode.activePlanId.slice(0, 8)}`}
                                 </span>
-                              ) : null}
-                              {!isEntering && entry.taskId ? (
-                                <span className="workspace__plan-chip">任务已同步</span>
                               ) : null}
                             </div>
                           </div>

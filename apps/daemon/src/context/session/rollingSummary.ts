@@ -1,4 +1,4 @@
-import { generateText, Output } from "ai";
+import { generateText } from "ai";
 import { z } from "zod";
 import type { SessionMessage, SessionRollingSummary, SessionSnapshot } from "@aliceloop/runtime-core";
 import { createProviderModel } from "../../providers/providerModelFactory";
@@ -22,6 +22,20 @@ const rollingSummarySchema = z.object({
 });
 
 type RollingSummaryDraft = z.infer<typeof rollingSummarySchema>;
+
+function extractSummaryJson(text: string) {
+  const summaryMatch = text.match(/<summary>([\s\S]*?)<\/summary>/i);
+  const payload = summaryMatch?.[1]?.trim() || text.trim();
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    return rollingSummarySchema.parse(JSON.parse(payload));
+  } catch {
+    return null;
+  }
+}
 
 function normalizeInline(content: string) {
   return content.replace(/\s+/g, " ").trim();
@@ -120,6 +134,12 @@ async function generateRollingSummaryDraft(input: {
   const existingSummary = input.existingSummary;
   const prompt = existingSummary
     ? [
+        "CRITICAL: Respond with TEXT ONLY.",
+        "Do NOT call tools.",
+        "Return exactly one <analysis> block followed by one <summary> block.",
+        "The <summary> block must contain valid JSON matching this shape:",
+        "{\"currentPhase\":\"string\",\"summary\":\"string\",\"completed\":[\"string\"],\"remaining\":[\"string\"],\"decisions\":[\"string\"]}",
+        "",
         "Update the rolling thread summary for a long-running work session.",
         "The existing summary already covers earlier archived turns. Extend it with the newly archived turns below.",
         "Keep the summary concise and operational.",
@@ -137,6 +157,12 @@ async function generateRollingSummaryDraft(input: {
         formatTurnsForPrompt(input.archivedTurns),
       ].join("\n")
     : [
+        "CRITICAL: Respond with TEXT ONLY.",
+        "Do NOT call tools.",
+        "Return exactly one <analysis> block followed by one <summary> block.",
+        "The <summary> block must contain valid JSON matching this shape:",
+        "{\"currentPhase\":\"string\",\"summary\":\"string\",\"completed\":[\"string\"],\"remaining\":[\"string\"],\"decisions\":[\"string\"]}",
+        "",
         "Summarize the archived portion of a long-running work session.",
         "Extract the current phase, a compact rolling summary, completed work, remaining work, and decisions.",
         "Keep everything concise and operational.",
@@ -151,15 +177,9 @@ async function generateRollingSummaryDraft(input: {
       model: createProviderModel(provider),
       abortSignal: input.abortSignal,
       temperature: 0.2,
-      output: Output.object({
-        schema: rollingSummarySchema,
-        name: "rolling_summary",
-        description: "A rolling summary of archived conversation turns.",
-      }),
       prompt,
     });
-
-    return response.output;
+    return extractSummaryJson(response.text) ?? buildFallbackRollingSummary(input.allArchivedTurns);
   } catch {
     return buildFallbackRollingSummary(input.allArchivedTurns);
   }

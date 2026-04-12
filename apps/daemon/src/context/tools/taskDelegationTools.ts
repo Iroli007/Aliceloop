@@ -6,36 +6,40 @@ const delegatedTaskTypeSchema = z.string().trim().min(1).describe(
   "Fresh subagent role. Prefer coder, plan, researcher, or general-purpose. planner and Plan are accepted as aliases for plan.",
 );
 
+const delegatedTaskHandoffSchema = z.object({
+  goal: z.string().trim().min(1).optional().describe("Short goal statement for the subagent"),
+  context: z.array(z.string().trim().min(1)).max(8).optional().describe("Small explicit context list for the subagent"),
+  artifactRefs: z.array(z.string().trim().min(1)).max(12).optional().describe("Relevant files, paths, ids, or artifacts"),
+});
+
 export function createAgentTools(sessionId?: string): ToolSet {
   return {
     agent: tool({
       description: [
-        "Launch an agent only when the work is genuinely better isolated from the main context.",
-        "Use mode=fork when you want a context-aware split for noisy research or self-contained implementation work.",
-        "Use mode=subagent when you want a fresh role, second opinion, or a specialized independent worker.",
+        "Launch a fresh subagent only when the work is genuinely better isolated from the main context.",
+        "This subagent does not automatically inherit the full parent thread history.",
+        "Pass only the minimum explicit handoff context it needs.",
         "Prefer foreground mode when you need the result before your next step.",
         "Background runs return an output_path and post a completion notice back into the parent thread when they finish.",
       ].join(" "),
       inputSchema: z.object({
-        mode: z.enum(["fork", "subagent"]).optional().default("fork").describe("fork inherits current thread context; subagent starts fresh with the requested role"),
         name: z.string().trim().min(1).max(40).optional().describe("Short human-readable label for the launched agent"),
-        subagent_type: delegatedTaskTypeSchema.optional().describe("Required when mode=subagent; ignored for fork mode"),
+        subagent_type: delegatedTaskTypeSchema.optional().describe("Fresh subagent role"),
         prompt: z.string().min(1).describe("Standalone task description for the launched agent"),
+        handoff: delegatedTaskHandoffSchema.optional().describe("Explicit context handoff for the fresh subagent"),
         run_in_background: z.boolean().optional().default(false).describe("Whether to let the delegated task keep running in the background"),
       }),
-      execute: async ({ mode, name, subagent_type, prompt, run_in_background }, executionOptions?: ToolExecutionOptions) => {
+      execute: async ({ name, subagent_type, prompt, handoff, run_in_background }, executionOptions?: ToolExecutionOptions) => {
         if (!sessionId) {
           throw new Error("agent requires a bound session.");
         }
 
         const result = await runTaskDelegation({
           sessionId,
-          mode,
           name,
-          type: mode === "subagent"
-            ? normalizeAgentSubagentType(subagent_type ?? "general-purpose")
-            : "general-purpose",
+          type: normalizeAgentSubagentType(subagent_type ?? "general-purpose"),
           prompt,
+          handoff,
           runInBackground: run_in_background,
           abortSignal: executionOptions?.abortSignal,
         });

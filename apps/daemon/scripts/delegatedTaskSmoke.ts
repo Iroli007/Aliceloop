@@ -51,7 +51,6 @@ async function main() {
     runningOutput,
     {
       task_id: delegatedTask.id,
-      mode: "subagent",
       status: "running",
       output_path: join(tempDataDir, "delegated-tasks", `${delegatedTask.id}.md`),
     },
@@ -94,7 +93,6 @@ async function main() {
     completedOutput,
     {
       task_id: delegatedTask.id,
-      mode: "subagent",
       status: "completed",
       output_path: join(tempDataDir, "delegated-tasks", `${delegatedTask.id}.md`),
       result: "Delegated task complete.",
@@ -111,7 +109,6 @@ async function main() {
   const backgroundParent = createSession("background agent notification smoke");
   await runTaskDelegation({
     sessionId: backgroundParent.id,
-    mode: "fork",
     prompt: "Check that background completion publishes a task notification event.",
     runInBackground: true,
   });

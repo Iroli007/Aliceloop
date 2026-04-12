@@ -139,6 +139,8 @@ async function main() {
   assert(skillCatalog.some((skill) => skill.id === "tasks"), "tasks should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "telegram"), "telegram should be present in the catalog");
   assert(skillCatalog.some((skill) => skill.id === "screenshot"), "screenshot should be present in the catalog");
+  assert.equal(skillCatalog.some((skill) => skill.id === "scheduler"), false, "scheduler should no longer be present in the catalog");
+  assert.equal(skillCatalog.some((skill) => skill.id === "notebook"), false, "notebook should no longer be present in the catalog");
   assert(skillCatalog.every((skill) => skill.id !== "travel"), "travel should no longer be present in the catalog");
   assert(availableCatalogSkills.some((skill) => skill.id === "skill-hub"), "skill-hub should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "skill-search"), "skill-search should be active");
@@ -148,6 +150,8 @@ async function main() {
   assert(availableCatalogSkills.some((skill) => skill.id === "tasks"), "tasks should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "telegram"), "telegram should be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "screenshot"), "screenshot should be active");
+  assert.equal(availableCatalogSkills.some((skill) => skill.id === "scheduler"), false, "scheduler should no longer be active");
+  assert.equal(availableCatalogSkills.some((skill) => skill.id === "notebook"), false, "notebook should no longer be active");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-fetch"), "web-fetch should remain available");
   assert(availableCatalogSkills.some((skill) => skill.id === "web-search"), "web-search should now be available");
   const smallTalkRouting = selectRelevantSkillDefinitions("你就是a姐");
@@ -215,6 +219,16 @@ async function main() {
     "tool router should attach research tools from query intent rather than from skill metadata",
   );
   assert.deepEqual(
+    routeToolNamesForTurn("帮我查一下卡黄"),
+    ["web_search"],
+    "tool router should treat explicit short entity lookup as web research",
+  );
+  assert.deepEqual(
+    routeToolNamesForTurn("查一下当前任务"),
+    [],
+    "task-management lookup should not be mistaken for web research",
+  );
+  assert.deepEqual(
     routeToolNamesForTurn("今天我们做了什么呀"),
     [],
     "same-day recall should not attach web_search purely because the query contains 今天",
@@ -256,7 +270,7 @@ async function main() {
   assert.equal("write" in baseAndSkillTools, true, "base write tool should be part of the always-on base toolset");
   assert.equal("edit" in baseAndSkillTools, true, "base edit tool should be part of the always-on base toolset");
   assert.equal("glob" in baseAndSkillTools, true, "base glob tool should be part of the always-on base toolset");
-  assert.equal("agent" in baseAndSkillTools, true, "native agent should be part of the default tool surface");
+  assert.equal("agent" in baseAndSkillTools, false, "native agent should not be part of the default tool surface");
   assert.equal("browser_navigate" in baseAndSkillTools, false, "browser tools should not be injected into the default toolset");
   assert.equal("document_ingest" in baseAndSkillTools, false, "document_ingest should not be injected into the default toolset");
   assert.equal("review_coach" in baseAndSkillTools, false, "review_coach should not be injected into the default toolset");
@@ -289,9 +303,12 @@ async function main() {
 
   const directResolved = resolveSkillTools(
     new Set([
+      "browser_click",
       "browser_find",
       "browser_navigate",
       "browser_snapshot",
+      "browser_screenshot",
+      "browser_type",
       "browser_wait",
       "browser_media_probe",
       "browser_scroll",
@@ -305,9 +322,12 @@ async function main() {
       "task_output",
     ]),
   );
+  assert.equal(typeof directResolved.browser_click, "object", "resolveSkillTools should return requested browser_click");
   assert.equal(typeof directResolved.browser_find, "object", "resolveSkillTools should return requested browser_find");
   assert.equal(typeof directResolved.browser_navigate, "object", "resolveSkillTools should return requested browser_navigate");
   assert.equal(typeof directResolved.browser_snapshot, "object", "resolveSkillTools should return requested browser_snapshot");
+  assert.equal(typeof directResolved.browser_screenshot, "object", "resolveSkillTools should return requested browser_screenshot");
+  assert.equal(typeof directResolved.browser_type, "object", "resolveSkillTools should return requested browser_type");
   assert.equal(typeof directResolved.browser_wait, "object", "resolveSkillTools should return requested browser_wait");
   assert.equal(typeof directResolved.browser_media_probe, "object", "resolveSkillTools should return requested browser_media_probe");
   assert.equal(typeof directResolved.browser_scroll, "object", "resolveSkillTools should return requested browser_scroll");
@@ -374,7 +394,7 @@ async function main() {
   assert.equal("glob" in context.tools, true, "generic turns should keep the stable glob base tool attached");
   assert.equal("grep" in context.tools, true, "generic turns should keep the stable grep base tool attached");
   assert.equal("edit" in context.tools, true, "generic turns should keep the stable edit base tool attached");
-  assert.equal("agent" in context.tools, true, "generic turns should keep the native agent tool attached");
+  assert.equal("agent" in context.tools, false, "generic turns should not attach the native agent tool");
   assert.equal("browser_navigate" in context.tools, false, "generic turns should not inject browser tools");
   assert.equal("web_fetch" in context.tools, false, "generic turns should not inject web tools");
   assert.equal("web_search" in context.tools, false, "generic turns should not inject web tools");
@@ -385,7 +405,7 @@ async function main() {
   assert.equal(context.firstStepToolChoice, undefined, "generic turns should not force an initial tool");
   assert.match(
     contextSystemPrompt,
-    /Select skills from metadata only when they materially help the task\./i,
+    /Architecture rule: skills are AI-native instruction blocks selected from metadata; they are not workflow scripts\./i,
     "system prompt should encode the architecture rule that skills are selected instruction blocks rather than workflow routers",
   );
   assert.match(
@@ -395,7 +415,7 @@ async function main() {
   );
   assert.match(
     contextSystemPrompt,
-    /call `use_skill` with its exact skill id before continuing/i,
+    /Use `use_skill` with the exact skill id when a catalog skill matches the task and is not already loaded\./i,
     "system prompt should instruct the model to call use_skill instead of emitting raw skill tags",
   );
   assert.deepEqual(
@@ -498,7 +518,7 @@ async function main() {
   );
 
   const plannedOnlyTools = new Set<string>();
-  for (const skill of plannedCatalogSkills) {
+  for (const skill of skillCatalog) {
     for (const toolName of skill.allowedTools) {
       if (BASE_TOOL_NAMES.has(toolName)) {
         continue;
@@ -549,19 +569,11 @@ async function main() {
       query: "打开浏览器访问这个页面，点击按钮并截图。",
     },
   );
-  assert.equal(typeof browserToolSet.browser_navigate, "object", "browser turns should inject browser_navigate");
-  assert.equal(typeof browserToolSet.browser_snapshot, "object", "browser turns should inject browser_snapshot");
-  assert.equal(typeof browserToolSet.view_image, "object", "browser turns should inject view_image for screenshot inspection");
-  assert.equal(typeof browserToolSet.browser_find, "object", "browser turns should inject browser_find");
-  assert.equal(typeof browserToolSet.browser_wait, "object", "browser turns should inject browser_wait");
-  assert.equal(typeof browserToolSet.browser_click, "object", "browser turns should inject browser_click");
-  assert.equal(typeof browserToolSet.browser_type, "object", "browser turns should inject browser_type");
-  assert.equal(typeof browserToolSet.browser_scroll, "object", "browser turns should inject browser_scroll");
-  assert.equal(typeof browserToolSet.browser_screenshot, "object", "browser turns should inject browser_screenshot");
-  assert.equal(typeof browserToolSet.browser_media_probe, "object", "browser turns should inject browser_media_probe");
-  assert.equal(typeof browserToolSet.browser_video_watch_start, "object", "browser turns should inject browser_video_watch_start");
-  assert.equal(typeof browserToolSet.browser_video_watch_poll, "object", "browser turns should inject browser_video_watch_poll");
-  assert.equal(typeof browserToolSet.browser_video_watch_stop, "object", "browser turns should inject browser_video_watch_stop");
+  assert.equal("bash" in browserToolSet, true, "browser turns should keep bash available for CLI browser automation");
+  assert.equal("read" in browserToolSet, true, "browser turns should keep read available for browser snapshots and screenshots");
+  assert.equal("browser_navigate" in browserToolSet, false, "browser instructional skill should not inject native browser tools directly");
+  assert.equal("view_image" in browserToolSet, false, "browser+screenshot instructional routing should still stay on the stable base tool surface");
+  assert.equal("use_skill" in browserToolSet, true, "browser turns should still expose use_skill for further capability expansion");
 
   const researchSkills = selectRelevantSkillDefinitions("帮我查一下东莞今天天气，给我最新结果。");
   assert.deepEqual(
@@ -569,21 +581,26 @@ async function main() {
     ["web-search"],
     "fact verification turns should route to web-search first",
   );
+  assert.deepEqual(
+    selectRelevantSkillDefinitions("查一下黄婷婷这个人，你客观评价一下它").map((skill) => skill.id).sort(),
+    ["web-search"],
+    "explicit people/entity lookup should route to web-search without hard-coding the entity",
+  );
   const researchSkillBlock = buildSkillContextBlock(researchSkills);
   assert.match(
     researchSkillBlock,
-    /Selected skills for this turn:/,
+    /Loaded skill ids for this turn:\s*web-search\./i,
     "skill block should list the selected skills instead of the entire catalog",
   );
   assert.match(
     researchSkillBlock,
-    /web-search:/i,
+    /Loaded skill:\s*web-search/i,
     "research skill block should surface the web-search skill",
   );
   assert.equal(
-    researchSkillBlock.includes("browser:"),
+    /Loaded skill:\s*browser/i.test(researchSkillBlock),
     false,
-    "research skill block should not include unrelated skills",
+    "research skill block should not load unrelated browser skill guidance",
   );
   assert.match(
     researchSkillBlock,
@@ -603,8 +620,8 @@ async function main() {
   );
   assert.equal(
     capabilityDiscoverySkills.some((skill) => skill.id === "skill-search"),
-    true,
-    "browser capability diagnostics should route local skill search",
+    false,
+    "browser capability diagnostics should stay on skill-hub plus the concrete browser skill",
   );
   const fileCapabilitySkills = selectRelevantSkillDefinitions("怎么测试你的文件管理能力？");
   assert.equal(
@@ -619,8 +636,8 @@ async function main() {
   );
   assert.equal(
     fileCapabilitySkills.some((skill) => skill.id === "skill-search"),
-    true,
-    "file capability questions should still include discovery support through skill-search",
+    false,
+    "file capability questions should keep the concrete file-manager skill without forcing skill-search",
   );
   const genericCapabilitySkills = selectRelevantSkillDefinitions("你有哪些能力？");
   assert.equal(
@@ -641,19 +658,10 @@ async function main() {
       query: "去刷推特和抖音，看看主页、视频和帖子。",
     },
   );
-  assert.equal(typeof socialFeedToolSet.browser_navigate, "object", "social feed turns should inject browser_navigate");
-  assert.equal(typeof socialFeedToolSet.browser_snapshot, "object", "social feed turns should inject browser_snapshot");
-  assert.equal(typeof socialFeedToolSet.view_image, "object", "social feed turns should inject view_image for screenshot inspection");
-  assert.equal(typeof socialFeedToolSet.browser_find, "object", "social feed turns should inject browser_find");
-  assert.equal(typeof socialFeedToolSet.browser_wait, "object", "social feed turns should inject browser_wait");
-  assert.equal(typeof socialFeedToolSet.browser_click, "object", "social feed turns should inject browser_click");
-  assert.equal(typeof socialFeedToolSet.browser_type, "object", "social feed turns should inject browser_type");
-  assert.equal(typeof socialFeedToolSet.browser_scroll, "object", "social feed turns should inject browser_scroll");
-  assert.equal(typeof socialFeedToolSet.browser_screenshot, "object", "social feed turns should inject browser_screenshot");
-  assert.equal(typeof socialFeedToolSet.browser_media_probe, "object", "social feed turns should inject browser_media_probe");
-  assert.equal(typeof socialFeedToolSet.browser_video_watch_start, "object", "social feed turns should inject browser_video_watch_start");
-  assert.equal(typeof socialFeedToolSet.browser_video_watch_poll, "object", "social feed turns should inject browser_video_watch_poll");
-  assert.equal(typeof socialFeedToolSet.browser_video_watch_stop, "object", "social feed turns should inject browser_video_watch_stop");
+  assert.equal("bash" in socialFeedToolSet, true, "social feed turns should keep bash available for CLI browser automation");
+  assert.equal("read" in socialFeedToolSet, true, "social feed turns should keep read available for browser snapshots and screenshots");
+  assert.equal("browser_navigate" in socialFeedToolSet, false, "social feed turns should not auto-inject native browser tools");
+  assert.equal("use_skill" in socialFeedToolSet, true, "social feed turns should still expose use_skill for explicit capability expansion");
 
   const memorySkillTools = buildToolSet(
     sandbox,
@@ -676,10 +684,10 @@ async function main() {
     attachmentIds: [],
   });
   const memoryContext = await loadContext(memorySession.id, new AbortController().signal);
-  assert.deepEqual(
+  assert.equal(
     memoryContext.firstStepToolChoice,
-    { type: "tool", toolName: "bash" },
-    "memory turns should bias the first step toward bash when the routed skill is CLI-driven",
+    undefined,
+    "memory turns should stay AI-native and avoid forcing bash as the first step",
   );
 
   const historySkillTools = buildToolSet(
@@ -703,10 +711,10 @@ async function main() {
     attachmentIds: [],
   });
   const historyContext = await loadContext(historySession.id, new AbortController().signal);
-  assert.deepEqual(
+  assert.equal(
     historyContext.firstStepToolChoice,
-    { type: "tool", toolName: "bash" },
-    "episodic history turns should bias the first step toward bash when the routed memory skill is CLI-driven",
+    undefined,
+    "episodic history turns should stay AI-native and avoid forcing bash as the first step",
   );
 
   const videoWatchSkills = selectRelevantSkillDefinitions("继续看这个视频后面讲了什么，顺便听听他说了什么。");
@@ -863,11 +871,6 @@ async function main() {
   );
   assert.match(
     continuationSystemPrompt,
-    /<resolved_current_request>[\s\S]*Current concrete target: B站内容才是准的，查一下3月22日的情况。[\s\S]*Latest user follow-up: 你查/u,
-    "latest-turn block should expand a short follow-up into a concrete work item",
-  );
-  assert.match(
-    continuationSystemPrompt,
     /## Research Memory/u,
     "research memory block should remain available for continuation-style investigations",
   );
@@ -906,12 +909,6 @@ async function main() {
     /Fetched evidence:[\s\S]*摩的司机徐师傅的个人空间-哔哩哔哩/,
     "research memory ledger should retain the already fetched upstream page",
   );
-  assert.match(
-    continuationSystemPrompt,
-    /User: 你查/,
-    "continuation focus block should include the short follow-up itself",
-  );
-
   const researchCarryoverGuardSession = createSession("research carryover guard smoke");
   createSessionMessage({
     sessionId: researchCarryoverGuardSession.id,
@@ -1023,10 +1020,11 @@ async function main() {
     researchDeepeningContext.routedSkillIds.includes("web-fetch"),
     "deepening a research follow-up after search evidence should route the web-fetch skill",
   );
-  assert.deepEqual(
-    researchDeepeningContext.firstStepToolChoice,
-    { type: "tool", toolName: "web_fetch" },
-    "deepening a research follow-up after search evidence should bias the first step toward web_fetch",
+  assert(
+    researchDeepeningContext.firstStepToolChoice === undefined
+      || (researchDeepeningContext.firstStepToolChoice.type === "tool"
+        && ["web_fetch", "web_search"].includes(researchDeepeningContext.firstStepToolChoice.toolName)),
+    "deepening a research follow-up after search evidence should keep the research tool path available without forcing a single first step",
   );
 
   const researchStatusUpdateSession = createSession("research status update smoke");
@@ -1098,9 +1096,10 @@ async function main() {
     "status-update follow-ups after evidence should route the web-fetch skill",
   );
   assert(
-    researchStatusUpdateContext.firstStepToolChoice?.type === "tool"
-      && ["web_fetch", "web_search"].includes(researchStatusUpdateContext.firstStepToolChoice.toolName),
-    "status-update follow-ups after evidence should still bias the first step toward a research tool",
+    researchStatusUpdateContext.firstStepToolChoice === undefined
+      || (researchStatusUpdateContext.firstStepToolChoice.type === "tool"
+        && ["web_fetch", "web_search"].includes(researchStatusUpdateContext.firstStepToolChoice.toolName)),
+    "status-update follow-ups after evidence should keep the research tool path available without forcing a single first step",
   );
 
   const twitterContinuationSession = createSession("twitter continuation smoke");
@@ -1186,14 +1185,14 @@ async function main() {
     ? browserContinuationContext.systemPrompt.map((message) => message.content).join("\n\n")
     : browserContinuationContext.systemPrompt;
   assert.equal(
-    typeof browserContinuationContext.tools.browser_navigate,
-    "object",
-    "browser continuation turns should preserve browser_navigate through sticky browser capability routing",
+    browserContinuationContext.routedSkillIds.includes("browser"),
+    true,
+    "browser continuation turns should preserve the browser skill through sticky capability routing",
   );
   assert.equal(
-    typeof browserContinuationContext.tools.browser_snapshot,
-    "object",
-    "browser continuation turns should preserve browser_snapshot through sticky browser capability routing",
+    "browser_navigate" in browserContinuationContext.tools,
+    false,
+    "browser continuation turns should keep browser guidance without auto-injecting native browser tools",
   );
   assert.match(
     browserContinuationPrompt,
@@ -1602,11 +1601,11 @@ async function main() {
       "web_search should prioritize primary platform pages for generic creator metric queries",
     );
 
-    const browserNavigateTool = browserToolSet.browser_navigate as any;
-    const browserSnapshotTool = browserToolSet.browser_snapshot as any;
-    const browserTypeTool = browserToolSet.browser_type as any;
-    const browserClickTool = browserToolSet.browser_click as any;
-    const browserScreenshotTool = browserToolSet.browser_screenshot as any;
+    const browserNavigateTool = directResolved.browser_navigate as any;
+    const browserSnapshotTool = directResolved.browser_snapshot as any;
+    const browserTypeTool = directResolved.browser_type as any;
+    const browserClickTool = directResolved.browser_click as any;
+    const browserScreenshotTool = directResolved.browser_screenshot as any;
     disposeBrowser = browserNavigateTool.__dispose;
 
     const browserLanding = JSON.parse(

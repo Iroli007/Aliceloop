@@ -84,8 +84,10 @@ async function main() {
 
     const context = await loadContext(session.id, new AbortController().signal);
     const prompt = flattenSystemPrompt(context.systemPrompt);
+    assert.match(prompt, /## Context Boundary/u);
     assert.match(prompt, /## Rolling Summary/u);
     assert.match(prompt, /Archived turns covered: 2/u);
+    assert.match(prompt, /Boundary source: rolling session memory/u);
 
     const messageTranscript = context.messages
       .map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content))
@@ -93,6 +95,55 @@ async function main() {
     assert.match(messageTranscript, /继续把 rolling summary 和 recent turns 也收一下/u);
     assert.doesNotMatch(messageTranscript, /先把记忆系统拆成长期记忆和线程记忆两层/u);
     assert.doesNotMatch(messageTranscript, /再把没接进主链路的 memory_notes 摘掉/u);
+
+    const compactedContext = await loadContext(session.id, new AbortController().signal, {
+      compaction: {
+        forceCheckpoint: true,
+        keepRecentTurnsCount: 1,
+      },
+    });
+    const compactedPrompt = flattenSystemPrompt(compactedContext.systemPrompt);
+    assert.match(compactedPrompt, /## Context Boundary/u);
+    assert.match(compactedPrompt, /## Context Checkpoint/u);
+    assert.match(compactedPrompt, /Archived turns covered: 2/u);
+    assert.match(compactedPrompt, /Boundary source: checkpoint summary/u);
+
+    const compactedTranscript = compactedContext.messages
+      .map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content))
+      .join("\n");
+    assert.match(compactedTranscript, /继续把 rolling summary 和 recent turns 也收一下/u);
+    assert.doesNotMatch(compactedTranscript, /先把记忆系统拆成长期记忆和线程记忆两层/u);
+
+    createSessionMessage({
+      sessionId: session.id,
+      clientMessageId: "assistant-3",
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content: "已经把滚动摘要和 recent turns 分层，后面只差一条明确的边界提示。",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: session.id,
+      clientMessageId: "user-4",
+      deviceId: "desktop",
+      role: "user",
+      content: "再补一条 context boundary，别让模型把摘要当成新的用户消息。",
+      attachmentIds: [],
+    });
+
+    const incrementallyCompactedContext = await loadContext(session.id, new AbortController().signal, {
+      compaction: {
+        forceCheckpoint: true,
+        keepRecentTurnsCount: 1,
+      },
+    });
+    const incrementallyCompactedPrompt = flattenSystemPrompt(incrementallyCompactedContext.systemPrompt);
+    assert.match(incrementallyCompactedPrompt, /Archived turns covered: 3/u);
+    assert.equal(incrementallyCompactedContext.timings.compactionCheckpointIncremental, 1);
+
+    const updatedSnapshot = getSessionSnapshot(session.id);
+    assert.equal(updatedSnapshot.compactionState.compactedTurnCount, 3);
+    assert.ok(updatedSnapshot.compactionState.lastCompactedMessageId);
   } finally {
     rmSync(tempDataDir, { recursive: true, force: true });
   }

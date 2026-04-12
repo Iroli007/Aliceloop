@@ -294,7 +294,7 @@ function usage() {
     "  aliceloop thread new [title]",
     "  aliceloop thread search <query>",
     "  aliceloop thread delete <id>",
-    "  aliceloop tasks list [all|done|running|queued]",
+    "  aliceloop tasks list [all|active|done|running|queued]",
     "  aliceloop tasks add <title> [--detail <text>] [--steps <comma,separated,steps>]",
     "  aliceloop tasks update <id> [--title <text>] [--detail <text>] [--steps <comma,separated,steps>] [--status <queued|running|done|failed>] [--step <n>] [--step-status <pending|done>]",
     "  aliceloop tasks done <id>",
@@ -1095,6 +1095,8 @@ async function handleTasks(args: string[]) {
     switch (mode) {
       case "open":
         return tasks.filter((task) => task.status !== "done");
+      case "active":
+        return tasks.filter((task) => task.status === "running" || task.status === "queued");
       case "all":
         return tasks;
       case "done":

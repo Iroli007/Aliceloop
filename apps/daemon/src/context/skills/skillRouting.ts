@@ -33,6 +33,10 @@ function matches(query: string, pattern: RegExp) {
 const MEMORY_FACT_QUERY_PATTERN = /记忆|memory|记住|忘掉|forget|偏好|事实|稳定|长期|profile|account|fact|还记得|记不记得|记得我|我的偏好|我的习惯|记一下|帮我记住/u;
 const EPISODIC_HISTORY_QUERY_PATTERN = /聊天记录|历史会话|之前的对话|上次对话|conversation history|episodic history|上次聊|刚才说|之前说过|之前聊过|我们聊到哪|昨晚|昨天晚上|昨天聊|昨晚跟你说|昨天跟你说|今天我们做了什么|今天做了什么|今天都做了什么|今天聊了什么|今天聊了啥|我们今天聊了什么|我们今天做了什么|(?:这个|上个)?(?:线程|thread|会话|session).*(?:聊了什么|说了什么|提到什么|记录)/iu;
 const THREAD_MANAGEMENT_QUERY_PATTERN = /线程管理|管理线程|^threads?$|thread\s+(?:list|info|delete|new|search)|thread id|线程\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|会话\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|列出.*(?:线程|会话)|删除.*(?:线程|会话)|新建.*(?:线程|会话)|创建.*(?:线程|会话)|打开.*(?:线程|会话)|切换.*(?:线程|会话)/iu;
+const TASK_TRACKING_QUERY_PATTERN = /(?:活跃|当前|进行中|全局|长期|跟踪|追踪|状态|进度|列表|清单|running|queued|done|failed|tracked)\s*(?:任务|tasks?)|(?:任务|tasks?)\s*(?:列表|清单|状态|进度|追踪|跟踪|list|show|status|progress)|(?:列出|列一下|查看|显示|有哪些).{0,6}(?:活跃|当前|进行中|全局)?.{0,4}(?:任务|tasks?)/iu;
+const TODO_CHECKLIST_QUERY_PATTERN = /待办|todo|checklist|待办列表|待办清单|todo list|任务清单/u;
+const EXPLICIT_WEB_LOOKUP_QUERY_PATTERN = /(?:^|[，。！？\s])(?:帮我|请|麻烦|给我)?(?:查一下|查查|搜一下|搜搜|搜索一下)(?!\s*(?:文件|文件夹|目录|线程|会话|任务|待办|todo|记忆|memory|本地|项目|代码|日志|报错|错误|设置|权限|工具|skill|skills?))/iu;
+const LOCAL_LOOKUP_QUERY_PATTERN = /文件|文件夹|目录|线程|会话|任务|待办|todo|记忆|memory|之前|上次|刚才|今天我们|今天做了什么|今天聊了什么|本地|workspace|项目|代码|日志|报错|错误|终端|设置|权限|工具|skills?/iu;
 
 export function needsMemoryFactRecall(query: string) {
   return matches(query, MEMORY_FACT_QUERY_PATTERN);
@@ -46,11 +50,23 @@ export function needsThreadManagement(query: string) {
   return matches(query, THREAD_MANAGEMENT_QUERY_PATTERN);
 }
 
+export function needsTaskTracking(query: string) {
+  return matches(query, TASK_TRACKING_QUERY_PATTERN);
+}
+
+export function needsTodoChecklist(query: string) {
+  return matches(query, TODO_CHECKLIST_QUERY_PATTERN);
+}
+
 export function needsWebResearch(query: string) {
-  return matches(
+  if (matches(
     query,
     /^search$|^web[\s_-]?search$|^websearch$|搜索|搜搜看|research|调查|fact-?check|验证|核对|确认|准确|准不准|可靠吗|可靠性|事实依据|来源|source|天气|温度|粉丝|关注者|播放|点赞|价格|汇率|比分|政策|新闻|官网|网址|链接|url|https?:\/\/|网上.*(好玩|有意思|新鲜事)|互联网.*(好玩|有意思)|上网.*看看|搜搜看/iu,
-  );
+  )) {
+    return true;
+  }
+
+  return EXPLICIT_WEB_LOOKUP_QUERY_PATTERN.test(query) && !LOCAL_LOOKUP_QUERY_PATTERN.test(query);
 }
 
 export function needsWebFetch(query: string) {
@@ -115,6 +131,12 @@ export function inferStickySkillIdsFromContext(query: string) {
   }
   if (needsThreadManagement(query)) {
     stickySkillIds.add("thread-management");
+  }
+  if (needsTaskTracking(query)) {
+    stickySkillIds.add("tasks");
+  }
+  if (needsTodoChecklist(query)) {
+    stickySkillIds.add("todo");
   }
   if (needsWebResearch(query)) {
     stickySkillIds.add("web-search");

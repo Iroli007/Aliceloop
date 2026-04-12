@@ -7,7 +7,6 @@ import { setBrowserSessionPreference } from "./browserSessionRegistry";
 import { createSandboxTools } from "./sandboxTools";
 import { BASE_TOOL_NAMES, BASE_TOOL_ORDER, listAvailableToolAdapterNames, listUnresolvedSkillTools, resolveSkillTools } from "./skillToolFactories";
 import { routeToolNamesForTurn } from "./toolRouter";
-import { createAskUserQuestionTool } from "./askUserQuestionTool";
 import { createPlanModeToolSet } from "./planModeTools";
 import { createUseSkillTool } from "./useSkillTool";
 
@@ -59,7 +58,8 @@ export const STATIC_BASE_TOOL_BLOCK = [
   `- ${DEFAULT_ATTACHED_TOOL_NAMES.join(", ")}`,
   "These six tools are the long-lived execution substrate for this project.",
   "Skills should usually work through bash, read, and write. Use glob, grep, and edit only when the task truly needs file discovery, code search, or precise in-place edits.",
-  "The native `agent` tool is the coordination escape hatch for isolated fork/subagent work. Do not use it for ordinary single-thread tasks.",
+  "Do not use bash, curl, grep, or local thread files as a substitute for web research. If the user wants external information, use `web_search` when it is attached; otherwise call `use_skill` with `web-search` and continue after the context reload.",
+  "The native `agent` tool is turn-scoped for explicit isolated sub-agent work. It is not part of the default base and must not be used for ordinary single-thread tasks.",
   "Extra native tools are exceptions layered on top of this base, not the default path.",
 ].join("\n");
 export const BASE_TOOL_SCHEMA_KEY = createHash("sha1")
@@ -118,7 +118,6 @@ function collectRequestedToolNames(
   }
 
   pushToolNames(DEFAULT_ATTACHED_TOOL_NAMES);
-  pushToolNames(["agent"]);
   pushToolNames(routeToolNamesForTurn(options?.query, options?.routeHints, {
     hasImageAttachment: options?.hasImageAttachment,
   }));
@@ -166,9 +165,6 @@ export function buildToolSet(
 
   Object.assign(tools, resolveSkillTools(requested, { sessionId: options?.sessionId }));
   if (options?.sessionId) {
-    if (options?.planModeActive) {
-      Object.assign(tools, createAskUserQuestionTool(options.sessionId));
-    }
     Object.assign(tools, createPlanModeToolSet(options.sessionId, options?.planModeActive ?? false));
   }
   if (!options?.planModeActive) {

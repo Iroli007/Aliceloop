@@ -29,7 +29,7 @@ const toolActivityLabelMap: Record<string, string> = {
   grep: "Searching file contents",
   glob: "Scanning files",
   agent: "Launching an agent",
-  task_output: "Checking background sub-agent status",
+  task_output: "Checking background agent status",
   view_image: "Inspecting an image",
   bash: "Running shell commands",
   shell: "Running shell commands",

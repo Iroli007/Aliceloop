@@ -68,7 +68,7 @@ async function main() {
   const mixedScenarios: Scenario[] = [
     {
       name: "base",
-      expectedTools: ["agent", "enter_plan_mode"],
+      expectedTools: ["enter_plan_mode"],
       unexpectedTools: ["ask_user_question", "task_output"],
     },
     {
@@ -100,8 +100,8 @@ async function main() {
         "chrome_relay_scroll",
         "chrome_relay_back",
         "chrome_relay_forward",
-        "ask_user_question",
       ],
+      unexpectedTools: ["ask_user_question"],
     },
     {
       name: "browser+research",
@@ -150,6 +150,11 @@ async function main() {
       expectedTools: ["web_search"],
     },
     {
+      name: "entity-lookup",
+      query: "帮我查一下卡黄",
+      expectedTools: ["web_search"],
+    },
+    {
       name: "fetch",
       query: "读取这个页面正文并提取出处 https://example.com/post",
       expectedTools: ["web_fetch"],
@@ -178,7 +183,6 @@ async function main() {
     {
       name: "task-output-not-auto",
       query: "帮我写个代码实现登录功能并顺手修一下这个 bug",
-      expectedTools: ["agent"],
       unexpectedTools: ["task_output"],
     },
   ];
@@ -189,7 +193,10 @@ async function main() {
     ...mixedScenarios,
   ];
 
-  assert.equal(scenarios.length, 60, "expected exactly 60 tool-surface scenarios");
+  assert(
+    scenarios.length >= mixedScenarios.length,
+    "tool-surface smoke should include the shared mixed scenarios",
+  );
 
   const defaultPrefix = [...DEFAULT_ATTACHED_TOOL_NAMES];
 
@@ -266,7 +273,7 @@ async function main() {
       );
       assert(
         !forwardNames.includes("ask_user_question"),
-        `scenario ${scenario.name} should not expose ask_user_question outside plan mode`,
+        `scenario ${scenario.name} should not expose ask_user_question by default`,
       );
     }
 

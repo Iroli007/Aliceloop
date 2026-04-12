@@ -7,6 +7,12 @@ import { type AgentContext, loadContext } from "../context/index";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
 import { getSkillDefinition } from "../context/skills/skillLoader";
 import { getLatestUserMessage } from "../context/session/sessionContext";
+import {
+  needsTaskTracking,
+  needsThreadManagement,
+  needsTodoChecklist,
+  needsWebResearch,
+} from "../context/skills/skillRouting";
 import { refreshSessionRollingSummary } from "../context/session/rollingSummary";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
@@ -41,7 +47,6 @@ import { repairTextToolCall } from "./toolCallRepair";
 import { decideAttemptOutcome } from "./recoveryDecision";
 import { inferSkillIdsForToolCall } from "../context/tools/toolSkillRouting";
 import { USE_SKILL_TOOL_NAME } from "../context/tools/useSkillTool";
-import { ASK_USER_QUESTION_TOOL_NAME } from "../context/tools/askUserQuestionTool";
 import { ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME, WRITE_PLAN_ARTIFACT_TOOL_NAME } from "../context/tools/planModeTools";
 import {
   cloneWorksetState,
@@ -169,6 +174,23 @@ function extractAgentErrorDetail(error: unknown, depth = 0): string | null {
   return null;
 }
 
+function isPromptTooLongLikeError(error: unknown) {
+  const detail = extractAgentErrorDetail(error)?.toLowerCase() ?? "";
+  if (!detail) {
+    return false;
+  }
+
+  return (
+    detail.includes("prompt is too long")
+    || detail.includes("prompt too long")
+    || detail.includes("context length")
+    || detail.includes("maximum context")
+    || detail.includes("too many tokens")
+    || detail.includes("input is too long")
+    || detail.includes("413")
+  );
+}
+
 function buildAssistantEventPayload(skills: string[], tools: string[]) {
   const payload: { skills?: string[]; tools?: string[] } = {};
   if (skills.length > 0) {
@@ -183,7 +205,6 @@ function buildAssistantEventPayload(skills: string[], tools: string[]) {
 
 const INTERNAL_TOOL_NAMES = new Set([
   USE_SKILL_TOOL_NAME,
-  ASK_USER_QUESTION_TOOL_NAME,
   ENTER_PLAN_MODE_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
   WRITE_PLAN_ARTIFACT_TOOL_NAME,
@@ -578,7 +599,7 @@ function buildLocalFallbackReply(userMessage: string | null) {
   }
 
   const delegatedTaskMatch = normalized.match(
-    /^(?:You are a delegated sub-agent working on behalf of another Aliceloop agent\.|You are a fork of the parent Aliceloop agent\.)[\s\S]*?\n(?:Assigned task|Assigned subtask):\n([\s\S]+)$/u,
+    /^You are a delegated sub-agent working on behalf of another Aliceloop agent\.[\s\S]*?\nAssigned task:\n([\s\S]+)$/u,
   );
   if (delegatedTaskMatch) {
     const assignedTask = delegatedTaskMatch[1]?.trim() ?? "";
@@ -1027,7 +1048,31 @@ function inferIntentDrivenRecoveryRequest(
     return null;
   }
 
+  if (needsTaskTracking(userMessage)) {
+    return buildCapabilityRecoveryRequest("user_intent:tasks", {
+      selectedSkillIds: ["tasks"],
+    });
+  }
+
+  if (needsTodoChecklist(userMessage)) {
+    return buildCapabilityRecoveryRequest("user_intent:todo", {
+      selectedSkillIds: ["todo"],
+    });
+  }
+
+  if (needsThreadManagement(userMessage)) {
+    return buildCapabilityRecoveryRequest("user_intent:thread-management", {
+      selectedSkillIds: ["thread-management"],
+    });
+  }
+
   const attached = new Set(attachedToolNames);
+
+  if (needsWebResearch(userMessage) && !attached.has("web_search")) {
+    return buildCapabilityRecoveryRequest("user_intent:research", {
+      selectedSkillIds: ["web-search"],
+    });
+  }
 
   if (
     /浏览器|browser|网页|页面|网站|打开|登录|扫码|截图|click|tab|chrome|b站|bilibili|x\.com|twitter|小红书/iu.test(userMessage)
@@ -1052,7 +1097,7 @@ function inferIntentDrivenRecoveryRequest(
 }
 
 function looksLikeCapabilitySeekingReply(text: string) {
-  return /我需要先(?:查看|查询|看看|搜索)|让我先(?:查看|查询|看看|搜索)|可用的 skill|需要通过 skill 路由|不是直接挂载的基座工具|工具集|没加载|未挂载|unavailable|not available/u.test(text);
+  return /我需要先(?:查看|查询|看看|搜索)|让我先(?:查看|查询|看看|搜索)|我需要使用有效的命令|让我正确执行|可用的 skill|需要通过 skill 路由|不是直接挂载的基座工具|工具集|没加载|未挂载|unavailable|not available/u.test(text);
 }
 
 function inferAssistantCapabilityRecoveryRequest(
@@ -1115,7 +1160,8 @@ function inferCapabilityRecoveryRequest(
   attachedToolNames: string[],
   resolvedToolCallCount: number,
 ): CapabilityRecoveryRequest | null {
-  if (resolvedToolCallCount > 0) {
+  const capabilitySeekingReply = looksLikeCapabilitySeekingReply(assistantText);
+  if (resolvedToolCallCount > 0 && !capabilitySeekingReply) {
     return null;
   }
 
@@ -1136,7 +1182,7 @@ function inferCapabilityRecoveryRequest(
     assistantText,
     attachedSkillIds,
   );
-  if (referencedSkillId && looksLikeCapabilitySeekingReply(assistantText)) {
+  if (referencedSkillId && capabilitySeekingReply) {
     return buildCapabilityRecoveryRequest(`referenced_missing_skill:${referencedSkillId}`, {
       selectedSkillIds: [referencedSkillId],
     });
@@ -1165,9 +1211,10 @@ function inferCapabilityRecoveryRequest(
 
   if (
     /我需要先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|让我先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|不是直接挂载的基座工具|需要通过 skill 路由|可用的 skill/u.test(assistantText)
+    && !attached.has("bash")
   ) {
     return buildCapabilityRecoveryRequest("skill_discovery_needed", {
-      toolNames: attached.has("bash") ? [] : ["bash"],
+      toolNames: ["bash"],
     });
   }
 
@@ -1548,6 +1595,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   let assistantMessageId: string | null = null;
   let lastResult: StreamResult | null = null;
   let finalResult: StreamResult | null = null;
+  let promptTooLongRecovered = false;
   const startingWorksetState = getSessionWorksetState(run.sessionId);
   const accumulatedStickySkillIds = new Set<string>();
   const accumulatedSelectedSkillIds = new Set<string>();
@@ -1563,7 +1611,25 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
 
   try {
     for (let attempt = 0; attempt < MAX_CAPABILITY_RECOVERY_ATTEMPTS; attempt += 1) {
-      const result = await executeStreamAttempt(run, assistantMessageId);
+      let result: Awaited<ReturnType<typeof executeStreamAttempt>>;
+      try {
+        result = await executeStreamAttempt(run, assistantMessageId);
+      } catch (error) {
+        if (!promptTooLongRecovered && isPromptTooLongLikeError(error)) {
+          promptTooLongRecovered = true;
+          run.context = await loadContext(run.sessionId, run.abortController.signal, {
+            additionalStickySkillIds: [...accumulatedStickySkillIds],
+            additionalSelectedSkillIds: [...accumulatedSelectedSkillIds],
+            additionalToolNames: [...accumulatedToolNames],
+            compaction: {
+              forceCheckpoint: true,
+              keepRecentTurnsCount: 1,
+            },
+          });
+          continue;
+        }
+        throw error;
+      }
       assistantMessageId = result.assistantMessageId;
       lastResult = {
         text: result.text,
