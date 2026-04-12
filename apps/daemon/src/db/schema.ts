@@ -57,6 +57,17 @@ export const schemaStatements = [
     )
   `,
   `
+    CREATE TABLE IF NOT EXISTS session_compaction_state (
+      session_id TEXT PRIMARY KEY,
+      checkpoint_summary TEXT NOT NULL DEFAULT '',
+      compacted_turn_count INTEGER NOT NULL DEFAULT 0,
+      last_compacted_message_id TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS attachments (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,

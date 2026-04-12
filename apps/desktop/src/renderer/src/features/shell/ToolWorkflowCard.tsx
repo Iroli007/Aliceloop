@@ -827,12 +827,10 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
         ? resolvedInput
         : null;
     const runInBackground = isRecord(resolvedInput) && resolvedInput.run_in_background === true;
-    const mode = isRecord(resolvedInput) ? pickFirstString(resolvedInput, ["mode"]) : null;
-    const modeLabel = mode === "subagent" ? "子代理" : "分叉代理";
     if (prompt) {
-      return `${runInBackground ? `后台${modeLabel}` : modeLabel}: ${compactInline(prompt, 28)}`;
+      return `${runInBackground ? "后台子代理" : "子代理"}: ${compactInline(prompt, 28)}`;
     }
-    return runInBackground ? `启动后台${modeLabel}` : `运行${modeLabel}`;
+    return runInBackground ? "启动后台子代理" : "运行子代理";
   }
 
   if (entry.toolName === "task_output") {

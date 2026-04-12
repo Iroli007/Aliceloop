@@ -20,10 +20,12 @@ async function main() {
       { loadContext },
       { buildSessionContextFragments },
       { createSession, createSessionMessage, getSessionSnapshot, updateSessionFocusState },
+      { enterSessionPlanMode },
     ] = await Promise.all([
       import("../src/context/index.ts"),
       import("../src/context/session/sessionContext.ts"),
       import("../src/repositories/sessionRepository.ts"),
+      import("../src/repositories/sessionPlanModeRepository.ts"),
     ]);
 
     const session = createSession("session focus smoke");
@@ -52,6 +54,16 @@ async function main() {
     assert.match(prompt, /把 session focus state 接进 prompt 主链路。/u);
     assert.match(prompt, /先补 snapshot 和 prompt/u);
     assert.match(prompt, /还没有自动维护逻辑/u);
+
+    const planQuestionSession = createSession("plan mode one question smoke");
+    enterSessionPlanMode({ sessionId: planQuestionSession.id });
+    const planQuestionContext = await loadContext(planQuestionSession.id, new AbortController().signal);
+    const planQuestionPrompt = flattenSystemPrompt(planQuestionContext.systemPrompt);
+    assert.match(
+      planQuestionPrompt,
+      /Ask only one blocking clarification at a time/u,
+      "plan mode should not bundle multiple product choices into one question card",
+    );
 
     const researchSession = createSession("session continuation smoke");
     createSessionMessage({
@@ -99,7 +111,61 @@ async function main() {
       "fresh research requests should not inherit unrelated anchors from the previous task",
     );
 
-    await loadContext(researchSession.id, new AbortController().signal);
+    const researchContext = await loadContext(researchSession.id, new AbortController().signal);
+    assert.equal(
+      researchContext.routedSkillIds.includes("web-search"),
+      true,
+      "explicit people/entity lookup should load web-search for the active turn",
+    );
+    assert.equal(
+      typeof researchContext.tools.web_search,
+      "object",
+      "explicit people/entity lookup should attach web_search for the active turn",
+    );
+
+    const researchClarificationSession = createSession("research clarification routing smoke");
+    createSessionMessage({
+      sessionId: researchClarificationSession.id,
+      clientMessageId: "user-research-clarify-1",
+      deviceId: "smoke",
+      role: "user",
+      content: "帮我搜一下卡黄",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: researchClarificationSession.id,
+      clientMessageId: "assistant-research-clarify-1",
+      deviceId: "smoke",
+      role: "assistant",
+      content: "你想了解的是哪一个？如果是 SNH48 的卡黄 CP，我可以帮你搜索更多相关信息。",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: researchClarificationSession.id,
+      clientMessageId: "user-research-clarify-2",
+      deviceId: "smoke",
+      role: "user",
+      content: "SNH48的卡黄CP",
+      attachmentIds: [],
+    });
+
+    const clarificationFragments = buildSessionContextFragments(researchClarificationSession.id);
+    assert.equal(
+      clarificationFragments.recentConversationFocus.researchContinuation,
+      true,
+      "short clarification answers after a research choice should keep the research task alive",
+    );
+    assert.match(
+      clarificationFragments.recentConversationFocus.effectiveUserQuery ?? "",
+      /SNH48的卡黄CP/u,
+      "clarification research queries should keep the user's concrete answer in the effective query",
+    );
+    const clarificationContext = await loadContext(researchClarificationSession.id, new AbortController().signal);
+    assert.equal(
+      typeof clarificationContext.tools.web_search,
+      "object",
+      "research clarification answers should attach web_search instead of falling back to local tools",
+    );
 
     const threadManagementSession = createSession("thread management routing smoke");
     createSessionMessage({
@@ -115,7 +181,7 @@ async function main() {
     assert.deepEqual(
       threadManagementContext.routedSkillIds,
       ["thread-management"],
-      "thread deletion requests should route to thread-management without notebook/scheduler drift",
+      "thread deletion requests should route to thread-management without unrelated skill drift",
     );
     assert.equal(
       "task_output" in threadManagementContext.tools,
@@ -124,8 +190,30 @@ async function main() {
     );
     assert.equal(
       "agent" in threadManagementContext.tools,
-      true,
-      "agent should be part of the native tool surface without requiring a delegated-agent skill",
+      false,
+      "thread management requests should not attach the native agent tool by default",
+    );
+
+    const taskTrackingSession = createSession("task tracking routing smoke");
+    createSessionMessage({
+      sessionId: taskTrackingSession.id,
+      clientMessageId: "user-task-1",
+      deviceId: "smoke",
+      role: "user",
+      content: "列出活跃任务",
+      attachmentIds: [],
+    });
+
+    const taskTrackingContext = await loadContext(taskTrackingSession.id, new AbortController().signal);
+    assert.deepEqual(
+      taskTrackingContext.routedSkillIds,
+      ["tasks"],
+      "active task listing should route to tasks instead of falling through with no skill",
+    );
+    assert.equal(
+      "task_output" in taskTrackingContext.tools,
+      false,
+      "task listing should not attach background agent status tools",
     );
 
     const explicitAgentSession = createSession("native agent tool smoke");

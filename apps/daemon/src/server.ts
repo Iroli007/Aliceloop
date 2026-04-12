@@ -1433,6 +1433,12 @@ export async function createServer() {
     }
   });
   server.delete<{ Params: SessionParams }>("/api/sessions/:id", async (request, reply) => {
+    if (abortAgentForSession(request.params.id)) {
+      return reply.code(409).send({
+        error: "session_active",
+      });
+    }
+
     const deleted = deleteSession(request.params.id);
     if (!deleted) {
       return reply.code(404).send({

@@ -1,24 +1,63 @@
 {
-  "name": "aliceloop",
-  "private": true,
+  "name": "cloud-music-player",
   "version": "1.0.0",
-  "packageManager": "npm@11.11.0",
-  "description": "Desktop-first local coding and computer-use agent runtime.",
+  "description": "网易云风格音乐播放器",
+  "main": "dist-electron/main.js",
   "scripts": {
-    "build": "npm run build --workspace @aliceloop/runtime-core && npm run build --workspace @aliceloop/pdf-ingest && npm run build --workspace @aliceloop/daemon && npm run build --workspace @aliceloop/desktop",
-    "dev:daemon": "npm run dev --workspace @aliceloop/daemon",
-    "dev:desktop": "npm run dev --workspace @aliceloop/desktop",
-    "smoke:daemon": "npm run smoke:all --workspace @aliceloop/daemon",
-    "typecheck": "npm run typecheck --workspace @aliceloop/runtime-core && npm run typecheck --workspace @aliceloop/pdf-ingest && npm run typecheck --workspace @aliceloop/daemon && npm run typecheck --workspace @aliceloop/desktop"
-  },
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
-  "devDependencies": {
-    "markdown-docx": "^1.5.1"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "electron:dev": "cross-env NODE_ENV=development electron .",
+    "electron:build": "npm run build && electron-builder",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
-    "docx": "^9.6.1"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.20.0",
+    "howler": "^2.2.4",
+    "better-sqlite3": "^9.4.3",
+    "music-metadata": "^7.14.0",
+    "lucide-react": "^0.294.0",
+    "zustand": "^4.4.7"
+  },
+  "devDependencies": {
+    "@types/howler": "^2.2.11",
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@typescript-eslint/eslint-plugin": "^6.14.0",
+    "@typescript-eslint/parser": "^6.14.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "cross-env": "^7.0.3",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "eslint": "^8.55.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "eslint-plugin-react-refresh": "^0.4.5",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.3.6",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.8",
+    "vite-plugin-electron": "^0.28.0",
+    "vite-plugin-electron-renderer": "^0.14.5"
+  },
+  "build": {
+    "appId": "com.cloudmusic.player",
+    "productName": "Cloud Music",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.music"
+    },
+    "win": {
+      "target": "nsis"
+    }
   }
 }

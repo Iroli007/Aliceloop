@@ -51,12 +51,6 @@ const TOOL_CONTRACTS: Record<string, Partial<ToolExecutionContract>> = {
     loadBehavior: "eager",
     resultBudgetChars: 4_000,
   },
-  ask_user_question: {
-    concurrency: "shared",
-    interruptBehavior: "cancel",
-    loadBehavior: "eager",
-    resultBudgetChars: 4_000,
-  },
   enter_plan_mode: {
     concurrency: "shared",
     interruptBehavior: "cancel",

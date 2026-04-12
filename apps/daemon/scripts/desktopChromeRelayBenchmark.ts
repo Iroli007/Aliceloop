@@ -74,6 +74,14 @@ async function listen(server: ReturnType<typeof createServer>) {
   });
 }
 
+function isSkippableRelayLaunchError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return /Chrome exited before DevTools was ready|Timed out waiting for Chrome DevTools port|spawn .*ENOENT/i.test(error.message);
+}
+
 async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-desktop-relay-bench-"));
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
@@ -140,8 +148,35 @@ async function main() {
   const relayUserData = mkdtempSync(join(tmpdir(), "aliceloop-relay-bench-user-"));
   const relayService = new ChromeRelayService(createDefaultChromeRelayServiceOptions(relayUserData));
   const relayServer = new ChromeRelayHttpServer(relayService);
+  const skipRelayBenchmark = async (reason: string) => {
+    await relayServer.stop().catch(() => {});
+    await new Promise<void>((resolve, reject) => {
+      pageServer.close((closeError) => {
+        if (closeError) {
+          reject(closeError);
+          return;
+        }
 
-  const relayStart = await measure(async () => relayServer.start());
+        resolve();
+      });
+    });
+    console.log(JSON.stringify({
+      ok: true,
+      skipped: true,
+      reason,
+    }, null, 2));
+  };
+  let relayStart: Awaited<ReturnType<typeof measure<string>>>;
+  try {
+    relayStart = await measure(async () => relayServer.start());
+  } catch (error) {
+    if (!isSkippableRelayLaunchError(error)) {
+      throw error;
+    }
+
+    await skipRelayBenchmark(error.message);
+    return;
+  }
   const relayBaseUrl = relayStart.result;
   const relayMeta = relayServer.getMeta();
 
@@ -169,113 +204,122 @@ async function main() {
   const desktopFetchTool = createWebFetchTool(desktopSession.id).web_fetch;
   const desktopSearchTool = createWebSearchTool(desktopSession.id).web_search;
 
-  const coldNavigate = await measure(async () => {
-    const payload = JSON.parse(await desktopBrowserTools.browser_navigate.execute({ url: formUrl })) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "desktop_chrome");
-    return payload;
-  });
-
-  const inputRef = coldNavigate.result.elements?.find((element) => element.tag === "input")?.ref;
-  const buttonRef = coldNavigate.result.elements?.find((element) => element.tag === "button")?.ref;
-  assert.ok(inputRef);
-  assert.ok(buttonRef);
-
-  const warmNavigate = await repeat(3, async () => {
-    const payload = JSON.parse(await desktopBrowserTools.browser_navigate.execute({ url: articleUrl })) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "desktop_chrome");
-    return payload;
-  });
-
-  const snapshotRuns = await repeat(3, async () => {
-    const payload = JSON.parse(await desktopBrowserTools.browser_snapshot.execute({})) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "desktop_chrome");
-    return payload;
-  });
-
-  await desktopBrowserTools.browser_navigate.execute({ url: formUrl });
-  const typeRuns = await repeat(3, async () => {
-    await desktopBrowserTools.browser_navigate.execute({ url: formUrl });
-    const payload = JSON.parse(await desktopBrowserTools.browser_type.execute({ ref: inputRef, text: "Aliceloop" })) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "desktop_chrome");
-    return payload;
-  });
-
-  const clickRuns = await repeat(3, async () => {
-    await desktopBrowserTools.browser_navigate.execute({ url: formUrl });
-    await desktopBrowserTools.browser_type.execute({ ref: inputRef, text: "Aliceloop" });
-    const payload = JSON.parse(await desktopBrowserTools.browser_click.execute({ ref: buttonRef, waitUntil: "load" })) as BrowserSnapshotPayload;
-    assert.equal(payload.backend, "desktop_chrome");
-    assert.match(payload.pageText ?? "", /Hello Aliceloop/);
-    return payload;
-  });
-
-  const screenshotRuns = await repeat(3, async () => {
-    const payload = JSON.parse(await desktopBrowserTools.browser_screenshot.execute({ fullPage: true })) as BrowserScreenshotPayload;
-    assert.equal(payload.backend, "desktop_chrome");
-    assert.ok(payload.path && existsSync(payload.path));
-    return payload;
-  });
-
-  const desktopFetchRuns = await repeat(3, async () => {
-    const output = await desktopFetchTool.execute({
-      url: articleUrl,
-      extractMain: true,
-      maxLength: 5000,
+  try {
+    const coldNavigate = await measure(async () => {
+      const payload = JSON.parse(await desktopBrowserTools.browser_navigate.execute({ url: formUrl })) as BrowserSnapshotPayload;
+      assert.equal(payload.backend, "desktop_chrome");
+      return payload;
     });
-    assert.match(output, /Fetch Backend: desktop_chrome/);
-    return output;
-  });
 
-  const desktopSearchRuns = await repeat(3, async () => {
-    const output = JSON.parse(await desktopSearchTool.execute({
-      query: "relay benchmark",
-      maxResults: 3,
-      domains: [],
-    })) as SearchPayload;
-    assert.equal(output.backend, "desktop_chrome");
-    return output;
-  });
+    const inputRef = coldNavigate.result.elements?.find((element) => element.tag === "input")?.ref;
+    const buttonRef = coldNavigate.result.elements?.find((element) => element.tag === "button")?.ref;
+    assert.ok(inputRef);
+    assert.ok(buttonRef);
 
-  heartbeatDevice({
-    deviceId: "desktop-relay-benchmark",
-    deviceType: "desktop",
-    label: "Aliceloop Desktop Benchmark",
-    sessionId: desktopSession.id,
-    capabilities: {
-      browserRelay: {
-        ...relayMeta!.browserRelay!,
-        healthy: false,
+    const warmNavigate = await repeat(3, async () => {
+      const payload = JSON.parse(await desktopBrowserTools.browser_navigate.execute({ url: articleUrl })) as BrowserSnapshotPayload;
+      assert.equal(payload.backend, "desktop_chrome");
+      return payload;
+    });
+
+    const snapshotRuns = await repeat(3, async () => {
+      const payload = JSON.parse(await desktopBrowserTools.browser_snapshot.execute({})) as BrowserSnapshotPayload;
+      assert.equal(payload.backend, "desktop_chrome");
+      return payload;
+    });
+
+    await desktopBrowserTools.browser_navigate.execute({ url: formUrl });
+    const typeRuns = await repeat(3, async () => {
+      await desktopBrowserTools.browser_navigate.execute({ url: formUrl });
+      const payload = JSON.parse(await desktopBrowserTools.browser_type.execute({ ref: inputRef, text: "Aliceloop" })) as BrowserSnapshotPayload;
+      assert.equal(payload.backend, "desktop_chrome");
+      return payload;
+    });
+
+    const clickRuns = await repeat(3, async () => {
+      await desktopBrowserTools.browser_navigate.execute({ url: formUrl });
+      await desktopBrowserTools.browser_type.execute({ ref: inputRef, text: "Aliceloop" });
+      const payload = JSON.parse(await desktopBrowserTools.browser_click.execute({ ref: buttonRef, waitUntil: "load" })) as BrowserSnapshotPayload;
+      assert.equal(payload.backend, "desktop_chrome");
+      assert.match(payload.pageText ?? "", /Hello Aliceloop/);
+      return payload;
+    });
+
+    const screenshotRuns = await repeat(3, async () => {
+      const payload = JSON.parse(await desktopBrowserTools.browser_screenshot.execute({ fullPage: true })) as BrowserScreenshotPayload;
+      assert.equal(payload.backend, "desktop_chrome");
+      assert.ok(payload.path && existsSync(payload.path));
+      return payload;
+    });
+
+    const desktopFetchRuns = await repeat(3, async () => {
+      const output = await desktopFetchTool.execute({
+        url: articleUrl,
+        extractMain: true,
+        maxLength: 5000,
+      });
+      assert.match(output, /Fetch Backend: desktop_chrome/);
+      return output;
+    });
+
+    const desktopSearchRuns = await repeat(3, async () => {
+      const output = JSON.parse(await desktopSearchTool.execute({
+        query: "relay benchmark",
+        maxResults: 3,
+        domains: [],
+      })) as SearchPayload;
+      assert.equal(output.backend, "desktop_chrome");
+      return output;
+    });
+
+    heartbeatDevice({
+      deviceId: "desktop-relay-benchmark",
+      deviceType: "desktop",
+      label: "Aliceloop Desktop Benchmark",
+      sessionId: desktopSession.id,
+      capabilities: {
+        browserRelay: {
+          ...relayMeta!.browserRelay!,
+          healthy: false,
+        },
       },
-    },
-  });
-
-  await relayServer.stop();
-  await new Promise<void>((resolve, reject) => {
-    pageServer.close((error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve();
     });
-  });
 
-  console.log(JSON.stringify({
-    ok: true,
-    relayStartMs: relayStart.durationMs,
-    desktopChrome: {
-      backend: "desktop_chrome",
-      browserNavigateColdMs: coldNavigate.durationMs,
-      browserNavigateWarm: warmNavigate.summary,
-      browserSnapshotWarm: snapshotRuns.summary,
-      browserTypeWarm: typeRuns.summary,
-      browserClickWarm: clickRuns.summary,
-      browserScreenshotWarm: screenshotRuns.summary,
-      webFetch: desktopFetchRuns.summary,
-      webSearch: desktopSearchRuns.summary,
-    },
-  }, null, 2));
+    await relayServer.stop();
+    await new Promise<void>((resolve, reject) => {
+      pageServer.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+    
+
+    console.log(JSON.stringify({
+      ok: true,
+      relayStartMs: relayStart.durationMs,
+      desktopChrome: {
+        backend: "desktop_chrome",
+        browserNavigateColdMs: coldNavigate.durationMs,
+        browserNavigateWarm: warmNavigate.summary,
+        browserSnapshotWarm: snapshotRuns.summary,
+        browserTypeWarm: typeRuns.summary,
+        browserClickWarm: clickRuns.summary,
+        browserScreenshotWarm: screenshotRuns.summary,
+        webFetch: desktopFetchRuns.summary,
+        webSearch: desktopSearchRuns.summary,
+      },
+    }, null, 2));
+  } catch (error) {
+    if (!isSkippableRelayLaunchError(error)) {
+      throw error;
+    }
+
+    await skipRelayBenchmark(error.message);
+  }
 }
 
 void main().catch((error) => {

@@ -9,6 +9,11 @@ import {
 } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
 import {
+  buildCompactionContextBlocks,
+  projectModelContext,
+  type CompactionLoadOptions,
+} from "./compact";
+import {
   buildSelectedSkillBodyBlock,
   buildSkillContextBlock,
   buildSkillDynamicOverlay,
@@ -73,6 +78,7 @@ interface LoadContextOptions {
   additionalStickySkillIds?: string[];
   additionalToolNames?: string[];
   additionalSelectedSkillIds?: string[];
+  compaction?: CompactionLoadOptions;
 }
 
 const PLAN_MODE_BLOCKED_BASH_COMMANDS = new Set([
@@ -173,10 +179,9 @@ function buildPlanModeReminder(sessionId: string, activePlanId: string | null) {
     "Read/search tools are available during planning: bash, read, glob, grep, web_search, web_fetch, view_image, and read-only browser/Chrome Relay inspection tools.",
     "Writable atomic tools and browser click/type actions are temporarily withheld for this turn.",
     "Do not implement changes, edit repository files, or execute write-oriented bash commands until plan mode is explicitly exited.",
-    "Use `ask_user_question` only when progress is genuinely blocked by a concrete user decision that you cannot safely infer.",
-    "Ask one structured clarification at a time. Do not dump multiple categories of questions into one assistant reply.",
-    "Keep the options short, concrete, and mutually exclusive; never turn speculative related-topic guesses into a multiple-choice prompt.",
-    "When requirements are still ambiguous and you are blocked, end the turn with `ask_user_question` and wait for the user's answer before continuing.",
+    "When requirements are still ambiguous and you are blocked, ask one concise clarification in normal assistant text and wait for the user's answer before continuing.",
+    "Ask only one blocking clarification at a time. If several product or architecture choices are unclear, choose the first decisive unknown, ask that one question, then ask the next question only after the user answers.",
+    "Do not bundle multiple dimensions into a large multi-option question card. Use normal assistant text for open-ended product choices; reserve structured quick replies for tiny binary confirmations.",
     "Keep clarifying requirements until the solution scope is concrete enough to execute confidently.",
     `When the plan is ready, call \`${WRITE_PLAN_ARTIFACT_TOOL_NAME}\` with a clear title, a short summary/goal, and at least two ordered implementation steps.`,
     `Keep using \`${WRITE_PLAN_ARTIFACT_TOOL_NAME}\` whenever the user asks to revise the plan. The plan artifact is the source of truth, not your freeform assistant prose.`,
@@ -439,6 +444,25 @@ export async function loadContext(
   const planArtifactBlock = buildPlanArtifactBlock(sessionId, planModeState.activePlanId, planModeState.active);
   timings.planArtifactChars = planArtifactBlock.length;
 
+  const projectedContextStartedAt = nowMs();
+  const projectedContext = await projectModelContext({
+    sessionId,
+    sessionContext,
+    abortSignal,
+    options: options?.compaction,
+  });
+  timings.compactionProjectionMs = roundMs(nowMs() - projectedContextStartedAt);
+  timings.compactionUsedCheckpoint = projectedContext.usedCheckpoint ? 1 : 0;
+  timings.compactionUsedSessionMemory = projectedContext.usedSessionMemory ? 1 : 0;
+  timings.compactionBoundaryKind = projectedContext.boundaryKind;
+  timings.compactionBoundaryMessageId = projectedContext.boundaryMessageId;
+  timings.compactionKeptRecentTurns = projectedContext.keptRecentTurnsCount;
+  timings.compactionHiddenTurns = projectedContext.hiddenTurnCount;
+  timings.compactionEstimatedTokens = projectedContext.timings.estimatedContextTokens ?? null;
+  timings.compactionCheckpointMs = projectedContext.timings.checkpointMs ?? null;
+  timings.compactionCheckpointIncremental = projectedContext.timings.checkpointIncremental ?? null;
+  timings.compactionSessionMemoryMs = projectedContext.timings.sessionMemoryMs ?? null;
+
   const userQuery = recentConversationFocus.effectiveUserQuery ?? latestUserQuery;
   timings.effectiveUserQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
   const sessionWorksetStateStartedAt = nowMs();
@@ -564,7 +588,7 @@ export async function loadContext(
     ? historicalContext.timings.skipReason
     : null;
 
-  const messages = sessionContext.messages;
+  const messages = projectedContext.messages;
   timings.messageCount = messages.length;
   timings.messageChars = roundMs(messages.reduce((sum, message) => {
     if (typeof message.content === "string") {
@@ -683,15 +707,21 @@ export async function loadContext(
     return undefined;
   })();
 
+  const compactionBlocks = buildCompactionContextBlocks({
+    boundaryBlock: projectedContext.boundaryBlock,
+    sessionFocus: sessionContext.sessionFocus,
+    sessionMemoryBlock: projectedContext.sessionMemoryBlock,
+    checkpointSummaryBlock: projectedContext.checkpointSummaryBlock,
+    recentToolActivity: sessionContext.recentToolActivity,
+    recentResearchMemory: sessionContext.recentResearchMemory,
+  });
+
   const dynamicBlocks = [
     planModeReminder,
     planArtifactBlock,
     sessionContext.activeTurn,
     sessionContext.latestTurn,
-    sessionContext.sessionFocus,
-    sessionContext.rollingSummary,
-    sessionContext.recentToolActivity,
-    sessionContext.recentResearchMemory,
+    ...compactionBlocks,
     profileFactMemory.content,
     historicalContext.content,
     skillDynamicOverlay,
@@ -766,7 +796,7 @@ let systemPrompt: AgentContext["systemPrompt"];
 
   return {
     systemPrompt,
-    messages,
+    messages: projectedContext.messages,
     tools,
     firstStepToolChoice: initialToolChoice,
     safetyConfig: {

@@ -20,6 +20,10 @@ function needsDeepResearchFollowup(query: string) {
   return DEEP_RESEARCH_FOLLOWUP_PATTERN.test(query);
 }
 
+function needsAgentDelegation(query: string) {
+  return /子代理|子agent|sub-?agent|委派|派个?|delegat|background agent|后台.*(?:agent|代理|任务)|并行.*(?:研究|处理|检查|实现)|多代理|agent swarm|蜂群/iu.test(query);
+}
+
 export function routeToolNamesForTurn(
   query: string | null | undefined,
   hints?: SkillRouteHints,
@@ -60,6 +64,10 @@ export function routeToolNamesForTurn(
 
   if (needsReviewCoach(normalizedQuery)) {
     toolNames.add("review_coach");
+  }
+
+  if (needsAgentDelegation(normalizedQuery)) {
+    toolNames.add("agent");
   }
 
   if (

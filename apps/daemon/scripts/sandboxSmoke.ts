@@ -265,6 +265,12 @@ async function main() {
   const originalPath = process.env.PATH;
   process.env.PATH = "";
   try {
+    const lsNoPathResult = await sandbox.runBash({
+      command: "ls",
+      cwd: tempDataDir,
+    });
+    assert(lsNoPathResult.stdout.includes("runtime-check.ts"), "sandbox should resolve system commands with PATH fallback");
+
     const tsxResult = await sandbox.runBash({
       command: "tsx",
       args: [runtimeScriptPath],

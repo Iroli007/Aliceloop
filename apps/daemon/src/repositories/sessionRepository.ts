@@ -13,6 +13,7 @@ import {
   type ProjectDirectoryKind,
   type RuntimePresence,
   type Session,
+  type SessionCompactionState,
   type SessionEvent,
   type SessionFocusState,
   type SessionRollingSummary,
@@ -85,6 +86,15 @@ interface SessionRollingSummaryRow {
   remainingJson: string;
   decisionsJson: string;
   summarizedTurnCount: number;
+  updatedAt: string;
+}
+
+interface SessionCompactionStateRow {
+  sessionId: string;
+  checkpointSummary: string;
+  compactedTurnCount: number;
+  lastCompactedMessageId: string | null;
+  consecutiveFailures: number;
   updatedAt: string;
 }
 
@@ -245,6 +255,13 @@ interface UpdateSessionRollingSummaryInput {
   summarizedTurnCount?: number;
 }
 
+interface UpdateSessionCompactionStateInput {
+  checkpointSummary?: string | null;
+  compactedTurnCount?: number;
+  lastCompactedMessageId?: string | null;
+  consecutiveFailures?: number;
+}
+
 function summarizeMessagePreview(content: string | null) {
   if (!content) {
     return null;
@@ -314,6 +331,17 @@ function createEmptySessionRollingSummary(sessionId: string): SessionRollingSumm
   };
 }
 
+function createEmptySessionCompactionState(sessionId: string): SessionCompactionState {
+  return {
+    sessionId,
+    checkpointSummary: "",
+    compactedTurnCount: 0,
+    lastCompactedMessageId: null,
+    consecutiveFailures: 0,
+    updatedAt: null,
+  };
+}
+
 function createInactivePlanModeState(sessionId: string): SessionPlanModeState {
   return {
     sessionId,
@@ -346,6 +374,17 @@ function mapSessionRollingSummaryRow(row: SessionRollingSummaryRow): SessionRoll
     remaining: parseJsonStringArray(row.remainingJson),
     decisions: parseJsonStringArray(row.decisionsJson),
     summarizedTurnCount: Math.max(0, Math.trunc(row.summarizedTurnCount ?? 0)),
+    updatedAt: row.updatedAt,
+  };
+}
+
+function mapSessionCompactionStateRow(row: SessionCompactionStateRow): SessionCompactionState {
+  return {
+    sessionId: row.sessionId,
+    checkpointSummary: normalizeFocusText(row.checkpointSummary),
+    compactedTurnCount: Math.max(0, Math.trunc(row.compactedTurnCount ?? 0)),
+    lastCompactedMessageId: row.lastCompactedMessageId?.trim() || null,
+    consecutiveFailures: Math.max(0, Math.trunc(row.consecutiveFailures ?? 0)),
     updatedAt: row.updatedAt,
   };
 }
@@ -920,6 +959,29 @@ function readSessionRollingSummaryRow(
   return row ? mapSessionRollingSummaryRow(row) : createEmptySessionRollingSummary(sessionId);
 }
 
+function readSessionCompactionStateRow(
+  sessionId: string,
+  db: Database.Database = getDatabase(),
+) {
+  const row = db
+    .prepare(
+      `
+        SELECT
+          session_id AS sessionId,
+          checkpoint_summary AS checkpointSummary,
+          compacted_turn_count AS compactedTurnCount,
+          last_compacted_message_id AS lastCompactedMessageId,
+          consecutive_failures AS consecutiveFailures,
+          updated_at AS updatedAt
+        FROM session_compaction_state
+        WHERE session_id = ?
+      `,
+    )
+    .get(sessionId) as SessionCompactionStateRow | undefined;
+
+  return row ? mapSessionCompactionStateRow(row) : createEmptySessionCompactionState(sessionId);
+}
+
 export function hasSession(sessionId: string) {
   return Boolean(getSessionRow(sessionId));
 }
@@ -957,6 +1019,10 @@ export function getSessionFocusState(sessionId: string) {
 
 export function getSessionRollingSummary(sessionId: string) {
   return readSessionRollingSummaryRow(sessionId);
+}
+
+export function getSessionCompactionState(sessionId: string) {
+  return readSessionCompactionStateRow(sessionId);
 }
 
 export function updateSessionWorksetState(sessionId: string, state: SessionWorksetState) {
@@ -1095,6 +1161,65 @@ export function updateSessionRollingSummary(sessionId: string, input: UpdateSess
   })();
 
   return readSessionRollingSummaryRow(sessionId, db);
+}
+
+export function updateSessionCompactionState(sessionId: string, input: UpdateSessionCompactionStateInput) {
+  const db = getDatabase();
+  const current = readSessionCompactionStateRow(sessionId, db);
+  const nextState: SessionCompactionState = {
+    sessionId,
+    checkpointSummary: input.checkpointSummary !== undefined
+      ? normalizeFocusText(input.checkpointSummary)
+      : current.checkpointSummary,
+    compactedTurnCount: input.compactedTurnCount !== undefined
+      ? Math.max(0, Math.trunc(input.compactedTurnCount))
+      : current.compactedTurnCount,
+    lastCompactedMessageId: input.lastCompactedMessageId !== undefined
+      ? (input.lastCompactedMessageId?.trim() || null)
+      : current.lastCompactedMessageId,
+    consecutiveFailures: input.consecutiveFailures !== undefined
+      ? Math.max(0, Math.trunc(input.consecutiveFailures))
+      : current.consecutiveFailures,
+    updatedAt: new Date().toISOString(),
+  };
+
+  db.transaction(() => {
+    db.prepare(
+      `
+        INSERT INTO session_compaction_state (
+          session_id,
+          checkpoint_summary,
+          compacted_turn_count,
+          last_compacted_message_id,
+          consecutive_failures,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          checkpoint_summary = excluded.checkpoint_summary,
+          compacted_turn_count = excluded.compacted_turn_count,
+          last_compacted_message_id = excluded.last_compacted_message_id,
+          consecutive_failures = excluded.consecutive_failures,
+          updated_at = excluded.updated_at
+      `,
+    ).run(
+      nextState.sessionId,
+      nextState.checkpointSummary,
+      nextState.compactedTurnCount,
+      nextState.lastCompactedMessageId,
+      nextState.consecutiveFailures,
+      nextState.updatedAt,
+    );
+
+    db.prepare(
+      `
+        UPDATE sessions
+        SET updated_at = ?
+        WHERE id = ?
+      `,
+    ).run(nextState.updatedAt, sessionId);
+  })();
+
+  return readSessionCompactionStateRow(sessionId, db);
 }
 
 function countMessagesForSession(sessionId: string) {
@@ -2038,6 +2163,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
   const project = getSessionProjectBinding(sessionId);
   const focusState = readSessionFocusStateRow(sessionId);
   const rollingSummary = readSessionRollingSummaryRow(sessionId);
+  const compactionState = readSessionCompactionStateRow(sessionId);
   const planMode = getSessionPlanModeState(sessionId);
   const attachments = listAttachments(sessionId);
   const messages = listMessages(sessionId, attachments);
@@ -2064,6 +2190,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     project,
     focusState,
     rollingSummary,
+    compactionState,
     messages,
     attachments,
     pendingToolApprovals: listPendingToolApprovals(sessionId),

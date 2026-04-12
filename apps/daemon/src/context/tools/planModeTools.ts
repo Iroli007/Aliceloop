@@ -9,7 +9,6 @@ import {
   touchSessionPlanModeUpdatedAt,
 } from "../../repositories/sessionPlanModeRepository";
 import { approvePlan, getPlan, updatePlan } from "../../repositories/planRepository";
-import { createTrackedTask, listTaskRuns, updateTrackedTask } from "../../repositories/taskRunRepository";
 import { STABLE_TOOL_PROVIDER_OPTIONS } from "./toolProviderOptions";
 
 export const ENTER_PLAN_MODE_TOOL_NAME = "enter_plan_mode";
@@ -27,42 +26,6 @@ function hasConcretePlanArtifact(planId: string | null) {
   }
 
   return Boolean(plan.goal.trim()) && plan.steps.length >= 2;
-}
-
-function syncExecutionTaskFromPlan(sessionId: string, planId: string | null) {
-  if (!planId) {
-    return null;
-  }
-
-  const plan = getPlan(planId);
-  if (!plan || !plan.goal.trim() || plan.steps.length < 2) {
-    return null;
-  }
-
-  const existing = listTaskRuns({
-    sessionId,
-    taskType: "tracked-task",
-    limit: 20,
-  }).find((task) => {
-    return task.status !== "done" && task.status !== "failed";
-  });
-
-  if (existing) {
-    return updateTrackedTask({
-      taskId: existing.id,
-      title: plan.title.trim() || existing.title,
-      detail: plan.goal.trim(),
-      steps: plan.steps,
-      status: existing.status === "queued" ? "queued" : "running",
-    });
-  }
-
-  return createTrackedTask({
-    sessionId,
-    title: plan.title.trim() || "Execution plan",
-    detail: plan.goal.trim(),
-    steps: plan.steps,
-  });
 }
 
 export function createPlanModeToolSet(sessionId: string, planModeActive: boolean): ToolSet {
@@ -199,11 +162,9 @@ export function createPlanModeToolSet(sessionId: string, planModeActive: boolean
 
         approvePlan(activePlanId);
         const planMode = exitSessionPlanMode(sessionId);
-        const executionTask = syncExecutionTaskFromPlan(sessionId, activePlanId);
         const event = appendSessionEvent(sessionId, "plan_mode.updated", {
           planMode,
           transition: "exited",
-          taskId: executionTask?.id ?? null,
         });
         publishSessionEvent(event);
 
@@ -211,7 +172,6 @@ export function createPlanModeToolSet(sessionId: string, planModeActive: boolean
           kind: EXIT_PLAN_MODE_TOOL_NAME,
           status: "exited",
           planMode,
-          taskId: executionTask?.id ?? null,
         });
       },
     });

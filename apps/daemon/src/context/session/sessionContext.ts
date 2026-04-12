@@ -249,6 +249,17 @@ function isContinuationLikeMessage(content: string) {
   return /^(?:你查|你搜|查一下|搜一下|再查|再搜)(?:\s*)(?:这个|这个人|这个号|这个账号|这个页面|这个网站|这个链接|这条|这篇|这份|那|那个|那人|那条|那篇|那份|它|他|她|ta|TA|上面|前面|之前|刚才|同一个|同一)/u.test(trimmed);
 }
 
+function isResearchClarificationAnswer(content: string, previousAssistant: SessionMessage | null) {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.length > 80 || !previousAssistant) {
+    return false;
+  }
+
+  const previous = serializeMessageContent(previousAssistant);
+  return /你想了解的是哪一个|你想了解哪一个|具体是哪一个|具体是哪种|如果是.*(?:我可以|可以帮你).*(?:搜索|查|了解)/u.test(previous)
+    && /搜索|查|了解|相关信息|更多/u.test(previous);
+}
+
 function needsResearchContinuation(messageText: string) {
   return /查|搜|搜索|核对|验证|确认|平台|官网|B站|微博|粉丝|播放|数据|时间|日期|几月几日|最新|当前|\d{1,2}月\d{1,2}日/u.test(messageText);
 }
@@ -373,7 +384,7 @@ function buildEffectiveUserQuery(input: {
   }
 
   if (input.researchContinuation && input.carryForwardFacts) {
-    return trimInline(input.carryForwardFacts, 320);
+    return trimInline([input.carryForwardFacts, input.latestContent].filter(Boolean).join(" / "), 320);
   }
 
   const merged = [
@@ -457,6 +468,7 @@ interface SessionContextFragmentTimings {
 }
 
 export interface SessionContextFragments {
+  snapshot: SessionSnapshot;
   latestUserQuery: string | null;
   projectBinding: SessionProjectBinding | null;
   attachmentRoots: SessionAttachmentSandboxRoots;
@@ -606,8 +618,11 @@ function serializeMessageContent(message: SessionMessage): string {
   return parts.join("\n\n");
 }
 
-function buildSessionMessagesFromSnapshot(snapshot: SessionSnapshot): ModelMessage[] {
-  const messages = listRecentTurnMessages(snapshot.messages);
+export function buildSessionMessagesFromSnapshot(
+  snapshot: SessionSnapshot,
+  recentTurnsCount?: number,
+): ModelMessage[] {
+  const messages = listRecentTurnMessages(snapshot.messages, recentTurnsCount);
 
   return messages.map(sessionMessageToCore);
 }
@@ -754,7 +769,7 @@ function buildSessionFocusBlock(focusState: SessionFocusState): string {
   return lines.join("\n");
 }
 
-function buildRollingSummaryBlock(rollingSummary: SessionRollingSummary): string {
+export function buildRollingSummaryBlock(rollingSummary: SessionRollingSummary): string {
   if (
     !rollingSummary.currentPhase
     && !rollingSummary.summary
@@ -833,7 +848,9 @@ function buildRecentConversationFocusFromSnapshot(
     };
   }
 
-  const continuationLike = isContinuationLikeMessage(latestContent);
+  const previousAssistant = getLatestAssistantBeforeLastUser(recentMessages);
+  const continuationLike = isContinuationLikeMessage(latestContent)
+    || isResearchClarificationAnswer(latestContent, previousAssistant);
   const anchors = listSubstantialUserAnchors(recentMessages);
   const latestExplicitAnchor = anchors.at(-1) ?? null;
   const originalTopicAnchor = anchors[0] && anchors[0] !== latestExplicitAnchor ? anchors[0] : null;
@@ -1292,6 +1309,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const messagesMs = roundMs(nowMs() - messagesStartedAt);
 
   return {
+    snapshot,
     latestUserQuery,
     projectBinding,
     attachmentRoots,

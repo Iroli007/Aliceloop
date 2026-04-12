@@ -16,11 +16,17 @@ async function main() {
     { createAttachment, createSession, upsertSessionJob },
     { getShellOverview },
     { getTaskRun, listTaskRuns },
+    { createPlan },
+    { enterSessionPlanMode },
+    { createPlanModeToolSet },
     { runManagedTask },
   ] = await Promise.all([
     import("../src/repositories/sessionRepository.ts"),
     import("../src/repositories/overviewRepository.ts"),
     import("../src/repositories/taskRunRepository.ts"),
+    import("../src/repositories/planRepository.ts"),
+    import("../src/repositories/sessionPlanModeRepository.ts"),
+    import("../src/context/tools/planModeTools.ts"),
     import("../src/services/taskRunner.ts"),
   ]);
 
@@ -117,6 +123,21 @@ async function main() {
     args: [join(workspaceRoot, "missing-script.js")],
     cwd: workspaceRoot,
   });
+  const planOnlySession = createSession("计划不是任务");
+  const planOnly = createPlan({
+    sessionId: planOnlySession.id,
+    title: "PyQt6 可爱桌宠开发计划",
+    goal: "规划桌宠开发，不自动创建全局任务。",
+    steps: ["梳理范围", "确认 UI", "再执行"],
+  });
+  enterSessionPlanMode({ sessionId: planOnlySession.id, planId: planOnly.id });
+  const planTools = createPlanModeToolSet(planOnlySession.id, true);
+  const exitPlanOutput = JSON.parse(await planTools.exit_plan_mode.execute({})) as { status: string; taskId?: string | null };
+  const planSyncedTasks = listTaskRuns({
+    sessionId: planOnlySession.id,
+    taskType: "tracked-task",
+    limit: 20,
+  });
   const refreshedTaskList = listTaskRuns({ limit: 20 });
 
   assert(studyTask, "study-artifact task should exist");
@@ -141,6 +162,9 @@ async function main() {
   assert(localScript.task.detail.includes("task-runner-ok"), "script-runner should capture stdout");
   assert.equal(failingScript.task.taskType, "script-runner");
   assert.equal(failingScript.task.status, "failed");
+  assert.equal(exitPlanOutput.status, "exited", "plan mode should exit cleanly");
+  assert.equal("taskId" in exitPlanOutput, false, "exiting plan mode should not return a synced task id");
+  assert.equal(planSyncedTasks.length, 0, "plan mode should not mirror plans into tracked tasks");
   assert(refreshedTaskList.some((task) => task.id === documentIngest.task.id), "task list should include document-ingest task");
   assert(refreshedTaskList.some((task) => task.id === reviewCoach.task.id), "task list should include review-coach task");
   assert(refreshedTaskList.some((task) => task.id === localScript.task.id), "task list should include script-runner task");

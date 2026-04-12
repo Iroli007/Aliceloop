@@ -48,6 +48,15 @@ const daemonDistCliPath = daemonDistRoot ? resolve(daemonDistRoot, "cli/index.js
 const daemonSourceCliPath = resolve(daemonPackageRoot, "src/cli/index.ts");
 const runtimeBinDir = resolve(getDataDir(), "runtime-bin");
 const aliceloopShimPath = resolve(runtimeBinDir, "aliceloop");
+const defaultExecutionPath = [
+  dirname(process.execPath),
+  "/opt/homebrew/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin",
+].join(":");
 
 type HostRuntimeRunInput = {
   primitive: "read" | "write" | "edit" | "delete" | "bash";
@@ -87,10 +96,12 @@ function pickEnvironment() {
     }
   }
 
+  const currentPath = env.PATH?.trim();
+  env.PATH = currentPath ? `${currentPath}:${defaultExecutionPath}` : defaultExecutionPath;
+
   const shimDir = ensureAliceloopCliShimDir();
   if (shimDir) {
-    const currentPath = env.PATH?.trim();
-    env.PATH = currentPath ? `${shimDir}:${currentPath}` : shimDir;
+    env.PATH = `${shimDir}:${env.PATH}`;
   }
 
   if (process.versions.electron && !env.ELECTRON_RUN_AS_NODE) {

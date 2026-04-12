@@ -277,7 +277,6 @@ export interface SessionEvent<TPayload = Record<string, unknown>> {
 export interface TaskNotification {
   id: string;
   taskId: string;
-  mode: "fork" | "subagent";
   role: string | null;
   status: "completed" | "failed";
   title: string;
@@ -742,12 +741,22 @@ export interface SessionRollingSummary {
   updatedAt: string | null;
 }
 
+export interface SessionCompactionState {
+  sessionId: string;
+  checkpointSummary: string;
+  compactedTurnCount: number;
+  lastCompactedMessageId: string | null;
+  consecutiveFailures: number;
+  updatedAt: string | null;
+}
+
 export interface SessionSnapshot {
   session: Session;
   project: SessionProjectBinding | null;
   planMode: SessionPlanModeState;
   focusState: SessionFocusState;
   rollingSummary: SessionRollingSummary;
+  compactionState: SessionCompactionState;
   messages: SessionMessage[];
   attachments: Attachment[];
   pendingToolApprovals: ToolApproval[];

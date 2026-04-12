@@ -496,6 +496,10 @@ async function main() {
     assert.equal(taskList.code, 0, "tasks list should succeed");
     assert(taskList.stdout.includes(addedTask.id), "tasks list should include the tracked task");
 
+    const activeTaskList = await capture(["tasks", "list", "active"]);
+    assert.equal(activeTaskList.code, 0, "tasks list active should succeed");
+    assert(activeTaskList.stdout.includes(addedTask.id), "tasks list active should include queued or running tracked tasks");
+
     const taskDone = await capture(["tasks", "done", addedTask.id]);
     assert.equal(taskDone.code, 0, "tasks done should succeed");
     assert(taskDone.stdout.includes("\"status\": \"done\""), "tasks done should mark the task done");

@@ -139,6 +139,14 @@ export const previewSessionSnapshot: SessionSnapshot = {
     summarizedTurnCount: 1,
     updatedAt: "2026-03-17T07:27:00.000Z",
   },
+  compactionState: {
+    sessionId: primarySessionId,
+    checkpointSummary: "",
+    compactedTurnCount: 0,
+    lastCompactedMessageId: null,
+    consecutiveFailures: 0,
+    updatedAt: null,
+  },
   messages: [
     {
       id: "message-1",

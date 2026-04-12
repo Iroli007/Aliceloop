@@ -14,6 +14,7 @@ import {
   type LibraryItem,
   type Session,
   type SessionEvent,
+  type SessionCompactionState,
   type SessionFocusState,
   type SessionRollingSummary,
   type SessionMessage,
@@ -382,6 +383,25 @@ function seedSessionRollingSummary(db: Database.Database, rollingSummary: Sessio
   });
 }
 
+function seedSessionCompactionState(db: Database.Database, compactionState: SessionCompactionState) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO session_compaction_state (
+        session_id, checkpoint_summary, compacted_turn_count, last_compacted_message_id, consecutive_failures, updated_at
+      ) VALUES (
+        @sessionId, @checkpointSummary, @compactedTurnCount, @lastCompactedMessageId, @consecutiveFailures, @updatedAt
+      )
+    `,
+  ).run({
+    sessionId: compactionState.sessionId,
+    checkpointSummary: compactionState.checkpointSummary,
+    compactedTurnCount: compactionState.compactedTurnCount,
+    lastCompactedMessageId: compactionState.lastCompactedMessageId,
+    consecutiveFailures: compactionState.consecutiveFailures,
+    updatedAt: compactionState.updatedAt ?? new Date().toISOString(),
+  });
+}
+
 function seedAttachment(db: Database.Database, attachment: SessionMessage["attachments"][number]) {
   db.prepare(
     `
@@ -524,6 +544,7 @@ function seedSessionData(db: Database.Database) {
   seedSession(db, previewSessionSnapshot.session);
   seedSessionFocusState(db, previewSessionSnapshot.focusState);
   seedSessionRollingSummary(db, previewSessionSnapshot.rollingSummary);
+  seedSessionCompactionState(db, previewSessionSnapshot.compactionState);
 
   for (const attachment of previewSessionSnapshot.attachments) {
     seedAttachment(db, attachment);
@@ -642,6 +663,19 @@ function runMigrations(db: Database.Database) {
         remaining_json TEXT NOT NULL DEFAULT '[]',
         decisions_json TEXT NOT NULL DEFAULT '[]',
         summarized_turn_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      )
+    `,
+  );
+  db.exec(
+    `
+      CREATE TABLE IF NOT EXISTS session_compaction_state (
+        session_id TEXT PRIMARY KEY,
+        checkpoint_summary TEXT NOT NULL DEFAULT '',
+        compacted_turn_count INTEGER NOT NULL DEFAULT 0,
+        last_compacted_message_id TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       )

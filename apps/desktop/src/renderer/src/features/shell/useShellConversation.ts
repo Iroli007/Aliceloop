@@ -1698,7 +1698,9 @@ export function useShellConversation(): ShellConversationState {
   const latestReply = [...snapshot.messages].reverse().find((message) => message.role !== "user") ?? null;
   const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
   const latestArtifact = snapshot.artifacts[0] ?? null;
-  const pendingQuestionApprovals = snapshot.pendingToolApprovals.filter(isQuestionApproval);
+  const pendingQuestionApprovals = snapshot.planMode.active
+    ? snapshot.pendingToolApprovals.filter(isQuestionApproval)
+    : [];
   const pendingCommandApprovals = snapshot.pendingToolApprovals.filter((approval) => !isQuestionApproval(approval));
   const isAwaitingToolApproval = pendingCommandApprovals.length > 0;
   const isAwaitingUserQuestion = pendingQuestionApprovals.length > 0;

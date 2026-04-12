@@ -10,7 +10,9 @@ import {
   needsBrowserAutomation,
   needsFileManagement,
   needsSystemInfo,
+  needsTaskTracking,
   needsThreadManagement,
+  needsTodoChecklist,
 } from "./skillRouting";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -128,7 +130,6 @@ const SEARCH_SYNONYM_PATTERNS: Array<[RegExp, string]> = [
   [/(?:待办)/giu, " todo checklist "],
   [/(?:任务追踪|任务跟踪|任务列表|任务进度|多步骤任务|长期任务|列一下任务|有哪些任务|查看任务|任务拆成步骤|列步骤)/giu, " tasks task tracking progress list steps "],
   [/(?:计划|规划)/giu, " plan planning "],
-  [/(?:定时|提醒|cron)/giu, " schedule scheduler reminder cron "],
   [/(?:能力|技能|工具)/giu, " skill capability tool "],
   [/(?:browser_click|browser_open|browser_type|browser relay)/giu, " browser capability tool "],
   [/(?:推特)/giu, " twitter "],
@@ -399,14 +400,6 @@ function scoreSkillMatch(
   }
 
   return score;
-}
-
-function needsSchedulerIntent(query: string) {
-  return /提醒|定时|cron|schedule|scheduler|稍后|晚点|明天|后天|每周|每天|每月|follow[- ]?up|到点|定期|周期/u.test(query);
-}
-
-function needsNotebookIntent(query: string) {
-  return /notebook|ipynb|jupyter|单元格|cell|笔记本/u.test(query);
 }
 
 function parseSkillFrontmatter(source: string, sourcePath: string): ParsedFrontmatter {
@@ -723,20 +716,24 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
     return limitedSelections.filter((id) => id !== "system-info");
   }
 
-  if (limitedSelections.includes("thread-management") && limitedSelections.includes("scheduler") && !needsSchedulerIntent(normalizedQuery)) {
-    return limitedSelections.filter((id) => id !== "scheduler");
+  if (limitedSelections.includes("tasks") && limitedSelections.includes("todo")) {
+    if (needsTaskTracking(normalizedQuery) && !needsTodoChecklist(normalizedQuery)) {
+      return limitedSelections.filter((id) => id !== "todo");
+    }
+
+    if (needsTodoChecklist(normalizedQuery) && !needsTaskTracking(normalizedQuery)) {
+      return limitedSelections.filter((id) => id !== "tasks");
+    }
   }
 
-  if (limitedSelections.includes("thread-management") && limitedSelections.includes("notebook") && !needsNotebookIntent(normalizedQuery)) {
-    return limitedSelections.filter((id) => id !== "notebook");
-  }
+  if (limitedSelections.includes("thread-management") && limitedSelections.includes("tasks")) {
+    if (needsThreadManagement(normalizedQuery) && !needsTaskTracking(normalizedQuery)) {
+      return limitedSelections.filter((id) => id !== "tasks");
+    }
 
-  if (limitedSelections.includes("scheduler") && needsThreadManagement(normalizedQuery) && !needsSchedulerIntent(normalizedQuery)) {
-    return limitedSelections.filter((id) => id !== "scheduler");
-  }
-
-  if (limitedSelections.includes("notebook") && needsThreadManagement(normalizedQuery) && !needsNotebookIntent(normalizedQuery)) {
-    return limitedSelections.filter((id) => id !== "notebook");
+    if (needsTaskTracking(normalizedQuery) && !needsThreadManagement(normalizedQuery)) {
+      return limitedSelections.filter((id) => id !== "thread-management");
+    }
   }
 
   if (limitedSelections.includes("send-file") && limitedSelections.includes("music-listener") && !needsAudioAnalysis(normalizedQuery)) {
@@ -800,7 +797,7 @@ function getStaticSkillCatalogBlockState() {
     "Do not call `skill-hub` or `skill-search` just to inspect this catalog.",
     "Do not emit raw `<skill>...</skill>` tags in the reply.",
     "Skills usually work through bash, read, and write. A small set of native exceptions such as web_search, web_fetch, and view_image may appear only when the selected skill truly needs them.",
-    "Capability judgment examples: website or platform interaction -> browser; exact page/original article/docs reading -> web-fetch; general current-info lookup -> web-search; sending a local file/photo into the conversation -> send-file; generating a new image/poster/avatar -> image-gen; managing threads/sessions -> thread-management; asking what skills/capabilities exist -> skill-hub or skill-search.",
+    "Capability judgment examples: website or platform interaction -> browser; exact page/original article/docs reading -> web-fetch; general current-info lookup -> web-search; global tracked task status/progress/listing -> tasks; lightweight per-thread checklist -> todo; managing threads/sessions -> thread-management; sending a local file/photo into the conversation -> send-file; generating a new image/poster/avatar -> image-gen; isolated parallel sub-work -> native agent; asking what skills/capabilities exist -> skill-hub or skill-search.",
     "Decision boundary: for shopping-site price checks, product lookup, and other factual reading tasks, prefer web-search / web-fetch first. Use browser only when the task truly needs interaction such as login, clicking, filling forms, captcha handling, or working with an existing visible tab.",
     "",
     "Available skills:",
