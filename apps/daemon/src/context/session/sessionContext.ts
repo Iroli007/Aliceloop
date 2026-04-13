@@ -3,6 +3,7 @@ import { extname, join } from "node:path";
 import type { ModelMessage } from "ai";
 import type { SessionEvent } from "@aliceloop/runtime-core";
 import type { SessionFocusState } from "@aliceloop/runtime-core";
+import type { SessionMemoryState } from "@aliceloop/runtime-core";
 import type { SessionMessage } from "@aliceloop/runtime-core";
 import type { SessionRollingSummary } from "@aliceloop/runtime-core";
 import type { SessionSnapshot } from "@aliceloop/runtime-core";
@@ -203,6 +204,61 @@ function trimInline(value: string, maxChars: number) {
   }
 
   return `${normalized.slice(0, maxChars).trimEnd()}…`;
+}
+
+function escapeXmlish(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function stringifyToolValue(value: unknown, maxChars: number) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return escapeXmlish(trimInline(value, maxChars));
+  }
+
+  try {
+    return escapeXmlish(trimInline(JSON.stringify(value), maxChars));
+  } catch {
+    return escapeXmlish(trimInline(String(value), maxChars));
+  }
+}
+
+function buildToolTraceMergeKey(trace: RecentToolTrace) {
+  const normalizedInput = trace.inputPreview
+    ? trimInline(trace.inputPreview, 140)
+    : stringifyToolValue(trace.stateInput, 140);
+  return `${trace.toolName}::${normalizedInput || "(empty)"}`;
+}
+
+function toolTraceStatusRank(trace: RecentToolTrace) {
+  if (trace.success === true) {
+    return 3;
+  }
+  if (trace.success === false || trace.stateStatus === "output-error" || trace.stateStatus === "permission-denied") {
+    return 1;
+  }
+  return 2;
+}
+
+function compactToolTranscriptField(input: {
+  value: string;
+  maxChars: number;
+  marker: string;
+}) {
+  const normalized = input.value.trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= input.maxChars) {
+    return normalized;
+  }
+  return `${input.marker} ${normalized.slice(0, input.maxChars).trimEnd()}…`;
 }
 
 function splitLatestMessageAnchorLines(content: string) {
@@ -425,6 +481,7 @@ interface RecentToolTrace {
   stateOutput: unknown | null;
   stateError: string | null;
   createdAt: string;
+  attemptCount: number;
 }
 
 interface RecentResearchSource {
@@ -462,6 +519,7 @@ interface SessionContextFragmentTimings {
   activeTurnMs: number;
   latestTurnMs: number;
   recentToolActivityMs: number;
+  recentToolTranscriptMs: number;
   messagesMs: number;
   totalMs: number;
   snapshotReads: number;
@@ -477,6 +535,7 @@ export interface SessionContextFragments {
   recentConversationFocus: RecentConversationFocus;
   recentResearchMemory: string;
   recentToolActivity: string;
+  recentToolTranscript: string;
   activeTurn: string;
   latestTurn: string;
   messages: ModelMessage[];
@@ -736,6 +795,7 @@ function buildSessionFocusBlock(focusState: SessionFocusState): string {
   const lines = [
     "## Session Focus",
     "- Treat this as the persistent focus state for the current session unless the latest user message clearly replaces it.",
+    "- Treat this as the live task card for the current thread. If it conflicts with archived summaries or checkpoints, prefer the latest user message first, then this focus block.",
     "- Keep tool choices and replies aligned with the goal, constraints, priorities, and next step below.",
     "",
     "<session_focus>",
@@ -783,6 +843,7 @@ export function buildRollingSummaryBlock(rollingSummary: SessionRollingSummary):
   const lines = [
     "## Rolling Summary",
     "- Treat this as the archived summary for earlier turns that are no longer present as raw messages.",
+    "- This is historical memory, not a fresh user turn and not a replacement for the current focus block.",
     "- Reuse the completed work, remaining work, and locked-in decisions below instead of restarting the thread from zero.",
     "",
     "<rolling_summary>",
@@ -810,6 +871,51 @@ export function buildRollingSummaryBlock(rollingSummary: SessionRollingSummary):
 
   lines.push(`- Archived turns covered: ${rollingSummary.summarizedTurnCount}`);
   lines.push("</rolling_summary>");
+  return lines.join("\n");
+}
+
+export function buildSessionMemoryBlock(sessionMemory: SessionMemoryState): string {
+  if (
+    !sessionMemory.currentPhase
+    && !sessionMemory.summary
+    && sessionMemory.completed.length === 0
+    && sessionMemory.remaining.length === 0
+    && sessionMemory.decisions.length === 0
+  ) {
+    return "";
+  }
+
+  const lines = [
+    "## Session Memory",
+    "- Treat this as the persistent working memory distilled from earlier turns in the thread.",
+    "- This is historical memory, not a fresh user turn and not a replacement for the current focus block.",
+    "- Reuse the completed work, remaining work, and locked-in decisions below instead of re-deriving them from zero.",
+    "",
+    "<session_memory>",
+  ];
+
+  if (sessionMemory.currentPhase) {
+    lines.push(`- Current phase: ${sessionMemory.currentPhase}`);
+  }
+
+  if (sessionMemory.summary) {
+    lines.push(`- Summary: ${sessionMemory.summary}`);
+  }
+
+  if (sessionMemory.completed.length > 0) {
+    lines.push(`- Completed: ${sessionMemory.completed.join(" | ")}`);
+  }
+
+  if (sessionMemory.remaining.length > 0) {
+    lines.push(`- Remaining: ${sessionMemory.remaining.join(" | ")}`);
+  }
+
+  if (sessionMemory.decisions.length > 0) {
+    lines.push(`- Decisions: ${sessionMemory.decisions.join(" | ")}`);
+  }
+
+  lines.push(`- Remembered turns covered: ${sessionMemory.rememberedTurnCount}`);
+  lines.push("</session_memory>");
   return lines.join("\n");
 }
 
@@ -944,6 +1050,7 @@ function extractRecentToolTracesFromSnapshot(sessionId: string, snapshot: Sessio
       stateOutput: null,
       stateError: null,
       createdAt: event.createdAt,
+      attemptCount: 1,
     };
 
     if (typeof payload.backend === "string") {
@@ -979,9 +1086,51 @@ function extractRecentToolTracesFromSnapshot(sessionId: string, snapshot: Sessio
     traces.set(toolCallId, existing);
   }
 
-  return [...traces.values()]
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .slice(-MAX_TOOL_ACTIVITY_ITEMS);
+  return mergeRecentToolTraces(
+    [...traces.values()]
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+  ).slice(-MAX_TOOL_ACTIVITY_ITEMS);
+}
+
+function mergeRecentToolTraces(traces: RecentToolTrace[]) {
+  const merged = new Map<string, RecentToolTrace>();
+
+  for (const trace of traces) {
+    const key = buildToolTraceMergeKey(trace);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, {
+        ...trace,
+        attemptCount: trace.attemptCount || 1,
+      });
+      continue;
+    }
+
+    const existingRank = toolTraceStatusRank(existing);
+    const nextRank = toolTraceStatusRank(trace);
+    const preferred = nextRank >= existingRank ? trace : existing;
+
+    merged.set(key, {
+      ...existing,
+      ...preferred,
+      toolCallId: preferred.toolCallId,
+      toolName: preferred.toolName,
+      backend: preferred.backend ?? existing.backend,
+      inputPreview: preferred.inputPreview ?? existing.inputPreview,
+      resultPreview: preferred.resultPreview ?? existing.resultPreview,
+      success: nextRank >= existingRank ? trace.success : existing.success,
+      durationMs: preferred.durationMs ?? existing.durationMs,
+      stateStatus: preferred.stateStatus ?? existing.stateStatus,
+      stateInput: preferred.stateInput ?? existing.stateInput,
+      stateOutput: preferred.stateOutput ?? existing.stateOutput,
+      stateError: preferred.stateError ?? existing.stateError,
+      createdAt: trace.createdAt,
+      attemptCount: existing.attemptCount + (trace.attemptCount || 1),
+    });
+  }
+
+  return [...merged.values()]
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
 function buildRecentToolActivityBlockFromTraces(traces: RecentToolTrace[]) {
@@ -1012,6 +1161,9 @@ function buildRecentToolActivityBlockFromTraces(traces: RecentToolTrace[]) {
     if (typeof trace.durationMs === "number") {
       fragments.push(`${Math.round(trace.durationMs)}ms`);
     }
+    if (trace.attemptCount > 1) {
+      fragments.push(`merged ${trace.attemptCount} attempts`);
+    }
 
     const details = [fragments.join(" · ")];
     if (trace.inputPreview) {
@@ -1025,6 +1177,60 @@ function buildRecentToolActivityBlockFromTraces(traces: RecentToolTrace[]) {
   }
 
   lines.push("</recent_tool_activity>");
+  return lines.join("\n");
+}
+
+function buildRecentToolTranscriptBlockFromTraces(traces: RecentToolTrace[]) {
+  if (traces.length === 0) {
+    return "";
+  }
+
+  const lines = [
+    "## Tool Transcript",
+    "- Treat each <tool_atom> as a single tool attempt. Keep its <tool_use> and <tool_result> paired when reasoning about what already happened.",
+    "- If a tool atom already contains a usable result, reuse it instead of rerunning the same tool call from scratch.",
+    "",
+    "<tool_transcript>",
+  ];
+
+  for (const [index, trace] of traces.entries()) {
+    const status = trace.success === true
+      ? "succeeded"
+      : trace.success === false || trace.stateStatus === "output-error" || trace.stateStatus === "permission-denied"
+        ? "failed"
+        : "in_progress";
+    const isLatestTrace = index === traces.length - 1;
+    const rawInputText = trace.inputPreview
+      ? escapeXmlish(trace.inputPreview)
+      : stringifyToolValue(trace.stateInput, 220);
+    const rawResultText = trace.resultPreview
+      ? escapeXmlish(trace.resultPreview)
+      : trace.stateError
+        ? escapeXmlish(trace.stateError)
+        : stringifyToolValue(trace.stateOutput, 260);
+    const inputText = compactToolTranscriptField({
+      value: rawInputText,
+      maxChars: isLatestTrace ? 220 : 120,
+      marker: "[tool input micro-compacted]",
+    });
+    const resultText = compactToolTranscriptField({
+      value: rawResultText,
+      maxChars: isLatestTrace ? 260 : 140,
+      marker: "[tool result micro-compacted]",
+    });
+    const attemptsAttr = trace.attemptCount > 1 ? ` attempts="${trace.attemptCount}"` : "";
+
+    lines.push(`<tool_atom id="${escapeXmlish(trace.toolCallId)}" name="${escapeXmlish(trace.toolName)}" status="${status}"${attemptsAttr}>`);
+    lines.push(`<tool_use>${inputText || "[input omitted]"}</tool_use>`);
+    if (resultText) {
+      lines.push(`<tool_result>${resultText}</tool_result>`);
+    } else if (status === "in_progress") {
+      lines.push("<tool_result>[still running]</tool_result>");
+    }
+    lines.push("</tool_atom>");
+  }
+
+  lines.push("</tool_transcript>");
   return lines.join("\n");
 }
 
@@ -1300,6 +1506,10 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const recentToolActivity = buildRecentToolActivityBlockFromTraces(recentToolTraces);
   const recentToolActivityMs = roundMs(nowMs() - recentToolActivityStartedAt);
 
+  const recentToolTranscriptStartedAt = nowMs();
+  const recentToolTranscript = buildRecentToolTranscriptBlockFromTraces(recentToolTraces);
+  const recentToolTranscriptMs = roundMs(nowMs() - recentToolTranscriptStartedAt);
+
   const recentResearchMemoryStartedAt = nowMs();
   const recentResearchMemory = buildRecentResearchMemoryBlockFromTraces(recentToolTraces);
   const recentResearchMemoryMs = roundMs(nowMs() - recentResearchMemoryStartedAt);
@@ -1318,6 +1528,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
     recentConversationFocus,
     recentResearchMemory,
     recentToolActivity,
+    recentToolTranscript,
     activeTurn,
     latestTurn,
     messages,
@@ -1334,6 +1545,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
       activeTurnMs,
       latestTurnMs,
       recentToolActivityMs,
+      recentToolTranscriptMs,
       messagesMs,
       totalMs: roundMs(nowMs() - startedAt),
       snapshotReads: 1,

@@ -139,6 +139,16 @@ export const previewSessionSnapshot: SessionSnapshot = {
     summarizedTurnCount: 1,
     updatedAt: "2026-03-17T07:27:00.000Z",
   },
+  sessionMemory: {
+    sessionId: primarySessionId,
+    currentPhase: "结构收束",
+    summary: "已经把 runtime 设计从分层和多端同步两条线收束成可回看的提纲，当前在把细节压到手机端也能快速扫完的长度。",
+    completed: ["明确 session、sandbox、artifact 的职责边界", "把多端共享任务流放进同一条会话叙事"],
+    remaining: ["把 session stream 再压短一版", "补一个更适合手机快速回看的总结层级"],
+    decisions: ["先做结构化回看页，再补复习包", "分层边界优先于实现细节"],
+    rememberedTurnCount: 1,
+    updatedAt: "2026-03-17T07:27:00.000Z",
+  },
   compactionState: {
     sessionId: primarySessionId,
     checkpointSummary: "",

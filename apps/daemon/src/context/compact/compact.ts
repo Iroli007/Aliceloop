@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import type { SessionFocusState, SessionRollingSummary } from "@aliceloop/runtime-core";
+import type { SessionFocusState, SessionMemoryState } from "@aliceloop/runtime-core";
 import { createProviderModel } from "../../providers/providerModelFactory";
 import { getToolModelConfig } from "../../providers/toolModelResolver";
 import {
@@ -27,9 +27,10 @@ function getLastHiddenMessageId(hiddenTurns: SessionTurn[]) {
 
 async function generateCheckpointSummary(input: {
   focusState: SessionFocusState;
-  sessionMemory: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
   hiddenTurns: SessionTurn[];
   keptRecentTurnsCount: number;
+  recentToolTranscript?: string;
   existingCheckpointSummary?: string;
   previousCompactedTurnCount?: number;
   abortSignal?: AbortSignal;
@@ -61,8 +62,15 @@ async function generateCheckpointSummary(input: {
           previousCompactedTurnCount: input.previousCompactedTurnCount ?? 0,
           newHiddenTurns: input.hiddenTurns,
           keptRecentTurnsCount: input.keptRecentTurnsCount,
+          toolTranscriptBlock: input.recentToolTranscript,
         })
-      : buildCheckpointSummaryPrompt(input),
+      : buildCheckpointSummaryPrompt({
+          focusState: input.focusState,
+          sessionMemory: input.sessionMemory,
+          hiddenTurns: input.hiddenTurns,
+          keptRecentTurnsCount: input.keptRecentTurnsCount,
+          toolTranscriptBlock: input.recentToolTranscript,
+        }),
   });
 
   const summary = extractSummaryFromXml(response.text) || response.text.trim();
@@ -108,9 +116,10 @@ function canExtendCheckpointIncrementally(input: {
 export async function ensureCheckpointCompact(input: {
   sessionId: string;
   focusState: SessionFocusState;
-  sessionMemory: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
   hiddenTurns: SessionTurn[];
   keptRecentTurnsCount: number;
+  recentToolTranscript?: string;
   abortSignal?: AbortSignal;
   force: boolean;
 }): Promise<CheckpointSummaryResult> {
@@ -170,6 +179,7 @@ export async function ensureCheckpointCompact(input: {
     const generated = await generateCheckpointSummary({
       ...input,
       hiddenTurns: turnsToSummarize,
+      recentToolTranscript: input.recentToolTranscript,
       existingCheckpointSummary: incremental ? current.checkpointSummary : undefined,
       previousCompactedTurnCount: incremental ? current.compactedTurnCount : undefined,
     });

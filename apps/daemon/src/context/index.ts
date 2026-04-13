@@ -5,6 +5,10 @@ import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
 import { buildProfileFactMemoryBlock } from "./memory/memoryContext";
 import {
+  buildPromptProjection,
+  type PromptProjectionBlock,
+} from "./promptProjection";
+import {
   buildSessionContextFragments,
 } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
@@ -79,6 +83,25 @@ interface LoadContextOptions {
   additionalToolNames?: string[];
   additionalSelectedSkillIds?: string[];
   compaction?: CompactionLoadOptions;
+  midTurn?: {
+    currentUserRequest?: string | null;
+    assistantDraft?: string | null;
+    recoveryReason?: string | null;
+    note?: string | null;
+    toolAtoms?: Array<{
+      toolCallId: string;
+      toolName: string;
+      status: "succeeded" | "failed" | "in_progress";
+      input?: string | null;
+      result?: string | null;
+      attempts?: number;
+    }>;
+    toolStates?: Array<{
+      toolName: string;
+      status: "succeeded" | "failed" | "in_progress";
+      detail?: string | null;
+    }>;
+  };
 }
 
 const PLAN_MODE_BLOCKED_BASH_COMMANDS = new Set([
@@ -216,6 +239,91 @@ function buildPlanArtifactBlock(sessionId: string, activePlanId: string | null, 
       ? "Keep this plan record updated while clarifying requirements."
       : "Use this plan as the execution guide unless the user changes direction. Execute the steps in order and prefer finishing the work in the current thread unless the user explicitly asks for delegated parallel work.",
   ].join("\n");
+}
+
+function trimBlockLine(value: string | null | undefined, maxChars: number) {
+  if (!value) {
+    return "";
+  }
+
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars).trimEnd()}…` : normalized;
+}
+
+function escapeXmlish(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function buildMidTurnContinuationBlock(input: LoadContextOptions["midTurn"]) {
+  if (!input) {
+    return "";
+  }
+
+  const lines = [
+    "## Mid-Turn Continuation",
+    "- This block was assembled during a same-turn context reload.",
+    "- Treat it as runtime continuity notes for the current turn, not as a fresh user turn.",
+    "- Prefer the latest raw user message and the focus block first; use these notes to avoid repeating work already attempted in this turn.",
+    "",
+    "<mid_turn_continuation>",
+  ];
+
+  const currentUserRequest = trimBlockLine(input.currentUserRequest, 280);
+  if (currentUserRequest) {
+    lines.push(`- Active user request: ${currentUserRequest}`);
+  }
+
+  const assistantDraft = trimBlockLine(input.assistantDraft, 320);
+  if (assistantDraft) {
+    lines.push(`- Latest assistant draft: ${assistantDraft}`);
+  }
+
+  const recoveryReason = trimBlockLine(input.recoveryReason, 180);
+  if (recoveryReason) {
+    lines.push(`- Reload reason: ${recoveryReason}`);
+  }
+
+  const note = trimBlockLine(input.note, 220);
+  if (note) {
+    lines.push(`- Runtime note: ${note}`);
+  }
+
+  if (input.toolAtoms && input.toolAtoms.length > 0) {
+    lines.push("- Tool transcript for this turn:");
+    lines.push("<mid_turn_tool_transcript>");
+    for (const toolAtom of input.toolAtoms.slice(-4)) {
+      const toolUse = trimBlockLine(toolAtom.input, 240);
+      const toolResult = trimBlockLine(toolAtom.result, 260);
+      const attemptsAttr = typeof toolAtom.attempts === "number" && toolAtom.attempts > 1
+        ? ` attempts="${toolAtom.attempts}"`
+        : "";
+      lines.push(`<tool_atom id="${escapeXmlish(toolAtom.toolCallId)}" name="${escapeXmlish(toolAtom.toolName)}" status="${toolAtom.status}"${attemptsAttr}>`);
+      lines.push(`<tool_use>${escapeXmlish(toolUse || "[input omitted]")}</tool_use>`);
+      if (toolResult) {
+        lines.push(`<tool_result>${escapeXmlish(toolResult)}</tool_result>`);
+      } else if (toolAtom.status === "in_progress") {
+        lines.push("<tool_result>[still running]</tool_result>");
+      }
+      lines.push("</tool_atom>");
+    }
+    lines.push("</mid_turn_tool_transcript>");
+  } else if (input.toolStates && input.toolStates.length > 0) {
+    lines.push("- Tool attempts in this turn:");
+    for (const toolState of input.toolStates.slice(-4)) {
+      const detail = trimBlockLine(toolState.detail, 220);
+      lines.push(`  - ${toolState.toolName} [${toolState.status}]${detail ? `: ${detail}` : ""}`);
+    }
+  }
+
+  lines.push("</mid_turn_continuation>");
+  return lines.join("\n");
 }
 
 function createPlanModeSandboxExecutor(
@@ -428,6 +536,7 @@ export async function loadContext(
   timings.activeTurnMs = sessionContext.timings.activeTurnMs;
   timings.latestTurnMs = sessionContext.timings.latestTurnMs;
   timings.recentToolActivityMs = sessionContext.timings.recentToolActivityMs;
+  timings.recentToolTranscriptMs = sessionContext.timings.recentToolTranscriptMs;
   timings.messagesMs = sessionContext.timings.messagesMs;
 
   const latestUserQuery = sessionContext.latestUserQuery;
@@ -443,13 +552,18 @@ export async function loadContext(
     : "";
   const planArtifactBlock = buildPlanArtifactBlock(sessionId, planModeState.activePlanId, planModeState.active);
   timings.planArtifactChars = planArtifactBlock.length;
+  const midTurnContinuationBlock = buildMidTurnContinuationBlock(options?.midTurn);
+  timings.midTurnContinuationChars = midTurnContinuationBlock.length;
 
   const projectedContextStartedAt = nowMs();
   const projectedContext = await projectModelContext({
     sessionId,
     sessionContext,
     abortSignal,
-    options: options?.compaction,
+    options: {
+      ...options?.compaction,
+      additionalBlocks: midTurnContinuationBlock ? [midTurnContinuationBlock] : undefined,
+    },
   });
   timings.compactionProjectionMs = roundMs(nowMs() - projectedContextStartedAt);
   timings.compactionUsedCheckpoint = projectedContext.usedCheckpoint ? 1 : 0;
@@ -461,6 +575,9 @@ export async function loadContext(
   timings.compactionEstimatedTokens = projectedContext.timings.estimatedContextTokens ?? null;
   timings.compactionCheckpointMs = projectedContext.timings.checkpointMs ?? null;
   timings.compactionCheckpointIncremental = projectedContext.timings.checkpointIncremental ?? null;
+  timings.compactionMicroCompactMs = projectedContext.timings.microCompactMs ?? null;
+  timings.compactionMicroCompactedMessages = projectedContext.timings.microCompactedMessages ?? null;
+  timings.compactionMicroCompactedCharsSaved = projectedContext.timings.microCompactedCharsSaved ?? null;
   timings.compactionSessionMemoryMs = projectedContext.timings.sessionMemoryMs ?? null;
 
   const userQuery = recentConversationFocus.effectiveUserQuery ?? latestUserQuery;
@@ -712,71 +829,57 @@ export async function loadContext(
     sessionFocus: sessionContext.sessionFocus,
     sessionMemoryBlock: projectedContext.sessionMemoryBlock,
     checkpointSummaryBlock: projectedContext.checkpointSummaryBlock,
+    toolTranscriptBlock: projectedContext.toolTranscriptBlock,
     recentToolActivity: sessionContext.recentToolActivity,
     recentResearchMemory: sessionContext.recentResearchMemory,
   });
 
-  const dynamicBlocks = [
-    planModeReminder,
-    planArtifactBlock,
-    sessionContext.activeTurn,
-    sessionContext.latestTurn,
+  const volatileBlocks: PromptProjectionBlock[] = [
+    { id: "plan:mode-reminder", content: planModeReminder },
+    { id: "plan:artifact", content: planArtifactBlock },
+    { id: "turn:active", content: sessionContext.activeTurn },
+    { id: "turn:latest", content: sessionContext.latestTurn },
+    { id: "turn:mid-turn-continuation", content: midTurnContinuationBlock },
     ...compactionBlocks,
-    profileFactMemory.content,
-    historicalContext.content,
-    skillDynamicOverlay,
-  ].filter(Boolean);
+    { id: "memory:profile-facts", content: profileFactMemory.content },
+    { id: "memory:historical-context", content: historicalContext.content },
+    { id: "skills:dynamic-overlay", content: skillDynamicOverlay },
+  ].filter((block) => block.content);
 
   const promptAssemblyStartedAt = nowMs();
-let systemPrompt: AgentContext["systemPrompt"];
-  if (Array.isArray(persona)) {
-    // persona is already system messages with cache control
-    systemPrompt = [...persona];
-    systemPrompt.push({
-      role: "system",
-      content: STATIC_BASE_TOOL_BLOCK,
-      providerOptions: {
-        anthropic: { cacheControl: { type: "ephemeral" } }
-      }
-    });
-    if (staticSkillCatalogBlock) {
-      systemPrompt.push({
-        role: "system",
+  const promptProjection = buildPromptProjection({
+    persona,
+    stableBlocks: [
+      {
+        id: "tools:static-base",
+        content: STATIC_BASE_TOOL_BLOCK,
+        cacheControl: "ephemeral",
+      },
+      {
+        id: "skills:static-catalog",
         content: staticSkillCatalogBlock,
-        providerOptions: {
-          anthropic: { cacheControl: { type: "ephemeral" } }
-        }
-      });
-    }
-    if (selectedSkillBodies.content) {
-      systemPrompt.push({
-        role: "system",
+        cacheControl: "ephemeral",
+      },
+      {
+        id: "skills:selected-bodies",
         content: selectedSkillBodies.content,
-        providerOptions: {
-          anthropic: { cacheControl: { type: "ephemeral" } }
-        }
-      });
-    }
-    if (dynamicBlocks.length > 0) {
-      systemPrompt.push({
-        role: "system",
-        content: dynamicBlocks.join("\n\n"),
-      });
-    }
-  } else {
-    // fallback: persona is a string
-    systemPrompt = [persona, STATIC_BASE_TOOL_BLOCK, staticSkillCatalogBlock, selectedSkillBodies.content, ...dynamicBlocks].filter(Boolean).join("\n\n");
-  }
+        cacheControl: "ephemeral",
+      },
+    ],
+    volatileBlocks,
+  });
+  const systemPrompt: AgentContext["systemPrompt"] = promptProjection.systemPrompt;
   timings.promptAssemblyMs = roundMs(nowMs() - promptAssemblyStartedAt);
-  if (Array.isArray(systemPrompt)) {
-    timings.systemPromptParts = systemPrompt.length;
-    timings.systemPromptChars = roundMs(systemPrompt.reduce((sum, message) => sum + message.content.length, 0));
-  } else {
-    timings.systemPromptParts = 1;
-    timings.systemPromptChars = roundMs(systemPrompt.length);
-  }
-  timings.dynamicBlockCount = dynamicBlocks.length;
-  timings.dynamicPromptChars = roundMs(dynamicBlocks.reduce((sum, block) => sum + block.length, 0));
+  timings.systemPromptParts = systemPrompt.length;
+  timings.systemPromptChars = roundMs(systemPrompt.reduce((sum, message) => sum + message.content.length, 0));
+  timings.dynamicBlockCount = promptProjection.volatileSuffixParts.length;
+  timings.dynamicPromptChars = roundMs(promptProjection.volatileSuffixParts.reduce((sum, block) => sum + block.content.length, 0));
+  timings.promptProjectionStablePartCount = promptProjection.stablePrefixParts.length;
+  timings.promptProjectionStableChars = roundMs(promptProjection.stablePrefixParts.reduce((sum, block) => sum + block.content.length, 0));
+  timings.promptProjectionStableKey = promptProjection.stablePrefixKey;
+  timings.promptProjectionVolatilePartCount = promptProjection.volatileSuffixParts.length;
+  timings.promptProjectionVolatileChars = roundMs(promptProjection.volatileSuffixParts.reduce((sum, block) => sum + block.content.length, 0));
+  timings.promptProjectionVolatileKey = promptProjection.volatileSuffixKey;
   timings.totalMs = roundMs(Object.values({
     personaMs: timings.personaMs,
     sessionContextMs: timings.sessionContextMs,

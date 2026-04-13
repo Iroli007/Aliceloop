@@ -13,7 +13,7 @@ import {
   needsTodoChecklist,
   needsWebResearch,
 } from "../context/skills/skillRouting";
-import { refreshSessionRollingSummary } from "../context/session/rollingSummary";
+import { refreshSessionMemory } from "../context/session/sessionMemory";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
 import { buildAgentProviderOptions, getProviderRuntimeProfile, resolveProviderTransport } from "../providers/providerProfile";
@@ -97,7 +97,7 @@ function publishAssistantReply(sessionId: string, content: string, skills: strin
   }
 
   void syncSessionProjectHistory(sessionId).catch(() => {});
-  void refreshSessionRollingSummary(sessionId).catch(() => {});
+  void refreshSessionMemory(sessionId).catch(() => {});
 }
 
 const GENERIC_AGENT_ERROR_MESSAGES = new Set([
@@ -632,6 +632,119 @@ function summarizeUnknown(value: unknown, maxLength = 800) {
   } catch {
     return String(value);
   }
+}
+
+function buildMidTurnToolStates(toolCalls: ToolCallState[]) {
+  return toolCalls
+    .filter((toolCall) => !INTERNAL_TOOL_NAMES.has(toolCall.toolName))
+    .slice(-4)
+    .map((toolCall) => ({
+      toolName: toolCall.toolName,
+      status: toolCall.status === "output-available" || toolCall.status === "done"
+        ? "succeeded" as const
+        : toolCall.status === "output-error" || toolCall.status === "permission-denied"
+          ? "failed" as const
+          : "in_progress" as const,
+      detail: toolCall.error
+        ? summarizeUnknown(toolCall.error, 220)
+        : summarizeUnknown(toolCall.output ?? toolCall.input, 220),
+    }));
+}
+
+function buildMidTurnToolAtoms(toolCalls: ToolCallState[]) {
+  const merged = new Map<string, {
+    toolCallId: string;
+    toolName: string;
+    status: "succeeded" | "failed" | "in_progress";
+    input: string | null;
+    result: string | null;
+    attempts: number;
+    order: number;
+  }>();
+
+  const normalizedCalls = toolCalls
+    .filter((toolCall) => !INTERNAL_TOOL_NAMES.has(toolCall.toolName))
+    .map((toolCall, index) => {
+      const status = toolCall.status === "output-available" || toolCall.status === "done"
+        ? "succeeded" as const
+        : toolCall.status === "output-error" || toolCall.status === "permission-denied"
+          ? "failed" as const
+          : "in_progress" as const;
+      return {
+        toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName,
+        status,
+        input: summarizeUnknown(toolCall.input, 220),
+        result: toolCall.error
+          ? summarizeUnknown(toolCall.error, 240)
+          : summarizeUnknown(toolCall.output, 260),
+        attempts: 1,
+        order: index,
+      };
+    });
+
+  const rank = (status: "succeeded" | "failed" | "in_progress") => {
+    if (status === "succeeded") return 3;
+    if (status === "in_progress") return 2;
+    return 1;
+  };
+
+  for (const call of normalizedCalls) {
+    const key = `${call.toolName}::${call.input || "(empty)"}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, call);
+      continue;
+    }
+
+    const preferred = rank(call.status) >= rank(existing.status) ? call : existing;
+    merged.set(key, {
+      ...existing,
+      ...preferred,
+      toolCallId: preferred.toolCallId,
+      toolName: preferred.toolName,
+      input: preferred.input ?? existing.input,
+      result: preferred.result ?? existing.result,
+      status: preferred.status,
+      attempts: existing.attempts + 1,
+      order: call.order,
+    });
+  }
+
+  return [...merged.values()]
+    .sort((left, right) => left.order - right.order)
+    .slice(-4)
+    .map(({ order: _order, ...atom }) => atom);
+}
+
+function buildMidTurnLoadContextOptions(input: {
+  stickySkillIds: Set<string>;
+  selectedSkillIds: Set<string>;
+  toolNames: Set<string>;
+  latestUserMessage: string | null;
+  assistantDraft?: string | null;
+  recoveryReason?: string | null;
+  note?: string | null;
+  toolCalls: ToolCallState[];
+  compaction?: {
+    forceCheckpoint?: boolean;
+    keepRecentTurnsCount?: number;
+  };
+}) {
+  return {
+    additionalStickySkillIds: [...input.stickySkillIds],
+    additionalSelectedSkillIds: [...input.selectedSkillIds],
+    additionalToolNames: [...input.toolNames],
+    compaction: input.compaction,
+    midTurn: {
+      currentUserRequest: input.latestUserMessage,
+      assistantDraft: input.assistantDraft ?? null,
+      recoveryReason: input.recoveryReason ?? null,
+      note: input.note ?? null,
+      toolAtoms: buildMidTurnToolAtoms(input.toolCalls),
+      toolStates: buildMidTurnToolStates(input.toolCalls),
+    },
+  };
 }
 
 async function executeTextToolCallFallback(
@@ -1617,15 +1730,20 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
       } catch (error) {
         if (!promptTooLongRecovered && isPromptTooLongLikeError(error)) {
           promptTooLongRecovered = true;
-          run.context = await loadContext(run.sessionId, run.abortController.signal, {
-            additionalStickySkillIds: [...accumulatedStickySkillIds],
-            additionalSelectedSkillIds: [...accumulatedSelectedSkillIds],
-            additionalToolNames: [...accumulatedToolNames],
+          run.context = await loadContext(run.sessionId, run.abortController.signal, buildMidTurnLoadContextOptions({
+            stickySkillIds: accumulatedStickySkillIds,
+            selectedSkillIds: accumulatedSelectedSkillIds,
+            toolNames: accumulatedToolNames,
+            latestUserMessage,
+            assistantDraft: lastResult?.text ?? null,
+            recoveryReason: "prompt_too_long",
+            note: "The current turn is resuming after a prompt-too-long recovery. Continue the same user request without restarting completed work.",
+            toolCalls: accumulatedToolCalls,
             compaction: {
               forceCheckpoint: true,
               keepRecentTurnsCount: 1,
             },
-          });
+          }));
           continue;
         }
         throw error;
@@ -1720,11 +1838,16 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
             accumulatedToolNames.add(toolName);
           }
 
-          run.context = await loadContext(run.sessionId, run.abortController.signal, {
-            additionalStickySkillIds: [...accumulatedStickySkillIds],
-            additionalSelectedSkillIds: [...accumulatedSelectedSkillIds],
-            additionalToolNames: [...accumulatedToolNames],
-          });
+          run.context = await loadContext(run.sessionId, run.abortController.signal, buildMidTurnLoadContextOptions({
+            stickySkillIds: accumulatedStickySkillIds,
+            selectedSkillIds: accumulatedSelectedSkillIds,
+            toolNames: accumulatedToolNames,
+            latestUserMessage,
+            assistantDraft: result.text,
+            recoveryReason: recovery.reason,
+            note: "The current turn is continuing after a context reload. Reuse the tool progress already recorded in this turn before starting over.",
+            toolCalls: accumulatedToolCalls,
+          }));
           continue;
         }
 
@@ -2098,7 +2221,7 @@ function schedulePostProcessing(run: AgentRun, text: string) {
     });
   }
 
-  void refreshSessionRollingSummary(run.sessionId).catch(() => {});
+  void refreshSessionMemory(run.sessionId).catch(() => {});
 
   if (!latestUserMessage) {
     return;

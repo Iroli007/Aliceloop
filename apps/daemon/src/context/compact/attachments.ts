@@ -1,3 +1,5 @@
+import type { PromptProjectionBlock } from "../promptProjection";
+
 export function buildCompactionBoundaryBlock(input: {
   archivedTurnCount: number;
   keptRecentTurnsCount: number;
@@ -30,16 +32,20 @@ export function buildCompactionContextBlocks(input: {
   sessionFocus: string;
   sessionMemoryBlock: string;
   checkpointSummaryBlock: string;
+  toolTranscriptBlock: string;
   recentToolActivity: string;
   recentResearchMemory: string;
-}) {
+}): PromptProjectionBlock[] {
   const summaryBlock = input.checkpointSummaryBlock || input.sessionMemoryBlock;
 
   return [
-    input.boundaryBlock,
-    input.sessionFocus,
-    summaryBlock,
-    input.recentToolActivity,
-    input.recentResearchMemory,
-  ].filter(Boolean);
+    { id: "compaction:boundary", content: input.boundaryBlock },
+    { id: "compaction:focus", content: input.sessionFocus },
+    { id: "compaction:summary", content: summaryBlock },
+    {
+      id: "compaction:tool-transcript",
+      content: input.toolTranscriptBlock || input.recentToolActivity,
+    },
+    { id: "compaction:research-memory", content: input.recentResearchMemory },
+  ].filter((block) => block.content);
 }
