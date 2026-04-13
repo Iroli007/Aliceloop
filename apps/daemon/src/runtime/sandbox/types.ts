@@ -72,6 +72,19 @@ export interface ReadTextFileInput {
   approvalStateTracker?: ToolApprovalStateTracker;
 }
 
+export interface ReadTextFileWindowInput {
+  targetPath: string;
+  offset?: number;
+  limit?: number;
+  toolCallId?: string;
+  approvalStateTracker?: ToolApprovalStateTracker;
+}
+
+export interface ReadTextFileWindowResult {
+  content: string;
+  totalLines: number;
+}
+
 export interface WriteBinaryFileInput {
   targetPath: string;
   content: Uint8Array;
@@ -184,6 +197,10 @@ export interface SandboxRuntimeContext {
 export interface SandboxRuntimeBackend {
   kind: SandboxRuntimeKind;
   readTextFile(context: SandboxRuntimeContext, input: ReadTextFileInput): Promise<string>;
+  readTextFileWindow(
+    context: SandboxRuntimeContext,
+    input: ReadTextFileWindowInput,
+  ): Promise<ReadTextFileWindowResult>;
   writeBinaryFile(context: SandboxRuntimeContext, input: WriteBinaryFileInput): Promise<string>;
   writeTextFile(context: SandboxRuntimeContext, input: WriteTextFileInput): Promise<string>;
   editTextFile(context: SandboxRuntimeContext, input: EditTextFileInput): Promise<string>;
@@ -196,6 +213,7 @@ export interface SandboxRuntimeBackend {
 
 export interface PermissionSandboxExecutor {
   readTextFile(input: ReadTextFileInput): Promise<string>;
+  readTextFileWindow(input: ReadTextFileWindowInput): Promise<ReadTextFileWindowResult>;
   writeBinaryFile(input: WriteBinaryFileInput): Promise<string>;
   writeTextFile(input: WriteTextFileInput): Promise<string>;
   editTextFile(input: EditTextFileInput): Promise<string>;

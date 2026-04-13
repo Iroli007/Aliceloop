@@ -1,6 +1,7 @@
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { ModelMessage, ToolChoice, ToolSet } from "ai";
+import { readTextWindow } from "../runtime/sandbox/readTextWindow";
 import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
 import { buildProfileFactMemoryBlock } from "./memory/memoryContext";
@@ -389,6 +390,11 @@ function createDirectFileExecutor(input: {
   return {
     async readTextFile(options: Parameters<PermissionSandboxExecutor["readTextFile"]>[0]) {
       return readFile(resolve(options.targetPath), "utf8");
+    },
+
+    async readTextFileWindow(options: Parameters<PermissionSandboxExecutor["readTextFileWindow"]>[0]) {
+      const targetPath = resolve(options.targetPath);
+      return readTextWindow(targetPath, options.offset ?? 0, options.limit ?? 500);
     },
 
     async writeBinaryFile(options: Parameters<PermissionSandboxExecutor["writeBinaryFile"]>[0]) {

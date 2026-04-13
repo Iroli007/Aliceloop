@@ -70,6 +70,16 @@ async function main() {
   });
   assert.equal(text, "alpha\nbeta\n");
 
+  const windowedText = await sandbox.readTextFileWindow({
+    targetPath: sourcePath,
+    offset: 1,
+    limit: 1,
+  });
+  assert.deepEqual(windowedText, {
+    content: "beta",
+    totalLines: 3,
+  });
+
   await sandbox.writeTextFile({
     targetPath: outputPath,
     content: text,

@@ -8,6 +8,7 @@ import type {
   EditTextFileInput,
   PermissionSandboxExecutor,
   ReadTextFileInput,
+  ReadTextFileWindowInput,
   RunBashInput,
   ToolApprovalStateTracker,
   WriteBinaryFileInput,
@@ -620,6 +621,16 @@ export function createAgentPermissionFrontdesk(
         approvalStateTracker: input.approvalStateTracker,
       });
       return baseSandbox.readTextFile(input);
+    },
+
+    async readTextFileWindow(input: ReadTextFileWindowInput) {
+      await enforceAgentPermission(options, {
+        toolName: "read",
+        targetPath: resolve(input.targetPath),
+        toolCallId: input.toolCallId,
+        approvalStateTracker: input.approvalStateTracker,
+      });
+      return baseSandbox.readTextFileWindow(input);
     },
 
     async writeBinaryFile(input: WriteBinaryFileInput) {

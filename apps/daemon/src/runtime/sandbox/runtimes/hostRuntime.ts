@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { lstat, mkdir, readFile, readdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { getDataDir } from "../../../db/client";
+import { readTextWindow } from "../readTextWindow";
 import {
   assertBashExecution,
   parseShellScriptCommandsForPolicy,
@@ -23,6 +24,7 @@ import {
   type BashProgressTracker,
   type SandboxRuntimeBackend,
   type SandboxRuntimeContext,
+  type ReadTextFileWindowInput,
   type WriteBinaryFileInput,
   type WriteTextFileInput,
 } from "../types";
@@ -337,6 +339,16 @@ async function readTextResult(targetPath: string) {
   return {
     result: content,
     detail: `read ${targetPath} (${summarizeBytes(Buffer.byteLength(content, "utf8"))})`,
+  };
+}
+
+async function readTextWindowResult(targetPath: string, input: ReadTextFileWindowInput) {
+  const offset = input.offset ?? 0;
+  const limit = input.limit ?? 500;
+  const result = await readTextWindow(targetPath, offset, limit);
+  return {
+    result,
+    detail: `read ${targetPath} window offset=${offset} limit=${limit} (${result.totalLines} total lines)`,
   };
 }
 
@@ -863,6 +875,31 @@ async function readTextFile(context: SandboxRuntimeContext, input: ReadTextFileI
   });
 }
 
+async function readTextFileWindow(context: SandboxRuntimeContext, input: ReadTextFileWindowInput) {
+  const targetPath = resolve(input.targetPath);
+  return withPolicyFallback({
+    context,
+    run: {
+      primitive: "read",
+      targetPath,
+      detail: `reading ${targetPath} window`,
+    },
+    preflight() {
+      assertReadable(context.toolPolicy, targetPath);
+    },
+    buildElevatedApproval() {
+      return createFileElevatedApproval("read", "等待确认 Elevated 读取", "读取", targetPath);
+    },
+    async executeStandard() {
+      assertReadable(context.toolPolicy, targetPath);
+      return readTextWindowResult(targetPath, input);
+    },
+    async executeElevated() {
+      return readTextWindowResult(targetPath, input);
+    },
+  });
+}
+
 async function writeBinaryFile(context: SandboxRuntimeContext, input: WriteBinaryFileInput) {
   const targetPath = resolve(input.targetPath);
   const createdNew = !existsSync(targetPath);
@@ -1207,6 +1244,7 @@ export function createHostSandboxRuntime(): SandboxRuntimeBackend {
   return {
     kind: "host",
     readTextFile,
+    readTextFileWindow,
     writeBinaryFile,
     writeTextFile,
     editTextFile,
