@@ -16,6 +16,7 @@ import {
   type SessionEvent,
   type SessionCompactionState,
   type SessionFocusState,
+  type SessionMemoryState,
   type SessionRollingSummary,
   type SessionMessage,
   type StudyArtifact,
@@ -383,6 +384,27 @@ function seedSessionRollingSummary(db: Database.Database, rollingSummary: Sessio
   });
 }
 
+function seedSessionMemoryState(db: Database.Database, sessionMemory: SessionMemoryState) {
+  db.prepare(
+    `
+      INSERT OR REPLACE INTO session_memory_state (
+        session_id, current_phase, summary, completed_json, remaining_json, decisions_json, remembered_turn_count, updated_at
+      ) VALUES (
+        @sessionId, @currentPhase, @summary, @completedJson, @remainingJson, @decisionsJson, @rememberedTurnCount, @updatedAt
+      )
+    `,
+  ).run({
+    sessionId: sessionMemory.sessionId,
+    currentPhase: sessionMemory.currentPhase,
+    summary: sessionMemory.summary,
+    completedJson: JSON.stringify(sessionMemory.completed),
+    remainingJson: JSON.stringify(sessionMemory.remaining),
+    decisionsJson: JSON.stringify(sessionMemory.decisions),
+    rememberedTurnCount: sessionMemory.rememberedTurnCount,
+    updatedAt: sessionMemory.updatedAt ?? new Date().toISOString(),
+  });
+}
+
 function seedSessionCompactionState(db: Database.Database, compactionState: SessionCompactionState) {
   db.prepare(
     `
@@ -544,6 +566,7 @@ function seedSessionData(db: Database.Database) {
   seedSession(db, previewSessionSnapshot.session);
   seedSessionFocusState(db, previewSessionSnapshot.focusState);
   seedSessionRollingSummary(db, previewSessionSnapshot.rollingSummary);
+  seedSessionMemoryState(db, previewSessionSnapshot.sessionMemory);
   seedSessionCompactionState(db, previewSessionSnapshot.compactionState);
 
   for (const attachment of previewSessionSnapshot.attachments) {
@@ -670,6 +693,21 @@ function runMigrations(db: Database.Database) {
   );
   db.exec(
     `
+      CREATE TABLE IF NOT EXISTS session_memory_state (
+        session_id TEXT PRIMARY KEY,
+        current_phase TEXT NOT NULL DEFAULT '',
+        summary TEXT NOT NULL DEFAULT '',
+        completed_json TEXT NOT NULL DEFAULT '[]',
+        remaining_json TEXT NOT NULL DEFAULT '[]',
+        decisions_json TEXT NOT NULL DEFAULT '[]',
+        remembered_turn_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      )
+    `,
+  );
+  db.exec(
+    `
       CREATE TABLE IF NOT EXISTS session_compaction_state (
         session_id TEXT PRIMARY KEY,
         checkpoint_summary TEXT NOT NULL DEFAULT '',
@@ -728,6 +766,30 @@ function runMigrations(db: Database.Database) {
       `,
     ).run();
   }
+  db.prepare(
+    `
+      INSERT OR IGNORE INTO session_memory_state (
+        session_id,
+        current_phase,
+        summary,
+        completed_json,
+        remaining_json,
+        decisions_json,
+        remembered_turn_count,
+        updated_at
+      )
+      SELECT
+        session_id,
+        current_phase,
+        summary,
+        completed_json,
+        remaining_json,
+        decisions_json,
+        summarized_turn_count,
+        updated_at
+      FROM session_rolling_summary
+    `,
+  ).run();
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
   db.prepare(
     "UPDATE runtime_settings SET tool_permission_rules_json = '{\"allow\":[],\"deny\":[],\"ask\":[]}' WHERE COALESCE(tool_permission_rules_json, '') = ''",

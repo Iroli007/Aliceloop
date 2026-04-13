@@ -18,12 +18,12 @@ async function main() {
   try {
     const [
       { loadContext },
-      { refreshSessionRollingSummary },
+      { refreshSessionMemory },
       { updateRuntimeSettings },
-      { createSession, createSessionMessage, getSessionSnapshot },
+      { appendSessionEvent, createSession, createSessionMessage, getSessionSnapshot, updateSessionFocusState },
     ] = await Promise.all([
       import("../src/context/index.ts"),
-      import("../src/context/session/rollingSummary.ts"),
+      import("../src/context/session/sessionMemory.ts"),
       import("../src/repositories/runtimeSettingsRepository.ts"),
       import("../src/repositories/sessionRepository.ts"),
     ]);
@@ -33,6 +33,11 @@ async function main() {
     });
 
     const session = createSession("session rolling summary smoke");
+    updateSessionFocusState(session.id, {
+      goal: "把线程记忆和上下文压缩主链路收清楚。",
+      priorities: ["别丢当前任务", "别把摘要当成新用户消息"],
+      nextStep: "补清楚边界和压缩层次。",
+    });
 
     createSessionMessage({
       sessionId: session.id,
@@ -74,20 +79,72 @@ async function main() {
       content: "继续把 rolling summary 和 recent turns 也收一下。",
       attachmentIds: [],
     });
+    appendSessionEvent(session.id, "tool.call.started", {
+      toolCallId: "tool-call-web-fetch-old-1",
+      toolName: "web_fetch",
+      inputPreview: "https://example.com/older-tool-history",
+      backend: "http",
+    });
+    appendSessionEvent(session.id, "tool.call.completed", {
+      toolCallId: "tool-call-web-fetch-old-1",
+      toolName: "web_fetch",
+      success: true,
+      resultPreview: Array.from({ length: 20 }, () => "Older tool history says the previous result was already verified and should not be repeated.").join(" "),
+      durationMs: 36,
+      backend: "http",
+    });
+    appendSessionEvent(session.id, "tool.call.started", {
+      toolCallId: "tool-call-web-fetch-0",
+      toolName: "web_fetch",
+      inputPreview: "https://example.com/context-compaction-notes",
+      backend: "http",
+    });
+    appendSessionEvent(session.id, "tool.call.completed", {
+      toolCallId: "tool-call-web-fetch-0",
+      toolName: "web_fetch",
+      success: false,
+      resultPreview: "Initial fetch timed out before returning the page body.",
+      durationMs: 31,
+      backend: "http",
+    });
+    appendSessionEvent(session.id, "tool.call.started", {
+      toolCallId: "tool-call-web-fetch-1",
+      toolName: "web_fetch",
+      inputPreview: "https://example.com/context-compaction-notes",
+      backend: "http",
+    });
+    appendSessionEvent(session.id, "tool.call.completed", {
+      toolCallId: "tool-call-web-fetch-1",
+      toolName: "web_fetch",
+      success: true,
+      resultPreview: "Context compaction notes mention boundary, session memory, and recent turns.",
+      durationMs: 42,
+      backend: "http",
+    });
 
-    const summary = await refreshSessionRollingSummary(session.id);
-    assert.equal(summary.summarizedTurnCount, 2);
+    const summary = await refreshSessionMemory(session.id);
+    assert.equal(summary.rememberedTurnCount, 2);
     assert.match(summary.summary, /Archived 2 earlier turns|线程记忆|memory_notes/u);
 
     const snapshot = getSessionSnapshot(session.id);
-    assert.equal(snapshot.rollingSummary.summarizedTurnCount, 2);
+    assert.equal(snapshot.sessionMemory.rememberedTurnCount, 2);
 
     const context = await loadContext(session.id, new AbortController().signal);
     const prompt = flattenSystemPrompt(context.systemPrompt);
+    assert.match(prompt, /## Session Focus/u);
+    assert.match(prompt, /把线程记忆和上下文压缩主链路收清楚/u);
     assert.match(prompt, /## Context Boundary/u);
-    assert.match(prompt, /## Rolling Summary/u);
-    assert.match(prompt, /Archived turns covered: 2/u);
+    assert.match(prompt, /## Session Memory/u);
+    assert.match(prompt, /## Tool Transcript/u);
+    assert.match(prompt, /\[tool result micro-compacted\]/u);
+    assert.match(prompt, /<tool_atom id="tool-call-web-fetch-1"/u);
+    assert.match(prompt, /attempts="2"/u);
+    assert.match(prompt, /<tool_use>https:\/\/example\.com\/context-compaction-notes/u);
+    assert.match(prompt, /<tool_result>Context compaction notes mention boundary/u);
+    assert.match(prompt, /Remembered turns covered: 2/u);
     assert.match(prompt, /Boundary source: rolling session memory/u);
+    assert.ok((context.timings.promptProjectionStablePartCount as number) >= 2);
+    assert.ok((context.timings.promptProjectionVolatilePartCount as number) >= 3);
 
     const messageTranscript = context.messages
       .map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content))
@@ -103,6 +160,8 @@ async function main() {
       },
     });
     const compactedPrompt = flattenSystemPrompt(compactedContext.systemPrompt);
+    assert.match(compactedPrompt, /## Session Focus/u);
+    assert.match(compactedPrompt, /别把摘要当成新用户消息/u);
     assert.match(compactedPrompt, /## Context Boundary/u);
     assert.match(compactedPrompt, /## Context Checkpoint/u);
     assert.match(compactedPrompt, /Archived turns covered: 2/u);
@@ -144,6 +203,106 @@ async function main() {
     const updatedSnapshot = getSessionSnapshot(session.id);
     assert.equal(updatedSnapshot.compactionState.compactedTurnCount, 3);
     assert.ok(updatedSnapshot.compactionState.lastCompactedMessageId);
+
+    updateRuntimeSettings({
+      recentTurnsCount: 3,
+    });
+
+    const microCompactSession = createSession("session micro compact smoke");
+    createSessionMessage({
+      sessionId: microCompactSession.id,
+      clientMessageId: "micro-user-1",
+      deviceId: "desktop",
+      role: "user",
+      content: "先给我一大段诊断输出。",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: microCompactSession.id,
+      clientMessageId: "micro-assistant-1",
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content: Array.from({ length: 240 }, (_, index) => `诊断片段 ${index + 1}: 这里是很长的历史输出，用来模拟旧的大段 assistant 结果。`).join("\n"),
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: microCompactSession.id,
+      clientMessageId: "micro-user-2",
+      deviceId: "desktop",
+      role: "user",
+      content: "别急着做 checkpoint，先保留最近现场。",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: microCompactSession.id,
+      clientMessageId: "micro-assistant-2",
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content: "好的，我继续保留最近现场，但会想办法别让旧输出太胖。",
+      attachmentIds: [],
+    });
+    createSessionMessage({
+      sessionId: microCompactSession.id,
+      clientMessageId: "micro-user-3",
+      deviceId: "desktop",
+      role: "user",
+      content: "现在告诉我旧的大段 assistant 输出会不会被瘦身。",
+      attachmentIds: [],
+    });
+
+    const microCompactedContext = await loadContext(microCompactSession.id, new AbortController().signal);
+    const microCompactedTranscript = microCompactedContext.messages
+      .map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content))
+      .join("\n");
+    assert.match(microCompactedTranscript, /\[Micro-compacted assistant output\]/u);
+    assert.match(microCompactedTranscript, /现在告诉我旧的大段 assistant 输出会不会被瘦身/u);
+    assert.equal(microCompactedContext.timings.compactionMicroCompactedMessages, 1);
+
+    const midTurnContext = await loadContext(session.id, new AbortController().signal, {
+      midTurn: {
+        currentUserRequest: "再补一条 context boundary，别让模型把摘要当成新的用户消息。",
+        assistantDraft: "已经把滚动摘要和 recent turns 分层，后面只差一条明确的边界提示。",
+        recoveryReason: "reload_context",
+        note: "这是同一轮中的上下文续跑，不要把之前已经做过的工具尝试再做一遍。",
+        toolAtoms: [
+          {
+            toolCallId: "midturn-web-fetch-1",
+            toolName: "web_fetch",
+            status: "succeeded",
+            input: "https://example.com/context-boundary",
+            result: "Boundary notes already confirm summary text is not a fresh user turn.",
+          },
+          {
+            toolCallId: "midturn-edit-1",
+            toolName: "edit",
+            status: "in_progress",
+            input: "apps/daemon/src/context/compact/attachments.ts",
+            result: null,
+          },
+        ],
+        toolStates: [
+          {
+            toolName: "grep",
+            status: "succeeded",
+            detail: "已经确认 summary 和 recent turns 都在主链路里。",
+          },
+          {
+            toolName: "edit",
+            status: "in_progress",
+            detail: "正在补 boundary block。",
+          },
+        ],
+      },
+    });
+    const midTurnPrompt = flattenSystemPrompt(midTurnContext.systemPrompt);
+    assert.match(midTurnPrompt, /## Mid-Turn Continuation/u);
+    assert.match(midTurnPrompt, /reload_context/u);
+    assert.match(midTurnPrompt, /<mid_turn_tool_transcript>/u);
+    assert.match(midTurnPrompt, /<tool_atom id="midturn-web-fetch-1"/u);
+    assert.match(midTurnPrompt, /<tool_use>https:\/\/example\.com\/context-boundary/u);
+    assert.match(midTurnPrompt, /<tool_result>Boundary notes already confirm/u);
+    assert.match(midTurnPrompt, /<tool_atom id="midturn-edit-1"/u);
+    assert.match(midTurnPrompt, /\[still running\]/u);
   } finally {
     rmSync(tempDataDir, { recursive: true, force: true });
   }

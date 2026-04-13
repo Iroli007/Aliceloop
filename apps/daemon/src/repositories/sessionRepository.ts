@@ -16,6 +16,7 @@ import {
   type SessionCompactionState,
   type SessionEvent,
   type SessionFocusState,
+  type SessionMemoryState,
   type SessionRollingSummary,
   type SessionMessage,
   type SessionMessageStatus,
@@ -95,6 +96,17 @@ interface SessionCompactionStateRow {
   compactedTurnCount: number;
   lastCompactedMessageId: string | null;
   consecutiveFailures: number;
+  updatedAt: string;
+}
+
+interface SessionMemoryStateRow {
+  sessionId: string;
+  currentPhase: string;
+  summary: string;
+  completedJson: string;
+  remainingJson: string;
+  decisionsJson: string;
+  rememberedTurnCount: number;
   updatedAt: string;
 }
 
@@ -262,6 +274,15 @@ interface UpdateSessionCompactionStateInput {
   consecutiveFailures?: number;
 }
 
+interface UpdateSessionMemoryStateInput {
+  currentPhase?: string | null;
+  summary?: string | null;
+  completed?: string[];
+  remaining?: string[];
+  decisions?: string[];
+  rememberedTurnCount?: number;
+}
+
 function summarizeMessagePreview(content: string | null) {
   if (!content) {
     return null;
@@ -331,6 +352,19 @@ function createEmptySessionRollingSummary(sessionId: string): SessionRollingSumm
   };
 }
 
+function createEmptySessionMemoryState(sessionId: string): SessionMemoryState {
+  return {
+    sessionId,
+    currentPhase: "",
+    summary: "",
+    completed: [],
+    remaining: [],
+    decisions: [],
+    rememberedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
 function createEmptySessionCompactionState(sessionId: string): SessionCompactionState {
   return {
     sessionId,
@@ -374,6 +408,19 @@ function mapSessionRollingSummaryRow(row: SessionRollingSummaryRow): SessionRoll
     remaining: parseJsonStringArray(row.remainingJson),
     decisions: parseJsonStringArray(row.decisionsJson),
     summarizedTurnCount: Math.max(0, Math.trunc(row.summarizedTurnCount ?? 0)),
+    updatedAt: row.updatedAt,
+  };
+}
+
+function mapSessionMemoryStateRow(row: SessionMemoryStateRow): SessionMemoryState {
+  return {
+    sessionId: row.sessionId,
+    currentPhase: normalizeFocusText(row.currentPhase),
+    summary: normalizeFocusText(row.summary),
+    completed: parseJsonStringArray(row.completedJson),
+    remaining: parseJsonStringArray(row.remainingJson),
+    decisions: parseJsonStringArray(row.decisionsJson),
+    rememberedTurnCount: Math.max(0, Math.trunc(row.rememberedTurnCount ?? 0)),
     updatedAt: row.updatedAt,
   };
 }
@@ -982,6 +1029,31 @@ function readSessionCompactionStateRow(
   return row ? mapSessionCompactionStateRow(row) : createEmptySessionCompactionState(sessionId);
 }
 
+function readSessionMemoryStateRow(
+  sessionId: string,
+  db: Database.Database = getDatabase(),
+) {
+  const row = db
+    .prepare(
+      `
+        SELECT
+          session_id AS sessionId,
+          current_phase AS currentPhase,
+          summary,
+          completed_json AS completedJson,
+          remaining_json AS remainingJson,
+          decisions_json AS decisionsJson,
+          remembered_turn_count AS rememberedTurnCount,
+          updated_at AS updatedAt
+        FROM session_memory_state
+        WHERE session_id = ?
+      `,
+    )
+    .get(sessionId) as SessionMemoryStateRow | undefined;
+
+  return row ? mapSessionMemoryStateRow(row) : createEmptySessionMemoryState(sessionId);
+}
+
 export function hasSession(sessionId: string) {
   return Boolean(getSessionRow(sessionId));
 }
@@ -1019,6 +1091,10 @@ export function getSessionFocusState(sessionId: string) {
 
 export function getSessionRollingSummary(sessionId: string) {
   return readSessionRollingSummaryRow(sessionId);
+}
+
+export function getSessionMemoryState(sessionId: string) {
+  return readSessionMemoryStateRow(sessionId);
 }
 
 export function getSessionCompactionState(sessionId: string) {
@@ -1161,6 +1237,67 @@ export function updateSessionRollingSummary(sessionId: string, input: UpdateSess
   })();
 
   return readSessionRollingSummaryRow(sessionId, db);
+}
+
+export function updateSessionMemoryState(sessionId: string, input: UpdateSessionMemoryStateInput) {
+  const db = getDatabase();
+  const current = readSessionMemoryStateRow(sessionId, db);
+  const nextState: SessionMemoryState = {
+    sessionId,
+    currentPhase: input.currentPhase !== undefined ? normalizeFocusText(input.currentPhase) : current.currentPhase,
+    summary: input.summary !== undefined ? normalizeFocusText(input.summary) : current.summary,
+    completed: input.completed !== undefined ? normalizeFocusList(input.completed) : current.completed,
+    remaining: input.remaining !== undefined ? normalizeFocusList(input.remaining) : current.remaining,
+    decisions: input.decisions !== undefined ? normalizeFocusList(input.decisions) : current.decisions,
+    rememberedTurnCount: input.rememberedTurnCount !== undefined
+      ? Math.max(0, Math.trunc(input.rememberedTurnCount))
+      : current.rememberedTurnCount,
+    updatedAt: new Date().toISOString(),
+  };
+
+  db.transaction(() => {
+    db.prepare(
+      `
+        INSERT INTO session_memory_state (
+          session_id,
+          current_phase,
+          summary,
+          completed_json,
+          remaining_json,
+          decisions_json,
+          remembered_turn_count,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          current_phase = excluded.current_phase,
+          summary = excluded.summary,
+          completed_json = excluded.completed_json,
+          remaining_json = excluded.remaining_json,
+          decisions_json = excluded.decisions_json,
+          remembered_turn_count = excluded.remembered_turn_count,
+          updated_at = excluded.updated_at
+      `,
+    ).run(
+      nextState.sessionId,
+      nextState.currentPhase,
+      nextState.summary,
+      JSON.stringify(nextState.completed),
+      JSON.stringify(nextState.remaining),
+      JSON.stringify(nextState.decisions),
+      nextState.rememberedTurnCount,
+      nextState.updatedAt,
+    );
+
+    db.prepare(
+      `
+        UPDATE sessions
+        SET updated_at = ?
+        WHERE id = ?
+      `,
+    ).run(nextState.updatedAt, sessionId);
+  })();
+
+  return readSessionMemoryStateRow(sessionId, db);
 }
 
 export function updateSessionCompactionState(sessionId: string, input: UpdateSessionCompactionStateInput) {
@@ -2163,6 +2300,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
   const project = getSessionProjectBinding(sessionId);
   const focusState = readSessionFocusStateRow(sessionId);
   const rollingSummary = readSessionRollingSummaryRow(sessionId);
+  const sessionMemory = readSessionMemoryStateRow(sessionId);
   const compactionState = readSessionCompactionStateRow(sessionId);
   const planMode = getSessionPlanModeState(sessionId);
   const attachments = listAttachments(sessionId);
@@ -2190,6 +2328,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     project,
     focusState,
     rollingSummary,
+    sessionMemory,
     compactionState,
     messages,
     attachments,

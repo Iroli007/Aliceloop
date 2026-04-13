@@ -1,4 +1,4 @@
-import type { SessionFocusState, SessionRollingSummary } from "@aliceloop/runtime-core";
+import type { SessionFocusState, SessionMemoryState } from "@aliceloop/runtime-core";
 import type { SessionTurn } from "../session/rollingSummary";
 
 const NO_TOOLS_PREAMBLE = [
@@ -34,14 +34,14 @@ function formatTurns(turns: SessionTurn[]) {
     .join("\n\n");
 }
 
-function formatSessionMemory(summary: SessionRollingSummary) {
+function formatSessionMemory(summary: SessionMemoryState) {
   return [
     `Current phase: ${summary.currentPhase || "(empty)"}`,
     `Summary: ${summary.summary || "(empty)"}`,
     `Completed: ${summary.completed.join(" | ") || "(empty)"}`,
     `Remaining: ${summary.remaining.join(" | ") || "(empty)"}`,
     `Decisions: ${summary.decisions.join(" | ") || "(empty)"}`,
-    `Archived turns covered: ${summary.summarizedTurnCount}`,
+    `Remembered turns covered: ${summary.rememberedTurnCount}`,
   ].join("\n");
 }
 
@@ -58,9 +58,10 @@ function formatFocus(focusState: SessionFocusState) {
 
 export function buildCheckpointSummaryPrompt(input: {
   focusState: SessionFocusState;
-  sessionMemory: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
   hiddenTurns: SessionTurn[];
   keptRecentTurnsCount: number;
+  toolTranscriptBlock?: string;
 }) {
   return [
     NO_TOOLS_PREAMBLE,
@@ -68,6 +69,7 @@ export function buildCheckpointSummaryPrompt(input: {
     "You are creating a checkpoint summary for a long-running coding thread.",
     "The raw messages for earlier turns will be removed from the model-visible context.",
     "Write a precise handoff for the next model so it can continue the work without repeating already-completed steps.",
+    "If a tool transcript is present, keep each tool_use and tool_result paired in your mental model and do not turn finished tool results into pending work.",
     "",
     "In <analysis>, reason through the hidden turns chronologically and identify what changed, what matters, and what should not be repeated.",
     "In <summary>, produce a concise but high-signal handoff with these sections:",
@@ -87,6 +89,13 @@ export function buildCheckpointSummaryPrompt(input: {
     "",
     "## Session Memory",
     formatSessionMemory(input.sessionMemory),
+    ...(input.toolTranscriptBlock
+      ? [
+          "",
+          "## Recent Tool Transcript",
+          input.toolTranscriptBlock,
+        ]
+      : []),
     "",
     "## Hidden Turns To Checkpoint",
     formatTurns(input.hiddenTurns),
@@ -95,11 +104,12 @@ export function buildCheckpointSummaryPrompt(input: {
 
 export function buildIncrementalCheckpointSummaryPrompt(input: {
   focusState: SessionFocusState;
-  sessionMemory: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
   existingCheckpointSummary: string;
   previousCompactedTurnCount: number;
   newHiddenTurns: SessionTurn[];
   keptRecentTurnsCount: number;
+  toolTranscriptBlock?: string;
 }) {
   return [
     NO_TOOLS_PREAMBLE,
@@ -107,6 +117,7 @@ export function buildIncrementalCheckpointSummaryPrompt(input: {
     "You are updating an existing checkpoint summary for a long-running coding thread.",
     "The previously hidden turns remain unchanged. Only the newly hidden turns below need to be merged into the checkpoint.",
     "Preserve the important context from the existing checkpoint summary, fold in the new hidden turns, and avoid duplicating points that are already captured.",
+    "If a tool transcript is present, keep each tool_use and tool_result paired in your mental model and do not mark already-finished tool results as work still pending.",
     "",
     "In <analysis>, compare the existing checkpoint summary with the newly hidden turns and identify what changed.",
     "In <summary>, return a refreshed full checkpoint handoff with these sections:",
@@ -130,6 +141,13 @@ export function buildIncrementalCheckpointSummaryPrompt(input: {
     "",
     "## Session Memory",
     formatSessionMemory(input.sessionMemory),
+    ...(input.toolTranscriptBlock
+      ? [
+          "",
+          "## Recent Tool Transcript",
+          input.toolTranscriptBlock,
+        ]
+      : []),
     "",
     "## Newly Hidden Turns To Merge",
     formatTurns(input.newHiddenTurns),
@@ -143,7 +161,7 @@ export function extractSummaryFromXml(text: string) {
 
 export function buildFallbackCheckpointSummary(input: {
   focusState: SessionFocusState;
-  sessionMemory: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
   hiddenTurns: SessionTurn[];
 }) {
   const latestHiddenTurn = input.hiddenTurns.at(-1);
@@ -168,7 +186,7 @@ export function buildFallbackCheckpointSummary(input: {
 export function buildIncrementalFallbackCheckpointSummary(input: {
   existingCheckpointSummary: string;
   focusState: SessionFocusState;
-  sessionMemory: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
   newHiddenTurns: SessionTurn[];
 }) {
   const latestHiddenTurn = input.newHiddenTurns.at(-1);
@@ -197,6 +215,7 @@ export function buildCheckpointSummaryBlock(summary: string, compactedTurnCount:
   return [
     "## Context Checkpoint",
     "- Treat this as the handoff summary for earlier turns that are no longer present as raw messages.",
+    "- This is archived handoff memory, not a fresh user turn. Resolve the current reply from the latest raw messages and focus block first.",
     "- Continue from this checkpoint instead of restarting the thread from zero.",
     "",
     "<checkpoint_summary>",

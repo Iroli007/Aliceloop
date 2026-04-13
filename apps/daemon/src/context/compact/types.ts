@@ -3,6 +3,7 @@ import type { ModelMessage } from "ai";
 export interface CompactionLoadOptions {
   forceCheckpoint?: boolean;
   keepRecentTurnsCount?: number;
+  additionalBlocks?: string[];
 }
 
 export interface ProjectedModelContext {
@@ -10,6 +11,7 @@ export interface ProjectedModelContext {
   boundaryBlock: string;
   sessionMemoryBlock: string;
   checkpointSummaryBlock: string;
+  toolTranscriptBlock: string;
   usedCheckpoint: boolean;
   usedSessionMemory: boolean;
   boundaryKind: "none" | "session_memory" | "checkpoint";

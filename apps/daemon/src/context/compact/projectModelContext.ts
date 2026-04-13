@@ -4,6 +4,7 @@ import { buildSessionMessagesFromSnapshot, type SessionContextFragments } from "
 import { splitSessionTurns } from "../session/rollingSummary";
 import { buildCompactionBoundaryBlock } from "./attachments";
 import { ensureCheckpointCompact } from "./compact";
+import { microCompactMessages } from "./microCompact";
 import {
   estimateModelContextTokens,
   resolveKeptRecentTurnsCount,
@@ -39,16 +40,20 @@ export async function projectModelContext(input: {
   const sessionMemoryMs = roundMs(nowMs() - sessionMemoryStartedAt);
 
   const initialMessages = buildSessionMessagesFromSnapshot(snapshot, requestedRecentTurnsCount);
+  const initialMicroCompactStartedAt = nowMs();
+  const initialMicroCompactedMessages = microCompactMessages(initialMessages);
+  const initialMicroCompactMs = roundMs(nowMs() - initialMicroCompactStartedAt);
   const estimatedTokens = estimateModelContextTokens({
     blocks: [
       input.sessionContext.activeTurn,
       input.sessionContext.latestTurn,
       input.sessionContext.sessionFocus,
       sessionMemory.block,
-      input.sessionContext.recentToolActivity,
+      input.sessionContext.recentToolTranscript || input.sessionContext.recentToolActivity,
       input.sessionContext.recentResearchMemory,
+      ...(input.options?.additionalBlocks ?? []),
     ],
-    messages: initialMessages,
+    messages: initialMicroCompactedMessages.messages,
   });
 
   const shouldCompact = shouldCompactContext({
@@ -65,10 +70,11 @@ export async function projectModelContext(input: {
     });
 
     return {
-      messages: initialMessages,
+      messages: initialMicroCompactedMessages.messages,
       boundaryBlock,
       sessionMemoryBlock: sessionMemory.block,
       checkpointSummaryBlock: "",
+      toolTranscriptBlock: input.sessionContext.recentToolTranscript,
       usedCheckpoint: false,
       usedSessionMemory: Boolean(sessionMemory.summary.summary),
       boundaryKind: hiddenTurnCount > 0 ? "session_memory" : "none",
@@ -80,6 +86,9 @@ export async function projectModelContext(input: {
         sessionMemoryMs,
         checkpointMs: 0,
         checkpointIncremental: 0,
+        microCompactMs: initialMicroCompactMs,
+        microCompactedMessages: initialMicroCompactedMessages.compactedCount,
+        microCompactedCharsSaved: initialMicroCompactedMessages.savedChars,
         totalMs: roundMs(nowMs() - startedAt),
       },
     };
@@ -104,6 +113,7 @@ export async function projectModelContext(input: {
     sessionMemory: refreshedSessionMemory.summary,
     hiddenTurns,
     keptRecentTurnsCount,
+    recentToolTranscript: input.sessionContext.recentToolTranscript,
     abortSignal: input.abortSignal,
     force: forceCheckpoint,
   });
@@ -113,12 +123,18 @@ export async function projectModelContext(input: {
     keptRecentTurnsCount,
     source: "checkpoint",
   });
+  const compactedVisibleMessagesStartedAt = nowMs();
+  const compactedVisibleMessages = microCompactMessages(
+    buildSessionMessagesFromSnapshot(snapshot, keptRecentTurnsCount),
+  );
+  const compactedVisibleMessagesMs = roundMs(nowMs() - compactedVisibleMessagesStartedAt);
 
   return {
-    messages: buildSessionMessagesFromSnapshot(snapshot, keptRecentTurnsCount),
+    messages: compactedVisibleMessages.messages,
     boundaryBlock,
     sessionMemoryBlock: refreshedSessionMemory.block,
     checkpointSummaryBlock: checkpoint.summaryBlock,
+    toolTranscriptBlock: input.sessionContext.recentToolTranscript,
     usedCheckpoint: true,
     usedSessionMemory: Boolean(refreshedSessionMemory.summary.summary),
     boundaryKind: hiddenTurns.length > 0 ? "checkpoint" : "none",
@@ -131,6 +147,9 @@ export async function projectModelContext(input: {
       checkpointMs,
       compactedTurnCount: checkpoint.compactedTurnCount,
       checkpointIncremental: checkpoint.incremental ? 1 : 0,
+      microCompactMs: compactedVisibleMessagesMs,
+      microCompactedMessages: compactedVisibleMessages.compactedCount,
+      microCompactedCharsSaved: compactedVisibleMessages.savedChars,
       checkpointUsedFallback: checkpoint.usedFallback ? 1 : 0,
       checkpointFailureCount: checkpoint.consecutiveFailures,
       totalMs: roundMs(nowMs() - startedAt),

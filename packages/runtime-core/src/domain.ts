@@ -741,6 +741,17 @@ export interface SessionRollingSummary {
   updatedAt: string | null;
 }
 
+export interface SessionMemoryState {
+  sessionId: string;
+  currentPhase: string;
+  summary: string;
+  completed: string[];
+  remaining: string[];
+  decisions: string[];
+  rememberedTurnCount: number;
+  updatedAt: string | null;
+}
+
 export interface SessionCompactionState {
   sessionId: string;
   checkpointSummary: string;
@@ -756,6 +767,7 @@ export interface SessionSnapshot {
   planMode: SessionPlanModeState;
   focusState: SessionFocusState;
   rollingSummary: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
   compactionState: SessionCompactionState;
   messages: SessionMessage[];
   attachments: Attachment[];
