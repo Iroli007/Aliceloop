@@ -54,6 +54,10 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
       return runtime.readTextFile(context, input);
     },
 
+    readTextFileWindow(input) {
+      return runtime.readTextFileWindow(context, input);
+    },
+
     writeBinaryFile(input) {
       return runtime.writeBinaryFile(context, input);
     },

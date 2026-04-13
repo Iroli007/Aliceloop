@@ -57,7 +57,7 @@ export const STATIC_BASE_TOOL_BLOCK = [
   "Stable atomic tool base for every turn:",
   `- ${DEFAULT_ATTACHED_TOOL_NAMES.join(", ")}`,
   "These six tools are the long-lived execution substrate for this project.",
-  "Skills should usually work through bash, read, and write. Use glob, grep, and edit only when the task truly needs file discovery, code search, or precise in-place edits.",
+  "Prefer the dedicated atomic tools for file discovery, code search, reading, writing, and exact edits. Reserve bash for shell execution that genuinely needs a terminal.",
   "Do not use bash, curl, grep, or local thread files as a substitute for web research. If the user wants external information, use `web_search` when it is attached; otherwise call `use_skill` with `web-search` and continue after the context reload.",
   "The native `agent` tool is turn-scoped for explicit isolated sub-agent work. It is not part of the default base and must not be used for ordinary single-thread tasks.",
   "Extra native tools are exceptions layered on top of this base, not the default path.",
@@ -136,7 +136,9 @@ export function buildToolSet(
   // 1. The six atomic tools are always available as the stable execution base.
   // 2. Final tool set = base 6 ∪ direct tool hits ∪ additionalToolNames ∪ allowed-tools from routed skills.
   // 3. Skills provide workflow guidance and define the non-base capability budget for the turn.
-  const allSandboxTools = createSandboxTools(sandbox);
+  const allSandboxTools = createSandboxTools(sandbox, {
+    sessionId: options?.sessionId,
+  });
   const tools: ToolSet = {};
 
   const requestedNames = collectRequestedToolNames(activeSkills, options);

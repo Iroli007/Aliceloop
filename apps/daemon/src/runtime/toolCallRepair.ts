@@ -204,6 +204,11 @@ function buildNormalizedInput(toolName: string, attributes: Record<string, unkno
       caseSensitive: pickBooleanAttribute(attributes, "caseSensitive", "case_sensitive"),
       maxCount: pickIntegerAttribute(attributes, "maxCount", "max_count"),
       context: pickIntegerAttribute(attributes, "context"),
+      outputMode: pickStringAttribute(attributes, "outputMode", "output_mode"),
+      type: pickStringAttribute(attributes, "type"),
+      headLimit: pickIntegerAttribute(attributes, "headLimit", "head_limit"),
+      offset: pickIntegerAttribute(attributes, "offset"),
+      multiline: pickBooleanAttribute(attributes, "multiline"),
     };
   }
 
@@ -232,6 +237,21 @@ function buildNormalizedInput(toolName: string, attributes: Record<string, unkno
       filePath,
       oldText,
       newText,
+      replaceAll: pickBooleanAttribute(attributes, "replaceAll", "replace_all"),
+    };
+  }
+
+  if (toolName === "glob") {
+    const pattern = pickStringAttribute(attributes, "pattern", "glob");
+    if (!pattern) {
+      return null;
+    }
+
+    return {
+      pattern,
+      cwd: pickStringAttribute(attributes, "cwd", "path"),
+      limit: pickIntegerAttribute(attributes, "limit"),
+      offset: pickIntegerAttribute(attributes, "offset"),
     };
   }
 

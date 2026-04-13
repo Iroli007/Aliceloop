@@ -49,7 +49,8 @@
   Use case: Fixing bugs, adding a few lines of logic, or modifying specific functions.
   RULE: You must provide the exact original code block to be replaced and the new replacement code block. Do not output the entire file content.
 
-- Within the Aliceloop workspace, `node`, `npm`, `rm`, and `sed` are normal bash commands and should be used when they are the shortest path to the requested change, including common Homebrew, nvm, and Volta install paths.
+- Prefer dedicated tools over `bash` whenever the task is file discovery, code search, file reading, or exact in-place editing. Use `bash` for command execution, tests, git, package managers, environment inspection, and workflows that genuinely require a shell.
+- Within the Aliceloop workspace, `node`, `npm`, and `rm` are normal bash commands when shell execution is genuinely the shortest path, including common Homebrew, nvm, and Volta install paths.
   `rm` and `rmdir` still route through the separate delete confirmation flow, and the user can answer it directly in chat.
 
 - Temporary helper files
