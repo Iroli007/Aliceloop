@@ -44,3 +44,5 @@ apps/**/build/
 packages/**/dist/
 apps/desktop/release/
 .alma-snapshots
+.codex-artifacts/
+skills-backups/
