@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,20 +11,26 @@ async function main() {
   const [
     { createAttachment, createSession, upsertSessionJob },
     { getShellOverview },
+    { getDefaultProjectDirectory },
     { getTaskRun, listTaskRuns },
     { runManagedTask },
   ] = await Promise.all([
     import("../src/repositories/sessionRepository.ts"),
     import("../src/repositories/overviewRepository.ts"),
+    import("../src/repositories/projectRepository.ts"),
     import("../src/repositories/taskRunRepository.ts"),
     import("../src/services/taskRunner.ts"),
   ]);
 
   const session = createSession("任务表烟雾测试");
+  const workspaceRoot = getDefaultProjectDirectory().path;
 
   const studyJobId = randomUUID();
-  const scriptPath = join(tempDataDir, "echo-task.js");
+  const scriptPath = join(workspaceRoot, "echo-task.js");
+  const documentPath = join(workspaceRoot, "runtime-notes.md");
+  mkdirSync(workspaceRoot, { recursive: true });
   writeFileSync(scriptPath, 'console.log("task-runner-ok");\n', "utf8");
+  writeFileSync(documentPath, "# Runtime notes\n\nTask runner smoke document.\n", "utf8");
 
   upsertSessionJob({
     id: studyJobId,
@@ -77,7 +83,7 @@ async function main() {
   const documentIngest = await runManagedTask({
     taskType: "document-ingest",
     title: "Runtime 设计草稿",
-    sourcePath: "/tmp/runtime-notes.pdf",
+    sourcePath: documentPath,
     sourceKind: "handout",
     documentKind: "digital",
   });
@@ -91,15 +97,15 @@ async function main() {
     title: "运行任务测试脚本",
     command: "node",
     args: [scriptPath],
-    cwd: tempDataDir,
+    cwd: workspaceRoot,
   });
   const failingScript = await runManagedTask({
     taskType: "script-runner",
     sessionId: session.id,
     title: "运行失败脚本",
     command: "node",
-    args: [join(tempDataDir, "missing-script.js")],
-    cwd: tempDataDir,
+    args: [join(workspaceRoot, "missing-script.js")],
+    cwd: workspaceRoot,
   });
   const refreshedTaskList = listTaskRuns({ limit: 20 });
   const refreshedOverview = getShellOverview();

@@ -4,7 +4,6 @@ description: Search the web for information using the built-in `web_search` tool
 allowed-tools:
   - bash
   - web_search
-  - web_fetch
   - ChromeRelayStatus
 ---
 
@@ -35,13 +34,13 @@ web_search(query="your search query", max_results=5)
 
 ## Fetching Page Content
 
-After finding URLs from search, use `web_fetch` to read the actual page content:
+After finding URLs from search, route the `web-fetch` skill when the actual page content must be read:
 
 ```text
 web_fetch(url="https://example.com/article")
 ```
 
-- Use it when exact page content matters more than discovery
+- Use `web_fetch` through that skill when exact page content matters more than discovery
 - Prefer official docs, primary sources, and pages with clear publication dates
 
 ## Browser Fallback
