@@ -1,3 +1,5 @@
+import type { ToolWorkflowEntry } from "./toolWorkflow";
+
 export type DocumentKind = "digital" | "hybrid" | "scanned";
 export type SourceKind = "book" | "web" | "handout";
 export type ArtifactKind = "study-page" | "topic-page" | "review-pack";
@@ -580,6 +582,7 @@ export interface SessionSnapshot {
   project: SessionProjectBinding | null;
   messages: SessionMessage[];
   attachments: Attachment[];
+  toolWorkflowEntries: ToolWorkflowEntry[];
   pendingToolApprovals: ToolApproval[];
   resolvedToolApprovals: ToolApproval[];
   jobs: JobRunDetail[];

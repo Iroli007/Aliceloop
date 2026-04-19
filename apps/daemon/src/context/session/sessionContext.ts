@@ -7,11 +7,9 @@ import type { SessionMessage } from "@aliceloop/runtime-core";
 import type { SessionSnapshot } from "@aliceloop/runtime-core";
 import type { SessionProjectBinding } from "@aliceloop/runtime-core";
 import {
+  buildTurnIntentDecision,
+  prefersDeepResearchFetch,
   type SkillRouteHints,
-  inferStickySkillIdsFromContext,
-  needsBrowserAutomation,
-  needsWebFetch,
-  needsWebResearch,
 } from "../skills/skillRouting";
 import {
   buildSessionAttachmentSandboxRoots,
@@ -250,11 +248,6 @@ function needsResearchContinuation(messageText: string) {
   return /查|搜|搜索|核对|验证|确认|平台|官网|B站|微博|粉丝|播放|数据|时间|日期|几月几日|最新|当前|\d{1,2}月\d{1,2}日/u.test(messageText);
 }
 
-function needsResearchDeepRead(messageText: string) {
-  const trimmed = messageText.trim();
-  return /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u.test(trimmed);
-}
-
 function needsImmediateTimeVerification(messageText: string) {
   const trimmed = messageText.trim();
   return /现在几点|几点了|当前时间|现在什么时间|今日日期|现在日期|现在是几月几号/u.test(trimmed)
@@ -465,69 +458,6 @@ export interface SessionContextFragments {
   timings: SessionContextFragmentTimings;
 }
 
-function buildSkillRouteHints(input: {
-  latestContent: string;
-  continuationLike: boolean;
-  researchContinuation: boolean;
-  carryForwardFacts: string | null;
-  worksetConstraints: string | null;
-  recentToolNames: string[];
-}): SkillRouteHints {
-  const stickySkillIds = new Set<string>();
-  const reasons = new Set<string>();
-  const currentQuery = input.latestContent;
-
-  const sawRecentWebTool = input.recentToolNames.some((toolName) => {
-    return toolName === "web_search" || toolName === "web_fetch";
-  });
-  const sawRecentWebFetchTool = input.recentToolNames.some((toolName) => {
-    return toolName === "web_fetch";
-  });
-  const needsDeepResearchFollowup = sawRecentWebTool && needsResearchDeepRead(currentQuery);
-  const sawRecentBrowserTool = input.recentToolNames.some((toolName) => {
-    return toolName.startsWith("browser_");
-  });
-  const loginOrQrContinuation = looksLikeLoginOrQrContinuationContext(input.carryForwardFacts)
-    || looksLikeLoginOrQrContinuationContext(input.worksetConstraints);
-
-  for (const skillId of inferStickySkillIdsFromContext(currentQuery)) {
-    stickySkillIds.add(skillId);
-  }
-
-  if (
-    input.researchContinuation
-    || (input.continuationLike && sawRecentWebTool)
-    || needsWebResearch(currentQuery)
-    || needsDeepResearchFollowup
-  ) {
-    stickySkillIds.add("web-search");
-    reasons.add("carry forward live research/fact-check tools");
-  }
-
-  if (
-    (input.continuationLike && sawRecentWebFetchTool)
-    || needsWebFetch(currentQuery)
-    || needsDeepResearchFollowup
-  ) {
-    stickySkillIds.add("web-fetch");
-    reasons.add("carry forward recent page reading");
-  }
-
-  if (
-    (input.continuationLike && sawRecentBrowserTool)
-    || (input.continuationLike && needsBrowserAutomation(currentQuery))
-    || (input.continuationLike && loginOrQrContinuation)
-  ) {
-    stickySkillIds.add("browser");
-    reasons.add("carry forward recent browser context");
-  }
-
-  return {
-    stickySkillIds: [...stickySkillIds],
-    reasons: [...reasons],
-  };
-}
-
 function looksLikeLoginOrQrContinuationContext(value: string | null | undefined) {
   if (!value) {
     return false;
@@ -733,7 +663,7 @@ function buildRecentConversationFocusFromSnapshot(
   const sawRecentWebTool = recentToolNames.some((toolName) => {
     return toolName === "web_search" || toolName === "web_fetch";
   });
-  const needsDeepResearchFollowup = sawRecentWebTool && needsResearchDeepRead(latestContent);
+  const needsDeepResearchFollowup = sawRecentWebTool && prefersDeepResearchFetch(latestContent);
   const resolvedCurrentRequest = buildResolvedCurrentRequest({
     latestContent,
     continuationLike,
@@ -750,14 +680,13 @@ function buildRecentConversationFocusFromSnapshot(
     originalTopicAnchor,
     carryForwardFacts,
   });
-  const routeHints = buildSkillRouteHints({
-    latestContent,
+  const routeHints = buildTurnIntentDecision(latestContent, {
     continuationLike,
     researchContinuation,
-    carryForwardFacts,
-    worksetConstraints,
     recentToolNames,
-  });
+    loginOrQrContinuation: looksLikeLoginOrQrContinuationContext(carryForwardFacts)
+      || looksLikeLoginOrQrContinuationContext(worksetConstraints),
+  }).routeHints;
 
   const lines = [
     "## Recent Conversation Focus",

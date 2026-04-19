@@ -18,6 +18,11 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, "src/renderer"),
+    resolve: {
+      alias: {
+        "@aliceloop/runtime-core": resolve(__dirname, "../../packages/runtime-core/src/index.ts"),
+      },
+    },
     plugins: [react()],
     build: {
       outDir: resolve(__dirname, "dist/renderer"),

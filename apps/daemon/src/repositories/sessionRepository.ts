@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  buildToolWorkflowEntries,
   type Attachment,
   type DeviceCapabilities,
   type DevicePresence,
@@ -1563,6 +1564,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
   const jobs = listJobs(sessionId);
   const devices = listDevices();
   const runtimePresence = buildRuntimePresence(devices);
+  const toolWorkflowEntries = buildToolWorkflowEntries(listSessionEventsSince(sessionId, 0));
   const db = getDatabase();
   const lastEvent = db
     .prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id = ?")
@@ -1583,6 +1585,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     project,
     messages,
     attachments,
+    toolWorkflowEntries,
     pendingToolApprovals: listPendingToolApprovals(sessionId),
     resolvedToolApprovals: listResolvedApprovalEvents(sessionId),
     jobs,

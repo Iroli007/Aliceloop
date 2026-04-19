@@ -7,7 +7,7 @@ import {
 } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
 import { buildSkillContextBlock, selectRelevantSkillDefinitions } from "./skills/skillLoader";
-import { mergeSkillRouteHints, needsBrowserAutomation, needsCameraCapture, needsEpisodicHistoryRecall, needsFileManagement, needsImageAnalysis, needsWebFetch, needsWebResearch } from "./skills/skillRouting";
+import { buildTurnIntentDecision, mergeSkillRouteHints, needsEpisodicHistoryRecall } from "./skills/skillRouting";
 import { buildToolSet } from "./tools/toolRegistry";
 import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
@@ -51,10 +51,6 @@ const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
 interface LoadContextOptions {
   additionalStickySkillIds?: string[];
   additionalToolNames?: string[];
-}
-
-function prefersDeepResearchFetch(query: string) {
-  return /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u.test(query.trim());
 }
 
 export async function loadContext(
@@ -114,6 +110,13 @@ export async function loadContext(
         }
       : null,
   );
+  const intentDecision = buildTurnIntentDecision(userQuery, {
+    hints: routeHints,
+    hasImageAttachment: latestUserHasImageAttachment,
+    researchContinuation: recentConversationFocus.researchContinuation,
+    continuationLike: recentConversationFocus.continuationLike,
+  });
+  const turnRouteHints = intentDecision.routeHints;
   timings.cachedSkillCount = 0;
   timings.cachedSkillGroupCount = 0;
   timings.skillCacheUsed = 0;
@@ -122,7 +125,7 @@ export async function loadContext(
   timings.attachmentRootsAggregated = 1;
 
   const skillRoutingStartedAt = nowMs();
-  const routedSkills = selectRelevantSkillDefinitions(userQuery, routeHints);
+  const routedSkills = selectRelevantSkillDefinitions(userQuery, turnRouteHints);
   timings.skillRoutingMs = roundMs(nowMs() - skillRoutingStartedAt);
   timings.skillRouteSource = "metadata";
   timings.ruleSkillCount = routedSkills.length;
@@ -131,7 +134,7 @@ export async function loadContext(
   const skillsStartedAt = nowMs();
   const skills = buildSkillContextBlock(routedSkills, {
     browserRelayAvailable,
-    routeHints,
+    routeHints: turnRouteHints,
   });
   timings.skillsMs = roundMs(nowMs() - skillsStartedAt);
   timings.routedSkillCount = routedSkills.length;
@@ -210,7 +213,7 @@ export async function loadContext(
   const tools = buildToolSet(sandbox, routedSkills, {
     sessionId,
     query: userQuery,
-    routeHints,
+    routeHints: turnRouteHints,
     hasImageAttachment: latestUserHasImageAttachment,
     browserRelayAvailable,
     additionalToolNames: [
@@ -223,21 +226,20 @@ export async function loadContext(
 
   const initialToolChoice = (() => {
     const toolNames = new Set(Object.keys(tools));
-    const queryText = userQuery ?? "";
 
-    if (toolNames.has("view_image") && (latestUserHasImageAttachment || needsImageAnalysis(queryText))) {
+    if (toolNames.has("view_image") && (latestUserHasImageAttachment || intentDecision.needs.imageAnalysis)) {
       return { type: "tool", toolName: "view_image" } as const;
     }
 
-    if (toolNames.has("web_fetch") && (needsWebFetch(queryText) || prefersDeepResearchFetch(queryText))) {
+    if (toolNames.has("web_fetch") && (intentDecision.needs.webFetch || intentDecision.needs.deepResearchFetch)) {
       return { type: "tool", toolName: "web_fetch" } as const;
     }
 
-    if ((recentConversationFocus.researchContinuation || needsWebResearch(queryText)) && toolNames.has("web_search")) {
+    if ((recentConversationFocus.researchContinuation || intentDecision.needs.webResearch) && toolNames.has("web_search")) {
       return { type: "tool", toolName: "web_search" } as const;
     }
 
-    if (needsBrowserAutomation(queryText)) {
+    if (intentDecision.needs.browserAutomation) {
       if (toolNames.has("browser_snapshot")) {
         return { type: "tool", toolName: "browser_snapshot" } as const;
       }
@@ -259,8 +261,8 @@ export async function loadContext(
         || routedSkillIds.has("scheduler")
         || routedSkillIds.has("system-info")
         || routedSkillIds.has("file-manager")
-        || needsCameraCapture(queryText)
-        || needsFileManagement(queryText)
+        || intentDecision.needs.cameraCapture
+        || intentDecision.needs.fileManagement
       )
     ) {
       return { type: "tool", toolName: "bash" } as const;

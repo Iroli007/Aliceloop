@@ -3,10 +3,8 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SkillDefinition, SkillMode, SkillStatus } from "@aliceloop/runtime-core";
 import {
+  buildTurnIntentDecision,
   type SkillRouteHints,
-  needsBrowserAutomation,
-  needsFileManagement,
-  inferStickySkillIdsFromContext,
 } from "./skillRouting";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -597,13 +595,11 @@ export function selectRelevantSkillIds(query: string | null | undefined, hints?:
   }
 
   const activeSkills = listActiveSkillDefinitions();
-  const stickySkillIds = new Set([
-    ...inferStickySkillIdsFromContext(normalizedQuery),
-    ...(hints?.stickySkillIds ?? []),
-  ]);
-  const browserSceneBlocksLocalMediaSkills = needsBrowserAutomation(normalizedQuery);
+  const intentDecision = buildTurnIntentDecision(normalizedQuery, { hints });
+  const stickySkillIds = new Set(intentDecision.routeHints.stickySkillIds);
+  const browserSceneBlocksLocalMediaSkills = intentDecision.needs.browserAutomation;
 
-  if (needsFileManagement(normalizedQuery)) {
+  if (intentDecision.needs.fileManagement) {
     return [...stickySkillIds];
   }
 

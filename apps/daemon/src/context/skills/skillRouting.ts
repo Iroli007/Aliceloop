@@ -3,6 +3,37 @@ export interface SkillRouteHints {
   reasons: string[];
 }
 
+export interface TurnIntentDecision {
+  normalizedQuery: string;
+  needs: {
+    memoryFactRecall: boolean;
+    episodicHistoryRecall: boolean;
+    threadManagement: boolean;
+    webResearch: boolean;
+    webFetch: boolean;
+    systemInfo: boolean;
+    fileManagement: boolean;
+    cameraCapture: boolean;
+    browserAutomation: boolean;
+    audioAnalysis: boolean;
+    imageAnalysis: boolean;
+    documentIngest: boolean;
+    reviewCoach: boolean;
+    deepResearchFetch: boolean;
+  };
+  routeHints: SkillRouteHints;
+  toolNames: string[];
+}
+
+interface TurnIntentDecisionOptions {
+  hints?: SkillRouteHints;
+  hasImageAttachment?: boolean;
+  recentToolNames?: string[];
+  continuationLike?: boolean;
+  researchContinuation?: boolean;
+  loginOrQrContinuation?: boolean;
+}
+
 export function mergeSkillRouteHints(...hintSets: Array<SkillRouteHints | null | undefined>): SkillRouteHints {
   const stickySkillIds = new Set<string>();
   const reasons = new Set<string>();
@@ -30,9 +61,15 @@ function matches(query: string, pattern: RegExp) {
   return pattern.test(query);
 }
 
+function hasStickySkill(hints: SkillRouteHints | undefined, skillId: string) {
+  return hints?.stickySkillIds.includes(skillId) ?? false;
+}
+
 const MEMORY_FACT_QUERY_PATTERN = /记忆|memory|记住|忘掉|forget|偏好|事实|稳定|长期|profile|account|fact|还记得|记不记得|记得我|我的偏好|我的习惯|记一下|帮我记住/u;
 const EPISODIC_HISTORY_QUERY_PATTERN = /聊天记录|历史会话|之前的对话|上次对话|conversation history|episodic history|上次聊|刚才说|之前说过|之前聊过|我们聊到哪|昨晚|昨天晚上|昨天聊|昨晚跟你说|昨天跟你说|今天我们做了什么|今天做了什么|今天都做了什么|今天聊了什么|今天聊了啥|我们今天聊了什么|我们今天做了什么|(?:这个|上个)?(?:线程|thread|会话|session).*(?:聊了什么|说了什么|提到什么|记录)/iu;
 const THREAD_MANAGEMENT_QUERY_PATTERN = /线程管理|管理线程|^threads?$|thread\s+(?:list|info|delete|new|search)|thread id|线程\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|会话\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|列出.*(?:线程|会话)|删除.*(?:线程|会话)|新建.*(?:线程|会话)|创建.*(?:线程|会话)|打开.*(?:线程|会话)|切换.*(?:线程|会话)/iu;
+const DEEP_RESEARCH_FETCH_PATTERN =
+  /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u;
 
 export function needsMemoryFactRecall(query: string) {
   return matches(query, MEMORY_FACT_QUERY_PATTERN);
@@ -107,7 +144,11 @@ export function needsReviewCoach(query: string) {
   return matches(query, /review[_ -]?coach|复盘笔记|反思笔记|review note|review memory/iu);
 }
 
-export function inferStickySkillIdsFromContext(query: string) {
+export function prefersDeepResearchFetch(query: string) {
+  return matches(query.trim(), DEEP_RESEARCH_FETCH_PATTERN);
+}
+
+function buildBaseStickySkillIds(query: string) {
   const stickySkillIds = new Set<string>();
 
   if (needsMemoryFactRecall(query) || needsEpisodicHistoryRecall(query)) {
@@ -146,4 +187,122 @@ export function inferStickySkillIdsFromContext(query: string) {
   }
 
   return [...stickySkillIds];
+}
+
+export function inferStickySkillIdsFromContext(query: string) {
+  return buildTurnIntentDecision(query).routeHints.stickySkillIds;
+}
+
+export function buildTurnIntentDecision(
+  query: string | null | undefined,
+  options?: TurnIntentDecisionOptions,
+): TurnIntentDecision {
+  const normalizedQuery = query?.trim() ?? "";
+  const needs = {
+    memoryFactRecall: needsMemoryFactRecall(normalizedQuery),
+    episodicHistoryRecall: needsEpisodicHistoryRecall(normalizedQuery),
+    threadManagement: needsThreadManagement(normalizedQuery),
+    webResearch: needsWebResearch(normalizedQuery),
+    webFetch: needsWebFetch(normalizedQuery),
+    systemInfo: needsSystemInfo(normalizedQuery),
+    fileManagement: needsFileManagement(normalizedQuery),
+    cameraCapture: needsCameraCapture(normalizedQuery),
+    browserAutomation: needsBrowserAutomation(normalizedQuery),
+    audioAnalysis: needsAudioAnalysis(normalizedQuery),
+    imageAnalysis: needsImageAnalysis(normalizedQuery),
+    documentIngest: needsDocumentIngest(normalizedQuery),
+    reviewCoach: needsReviewCoach(normalizedQuery),
+    deepResearchFetch: prefersDeepResearchFetch(normalizedQuery),
+  };
+  const recentToolNames = options?.recentToolNames ?? [];
+  const sawRecentWebTool = recentToolNames.some((toolName) => toolName === "web_search" || toolName === "web_fetch");
+  const sawRecentWebFetchTool = recentToolNames.some((toolName) => toolName === "web_fetch");
+  const sawRecentBrowserTool = recentToolNames.some((toolName) => toolName.startsWith("browser_"));
+  const stickySkillIds = new Set([
+    ...buildBaseStickySkillIds(normalizedQuery),
+    ...(options?.hints?.stickySkillIds ?? []),
+  ]);
+  const reasons = new Set(options?.hints?.reasons ?? []);
+  const needsDeepResearchFollowup = needs.deepResearchFetch && (sawRecentWebTool || hasStickySkill(options?.hints, "web-search"));
+
+  if (
+    options?.researchContinuation
+    || (options?.continuationLike && sawRecentWebTool)
+    || needs.webResearch
+    || needsDeepResearchFollowup
+  ) {
+    stickySkillIds.add("web-search");
+    reasons.add("carry forward live research/fact-check tools");
+  }
+
+  if (
+    (options?.continuationLike && sawRecentWebFetchTool)
+    || needs.webFetch
+    || needsDeepResearchFollowup
+  ) {
+    stickySkillIds.add("web-fetch");
+    reasons.add("carry forward recent page reading");
+  }
+
+  if (
+    (options?.continuationLike && sawRecentBrowserTool)
+    || (options?.continuationLike && needs.browserAutomation)
+    || (options?.continuationLike && options.loginOrQrContinuation)
+  ) {
+    stickySkillIds.add("browser");
+    reasons.add("carry forward recent browser context");
+  }
+
+  const routeHints = {
+    stickySkillIds: [...stickySkillIds],
+    reasons: [...reasons],
+  };
+  const toolNames = new Set<string>();
+
+  if (needs.fileManagement || needs.cameraCapture || needs.systemInfo) {
+    toolNames.add("bash");
+  }
+
+  if (needs.webResearch || hasStickySkill(routeHints, "web-search")) {
+    toolNames.add("web_search");
+  }
+
+  if (needs.webFetch || hasStickySkill(routeHints, "web-fetch") || (needs.deepResearchFetch && hasStickySkill(routeHints, "web-search"))) {
+    toolNames.add("web_fetch");
+  }
+
+  if (needs.browserAutomation || hasStickySkill(routeHints, "browser")) {
+    toolNames.add("view_image");
+    toolNames.add("browser_find");
+    toolNames.add("browser_snapshot");
+    toolNames.add("browser_navigate");
+    toolNames.add("browser_wait");
+    toolNames.add("browser_click");
+    toolNames.add("browser_type");
+    toolNames.add("browser_scroll");
+    toolNames.add("browser_screenshot");
+    toolNames.add("browser_media_probe");
+    toolNames.add("browser_video_watch_start");
+    toolNames.add("browser_video_watch_poll");
+    toolNames.add("browser_video_watch_stop");
+  }
+
+  if (needs.documentIngest) {
+    toolNames.add("document_ingest");
+  }
+
+  if (needs.reviewCoach) {
+    toolNames.add("review_coach");
+  }
+
+  if (options?.hasImageAttachment || needs.imageAnalysis) {
+    toolNames.add("view_image");
+  }
+
+  return {
+    normalizedQuery,
+    needs,
+    routeHints,
+    toolNames: [...toolNames].sort(),
+  };
 }

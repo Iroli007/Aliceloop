@@ -249,7 +249,15 @@ export function SettingsPanel() {
             </button>
             <button
               className="settings-actions__button"
-              onClick={() => void desktopBridge.openExternal("file://" + desktopBridge.getSkillsPath?.() ?? "")}
+              onClick={() => {
+                const targetPath = runtimeCatalogs.skills[0]?.sourcePath?.replace(/\/SKILL\.md$/, "");
+                if (!targetPath) {
+                  return;
+                }
+
+                void desktopBridge.openPath(targetPath);
+              }}
+              disabled={runtimeCatalogs.skills.length === 0}
               style={{ padding: "6px 12px", fontSize: "13px" }}
             >
               📁 Open Folder

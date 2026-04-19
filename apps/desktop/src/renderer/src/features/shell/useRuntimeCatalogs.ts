@@ -44,6 +44,7 @@ export interface RuntimeCatalogsState {
   mcpServers: McpServerDefinition[];
   mutatingMcpServerId: string | null;
   error?: string;
+  refresh(): Promise<void>;
   installMcpServer(serverId: string): Promise<{ ok: boolean; server?: McpServerDefinition; error?: string }>;
   uninstallMcpServer(serverId: string): Promise<{ ok: boolean; server?: McpServerDefinition; error?: string }>;
 }
@@ -56,6 +57,7 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
     skills: [],
     mcpServers: previewMcpServers,
     mutatingMcpServerId: null,
+    refresh,
     installMcpServer,
     uninstallMcpServer,
   });
@@ -68,6 +70,56 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
     }
 
     return response.json() as Promise<McpServerDefinition[]>;
+  }
+
+  async function loadCatalogs() {
+    const { daemonBaseUrl } = await bridge.getAppMeta();
+    const [memoriesResponse, skillsResponse, mcpServers] = await Promise.all([
+      fetch(`${daemonBaseUrl}/api/memories?limit=50`),
+      fetch(`${daemonBaseUrl}/api/skills`),
+      loadMcpServers(),
+    ]);
+
+    if (!memoriesResponse.ok) {
+      throw new Error(`Failed to load memories (${memoriesResponse.status})`);
+    }
+
+    if (!skillsResponse.ok) {
+      throw new Error(`Failed to load skills (${skillsResponse.status})`);
+    }
+
+    const [memories, skills] = (await Promise.all([
+      memoriesResponse.json(),
+      skillsResponse.json(),
+    ])) as [MemoryNote[], SkillDefinition[]];
+
+    return {
+      memories,
+      skills,
+      mcpServers,
+    };
+  }
+
+  async function refresh() {
+    try {
+      const { memories, skills, mcpServers } = await loadCatalogs();
+      setState((current) => ({
+        ...current,
+        status: "ready",
+        memories,
+        skills,
+        mcpServers,
+        mutatingMcpServerId: null,
+        error: undefined,
+      }));
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        status: "error",
+        mutatingMcpServerId: null,
+        error: error instanceof Error ? error.message : "Failed to load runtime catalogs",
+      }));
+    }
   }
 
   async function installMcpServer(serverId: string) {
@@ -147,25 +199,7 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
 
     async function load() {
       try {
-        const { daemonBaseUrl } = await bridge.getAppMeta();
-        const [memoriesResponse, skillsResponse, mcpServers] = await Promise.all([
-          fetch(`${daemonBaseUrl}/api/memories?limit=50`),
-          fetch(`${daemonBaseUrl}/api/skills`),
-          loadMcpServers(),
-        ]);
-
-        if (!memoriesResponse.ok) {
-          throw new Error(`Failed to load memories (${memoriesResponse.status})`);
-        }
-
-        if (!skillsResponse.ok) {
-          throw new Error(`Failed to load skills (${skillsResponse.status})`);
-        }
-
-        const [memories, skills] = (await Promise.all([
-          memoriesResponse.json(),
-          skillsResponse.json(),
-        ])) as [MemoryNote[], SkillDefinition[]];
+        const { memories, skills, mcpServers } = await loadCatalogs();
 
         if (!cancelled) {
           setState({
@@ -174,6 +208,7 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
             skills,
             mcpServers,
             mutatingMcpServerId: null,
+            refresh,
             installMcpServer,
             uninstallMcpServer,
           });
@@ -187,6 +222,7 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
             mcpServers: previewMcpServers,
             mutatingMcpServerId: null,
             error: error instanceof Error ? error.message : "Failed to load runtime catalogs",
+            refresh,
             installMcpServer,
             uninstallMcpServer,
           });
@@ -203,6 +239,7 @@ export function useRuntimeCatalogs(): RuntimeCatalogsState {
 
   return {
     ...state,
+    refresh,
     installMcpServer,
     uninstallMcpServer,
   };

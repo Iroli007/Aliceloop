@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
 import type { ReasoningEffort } from "@aliceloop/runtime-core";
-import { generateText, stepCountIs, streamText } from "ai";
+import { stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
 import { autoCompactMessages } from "./autoCompact";
 import { reflectOnTurn } from "../context/memory/memoryDistiller";
@@ -34,7 +34,18 @@ import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
 import { saveStreamCheckpoint, clearStreamCheckpoint } from "./streamCheckpoint";
 import { ToolStateMachine, type ToolCallState } from "./toolStateMachine";
-import { repairTextToolCall } from "./toolCallRepair";
+import {
+  buildAgentProviderOptions,
+  getRenderableAssistantText,
+  resolveProviderTransport,
+} from "./providerRuntimeAdapter";
+import { executeMiniMaxTextToolCallFallback } from "./minimaxTextToolFallback";
+import {
+  buildCapabilityFailureReply,
+  inferCapabilityRecoveryRequest,
+  looksLikeCapabilitySeekingReply,
+  MAX_CAPABILITY_RECOVERY_ATTEMPTS,
+} from "./capabilityRecovery";
 import { inferSkillIdsForToolCall } from "../context/tools/toolSkillRouting";
 import {
   cloneWorksetState,
@@ -269,104 +280,8 @@ function isBrowserToolName(toolName: string) {
   return toolName.startsWith("browser_");
 }
 
-function looksLikeBinaryTextDump(value: string) {
-  if (/data:image\/[a-z0-9.+-]+;base64,/iu.test(value)) {
-    return true;
-  }
-
-  return /[A-Za-z0-9+/=]{1800,}/u.test(value.replace(/\s+/g, ""));
-}
-
-function sanitizeAssistantTextForChat(value: string) {
-  const strippedAttachmentMarkers = value
-    .replace(/^\[(Attached files?|Attached directory tree|Attached file content):[^\n]*\]\s*$/gimu, "")
-    .trim();
-  const normalized = strippedAttachmentMarkers || value;
-
-  if (!looksLikeBinaryTextDump(normalized)) {
-    return normalized;
-  }
-
-  return [
-    "我没有返回可直接显示的真实图片附件。",
-    "如果需要二维码、登录页或截图，我应该打开真实页面并用 `browser_screenshot` 或受支持的截图链路把图片作为附件发回聊天，而不是粘贴 base64 / SVG 文本。",
-  ].join("\n");
-}
-
-function getRenderableAssistantText(providerId: string, value: string, final = false) {
-  const sanitized = sanitizeAssistantTextForChat(value);
-  if (providerId !== "minimax") {
-    return sanitized;
-  }
-
-  const trimmed = sanitized.trimStart();
-  if (!trimmed || final) {
-    return sanitized;
-  }
-
-  const lowerTrimmed = trimmed.toLowerCase();
-  const minimaxPrelude = "minimax:tool_call";
-
-  if (minimaxPrelude.startsWith(lowerTrimmed)) {
-    return null;
-  }
-
-  if (lowerTrimmed.startsWith(minimaxPrelude)) {
-    return "";
-  }
-
-  return sanitized;
-}
-
 function isResearchToolName(toolName: string) {
   return toolName === "web_fetch" || toolName === "web_search";
-}
-
-function normalizeReasoningModelId(modelId: string) {
-  const normalized = modelId.trim().toLowerCase();
-  const lastSlashIndex = normalized.lastIndexOf("/");
-  return lastSlashIndex >= 0 ? normalized.slice(lastSlashIndex + 1) : normalized;
-}
-
-function resolveProviderTransport(config: StoredProviderConfig) {
-  if (config.transport !== "auto") {
-    return config.transport;
-  }
-
-  if (normalizeReasoningModelId(config.model).startsWith("claude")) {
-    return "anthropic" as const;
-  }
-
-  return "openai-compatible" as const;
-}
-
-function supportsReasoningEffort(config: StoredProviderConfig) {
-  if (resolveProviderTransport(config) !== "openai-compatible") {
-    return false;
-  }
-
-  const modelId = normalizeReasoningModelId(config.model);
-  return modelId.startsWith("o1")
-    || modelId.startsWith("o3")
-    || modelId.startsWith("o4-mini")
-    || (modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat"));
-}
-
-function mapReasoningEffortToOpenAI(effort: ReasoningEffort) {
-  return effort === "off" ? "none" : effort;
-}
-
-function buildAgentProviderOptions(config: StoredProviderConfig, reasoningEffort: ReasoningEffort) {
-  if (!supportsReasoningEffort(config)) {
-    return undefined;
-  }
-
-  return {
-    openai: {
-      reasoningEffort: mapReasoningEffortToOpenAI(reasoningEffort),
-      forceReasoning: true,
-    },
-  };
 }
 
 function extractBrowserToolPayload(value: unknown): { backend?: string; tabId?: string } {
@@ -595,312 +510,6 @@ function summarizeUnknown(value: unknown, maxLength = 800) {
   } catch {
     return String(value);
   }
-}
-
-function buildMiniMaxToolFallbackPrompt(toolName: string, input: Record<string, unknown>, output: unknown) {
-  return [
-    `You previously attempted to call the tool "${toolName}" with input: ${summarizeUnknown(input, 400) ?? "{}"}`,
-    `The tool returned: ${summarizeUnknown(output, 4000) ?? ""}`,
-    "Answer the user's original request directly in normal prose.",
-    "Do not emit XML, <tool> tags, or tool_call markup.",
-  ].join("\n\n");
-}
-
-async function executeMiniMaxTextToolCallFallback(
-  run: AgentRun,
-  stateMachine: ToolStateMachine,
-  reasoningEffort: ReasoningEffort,
-  assistantText: string,
-) {
-  const parsed = repairTextToolCall(assistantText);
-  if (!parsed) {
-    return null;
-  }
-
-  const tool = run.context.tools[parsed.toolName] as { execute?: (input: unknown) => Promise<unknown> } | undefined;
-  if (!tool || typeof tool.execute !== "function") {
-    const availableTools = Object.keys(run.context.tools);
-    const availablePreview = availableTools.slice(0, 12).join(", ");
-    return {
-      replacementText: [
-        `MiniMax 尝试调用 \`${parsed.toolName}\`，但当前回合没有把这个工具加入工具集。`,
-        availablePreview
-          ? `当前已挂载的工具有：${availablePreview}${availableTools.length > 12 ? " 等" : ""}。`
-          : "当前回合没有挂载任何可执行工具。",
-      ].join("\n\n"),
-      toolCallCount: 0,
-      parsedMarkup: parsed.markup,
-    };
-  }
-
-  const toolCallId = `minimax-fallback-${randomUUID()}`;
-  stateMachine.start(toolCallId, parsed.toolName, parsed.input);
-  stateMachine.markInputAvailable(toolCallId);
-
-  const predictedRuntime = predictToolBackend(run.sessionId, parsed.toolName);
-  publishRuntimeEvent(run.sessionId, "tool.call.started", {
-    toolCallId,
-    toolName: parsed.toolName,
-    inputPreview: summarizeUnknown(parsed.input),
-    backend: predictedRuntime.backend,
-    tabId: predictedRuntime.tabId,
-    state: "input-available",
-    fallbackSource: "minimax_text_tool_call",
-  });
-
-  const toolStartedAt = nowMs();
-
-  try {
-    const output = await tool.execute(parsed.input);
-    stateMachine.markOutputAvailable(toolCallId, output);
-    stateMachine.complete(toolCallId);
-
-    const browserPayload = extractBrowserToolPayload(output);
-    publishRuntimeEvent(run.sessionId, "tool.call.completed", {
-      toolCallId,
-      toolName: parsed.toolName,
-      success: true,
-      resultPreview: summarizeUnknown(output),
-      durationMs: roundMs(nowMs() - toolStartedAt),
-      backend: browserPayload.backend ?? predictedRuntime.backend,
-      tabId: browserPayload.tabId ?? predictedRuntime.tabId,
-      state: "output-available",
-      fallbackSource: "minimax_text_tool_call",
-    });
-
-    void maybePublishToolImageAttachment(
-      run.sessionId,
-      parsed.toolName,
-      output,
-      parsed.input,
-    ).catch(() => {});
-
-    let finalText = "";
-
-    try {
-      const followup = await generateText({
-        model: createProviderModel(run.provider),
-        system: run.context.systemPrompt,
-        messages: [
-          ...autoCompactMessages(run.context.messages, 8),
-          {
-            role: "assistant",
-            content: assistantText,
-          },
-          {
-            role: "user",
-            content: buildMiniMaxToolFallbackPrompt(parsed.toolName, parsed.input, output),
-          },
-        ],
-        providerOptions: buildAgentProviderOptions(run.provider, reasoningEffort),
-        abortSignal: run.abortController.signal,
-      });
-      finalText = followup.text.trim();
-    } catch {
-      finalText = "";
-    }
-
-    if (!finalText) {
-      finalText = [
-        `已接住 MiniMax 的文本工具调用并执行了 \`${parsed.toolName}\`。`,
-        summarizeUnknown(output, 4000) ?? "",
-      ].filter(Boolean).join("\n\n");
-    }
-
-    return {
-      replacementText: finalText,
-      toolCallCount: 1,
-      parsedMarkup: parsed.markup,
-    };
-  } catch (error) {
-    stateMachine.markError(toolCallId, error);
-    stateMachine.complete(toolCallId);
-
-    publishRuntimeEvent(run.sessionId, "tool.call.completed", {
-      toolCallId,
-      toolName: parsed.toolName,
-      success: false,
-      resultPreview: summarizeUnknown(error),
-      durationMs: roundMs(nowMs() - toolStartedAt),
-      backend: predictedRuntime.backend,
-      tabId: predictedRuntime.tabId,
-      state: "output-error",
-      fallbackSource: "minimax_text_tool_call",
-    });
-
-    return {
-      replacementText: [
-        `MiniMax 返回了文本形式的工具调用：${parsed.markup}`,
-        `我尝试按 AI-native fallback 执行 \`${parsed.toolName}\`，但失败了：${error instanceof Error ? error.message : String(error)}`,
-      ].join("\n\n"),
-      toolCallCount: 1,
-      parsedMarkup: parsed.markup,
-    };
-  }
-}
-
-interface CapabilityRecoveryRequest {
-  additionalStickySkillIds: string[];
-  additionalToolNames: string[];
-  reason: string;
-}
-
-const MAX_CAPABILITY_RECOVERY_ATTEMPTS = 3;
-
-function buildCapabilityRecoveryRequest(
-  reason: string,
-  input: {
-    skillIds?: string[];
-    toolNames?: string[];
-  },
-): CapabilityRecoveryRequest {
-  return {
-    additionalStickySkillIds: [...new Set([...(input.skillIds ?? []), "skill-search", "skill-hub"])],
-    additionalToolNames: [...new Set(input.toolNames ?? [])],
-    reason,
-  };
-}
-
-function isRecoverableToolName(toolName: string) {
-  return toolName === "bash"
-    || toolName === "web_search"
-    || toolName === "web_fetch"
-    || toolName.startsWith("browser_")
-    || toolName.startsWith("chrome_relay_");
-}
-
-function inferStickySkillsForToolName(toolName: string) {
-  if (toolName === "web_search") {
-    return ["web-search"];
-  }
-
-  if (toolName === "web_fetch") {
-    return ["web-fetch"];
-  }
-
-  if (toolName.startsWith("browser_") || toolName.startsWith("chrome_relay_")) {
-    return ["browser"];
-  }
-
-  return [];
-}
-
-function extractReferencedToolNameFromAssistantText(text: string) {
-  const toolMatch = text.match(/\b(bash|web_search|web_fetch|browser_[a-z_]+|chrome_relay_[a-z_]+)\b/u);
-  return toolMatch?.[1] ?? null;
-}
-
-function inferIntentDrivenRecoveryRequest(
-  userMessage: string | null,
-  attachedToolNames: string[],
-): CapabilityRecoveryRequest | null {
-  if (!userMessage) {
-    return null;
-  }
-
-  const attached = new Set(attachedToolNames);
-
-  if (
-    /https?:\/\/|查一下|搜一下|搜索|查查|最新|今天|今日|news|latest|today|发布了什么|发了什么|fact-check|research/iu.test(userMessage)
-    && (!attached.has("web_search") || !attached.has("web_fetch"))
-  ) {
-    const missingToolNames = ["web_search", "web_fetch"].filter((toolName) => !attached.has(toolName));
-    return buildCapabilityRecoveryRequest("user_intent:research", {
-      skillIds: ["web-search", "web-fetch"],
-      toolNames: missingToolNames,
-    });
-  }
-
-  if (
-    /浏览器|browser|网页|页面|网站|打开|登录|扫码|截图|click|tab|chrome|b站|bilibili|x\.com|twitter|小红书/iu.test(userMessage)
-    && !attachedToolNames.some((toolName) => toolName.startsWith("browser_") || toolName.startsWith("chrome_relay_"))
-  ) {
-    return buildCapabilityRecoveryRequest("user_intent:browser", {
-      skillIds: ["browser"],
-    });
-  }
-
-  if (
-    /文件|文件夹|目录|回收站|缓存|cache|trash|workspace|ls\b|du\b|find\b|rm\b/iu.test(userMessage)
-    && !attached.has("bash")
-  ) {
-    return buildCapabilityRecoveryRequest("user_intent:bash", {
-      skillIds: ["file-manager"],
-      toolNames: ["bash"],
-    });
-  }
-
-  return null;
-}
-
-function looksLikeCapabilitySeekingReply(text: string) {
-  return /我需要先(?:查看|查询|看看|搜索)|让我先(?:查看|查询|看看|搜索)|可用的 skill|需要通过 skill 路由|不是直接挂载的基座工具|工具集|没加载|未挂载|unavailable|not available/u.test(text);
-}
-
-function buildCapabilityFailureReply(
-  userMessage: string | null,
-  attachedToolNames: string[],
-) {
-  if (userMessage && /https?:\/\/|查一下|搜一下|搜索|查查|最新|今天|今日|news|latest|today|发布了什么|发了什么|fact-check|research/iu.test(userMessage)) {
-    return "我这轮还没真正执行到搜索或网页读取，所以不能假装已经查过。你可以给我一个具体链接，我继续直接读；或者我下一轮继续按搜索链路重试。";
-  }
-
-  if (userMessage && /浏览器|browser|网页|页面|网站|打开|登录|扫码|截图|click|tab|chrome|b站|bilibili|x\.com|twitter|小红书/iu.test(userMessage)) {
-    return "我这轮还没真正打开或操作页面，所以现在给不出可靠结果。你可以给我目标页面或账号链接，我下一轮直接走浏览器链路。";
-  }
-
-  if (attachedToolNames.includes("bash")) {
-    return "我这轮还没真正执行到需要的命令，所以先不假装已经做完。你可以继续让我重试，或者把目标路径和操作说得更具体一点。";
-  }
-
-  return "我这轮还没真正执行到需要的能力，所以先不假装已经完成。你可以继续让我重试，或者给我更具体的链接、页面或路径。";
-}
-
-function inferCapabilityRecoveryRequest(
-  userMessage: string | null,
-  assistantText: string,
-  attachedToolNames: string[],
-  resolvedToolCallCount: number,
-): CapabilityRecoveryRequest | null {
-  if (resolvedToolCallCount > 0) {
-    return null;
-  }
-
-  const attached = new Set(attachedToolNames);
-  const repairedToolCall = repairTextToolCall(assistantText);
-  if (
-    repairedToolCall
-    && isRecoverableToolName(repairedToolCall.toolName)
-    && !attached.has(repairedToolCall.toolName)
-  ) {
-    return buildCapabilityRecoveryRequest(`missing_tool:${repairedToolCall.toolName}`, {
-      skillIds: inferStickySkillsForToolName(repairedToolCall.toolName),
-      toolNames: [repairedToolCall.toolName],
-    });
-  }
-
-  const referencedToolName = extractReferencedToolNameFromAssistantText(assistantText);
-  if (
-    referencedToolName
-    && isRecoverableToolName(referencedToolName)
-    && !attached.has(referencedToolName)
-    && /未挂载|没加载|不可用|unavailable|not available|skill 路由|通过 skill/u.test(assistantText)
-  ) {
-    return buildCapabilityRecoveryRequest(`referenced_missing_tool:${referencedToolName}`, {
-      skillIds: inferStickySkillsForToolName(referencedToolName),
-      toolNames: [referencedToolName],
-    });
-  }
-
-  if (
-    /我需要先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|让我先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|不是直接挂载的基座工具|需要通过 skill 路由|可用的 skill/u.test(assistantText)
-  ) {
-    return buildCapabilityRecoveryRequest("skill_discovery_needed", {
-      toolNames: attached.has("bash") ? [] : ["bash"],
-    });
-  }
-
-  return inferIntentDrivenRecoveryRequest(userMessage, attachedToolNames);
 }
 
 type RuntimeEventType =
@@ -1422,12 +1031,20 @@ async function consumeTextStream(
   resolvedToolCalls = await stream.toolCalls;
 
   if (resolvedToolCalls.length === 0 && text.trim()) {
-    const fallback = await executeMiniMaxTextToolCallFallback(
-      run,
+    const fallback = await executeMiniMaxTextToolCallFallback({
+      sessionId: run.sessionId,
+      provider: run.provider,
+      context: run.context,
+      abortSignal: run.abortController.signal,
       stateMachine,
       reasoningEffort,
-      text,
-    );
+      assistantText: text,
+      summarizeUnknown,
+      predictToolBackend,
+      extractBrowserToolPayload,
+      publishRuntimeEvent,
+      maybePublishToolImageAttachment,
+    });
 
     if (fallback) {
       fallbackToolCallCount = fallback.toolCallCount;
