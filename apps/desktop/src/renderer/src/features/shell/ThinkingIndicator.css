@@ -31,7 +31,14 @@
   display: inline-block;
   position: relative;
   color: #1a1a1a;
-  font-weight: 500;
+  font-family: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
   animation: thinking-glow 2s ease-in-out infinite;
   will-change: filter;
 }

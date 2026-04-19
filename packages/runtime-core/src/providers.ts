@@ -1,5 +1,13 @@
 import type { ProviderConfig, ProviderKind, ProviderTransportKind } from "./domain";
 
+export interface ModelContextBudget {
+  contextWindowTokens: number;
+  outputHeadroomTokens: number;
+  compactBufferTokens: number;
+  staticOverheadTokens: number;
+  compactTriggerTokens: number;
+}
+
 export interface ProviderDefinition {
   id: ProviderKind;
   label: string;
@@ -88,6 +96,88 @@ const toolModelRecommendationPatterns: Record<ProviderKind, RegExp[]> = {
   openrouter: [/gpt-4o-mini/iu, /deepseek-chat/iu, /gemini-2\.0-flash/iu, /haiku/iu],
 };
 
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 32_000;
+const DEFAULT_STATIC_CONTEXT_OVERHEAD_TOKENS = 6_000;
+
+const modelContextWindowPatterns: Array<{ pattern: RegExp; tokens: number }> = [
+  { pattern: /gpt-5(?:\.1)?(?:-[\w.]+)?/iu, tokens: 400_000 },
+  { pattern: /gpt-4\.1(?:-[\w.]+)?/iu, tokens: 1_047_576 },
+  { pattern: /gpt-4o(?:-[\w.]+)?/iu, tokens: 128_000 },
+  { pattern: /(?:^|\/)o[34](?:-[\w.]+)?$/iu, tokens: 200_000 },
+  { pattern: /claude(?:-[\w.]+)?/iu, tokens: 200_000 },
+  { pattern: /gemini-(?:2\.5|2\.0|1\.5)(?:-[\w.]+)?/iu, tokens: 1_048_576 },
+  { pattern: /(?:kimi|moonshot|moonshotai|kimi-for-coding)(?:-[\w.]+)?/iu, tokens: 256_000 },
+  { pattern: /deepseek-(?:chat|reasoner)(?:-[\w.]+)?/iu, tokens: 128_000 },
+  { pattern: /glm-5(?:\.[\w-]+)?/iu, tokens: 204_800 },
+];
+
+const providerFallbackContextWindowTokens: Record<ProviderKind, number> = {
+  minimax: 128_000,
+  gemini: 1_048_576,
+  moonshot: 256_000,
+  deepseek: 128_000,
+  zhipu: 204_800,
+  aihubmix: 128_000,
+  openai: 128_000,
+  anthropic: 200_000,
+  openrouter: 128_000,
+};
+
+function parseModelSuffixContextWindow(model: string) {
+  const normalized = model.trim().toLowerCase();
+  const moonshotMatch = normalized.match(/(?:^|[-_/])(\d+)(?:k)(?:$|[-_/])/u);
+  if (moonshotMatch) {
+    return Number.parseInt(moonshotMatch[1] ?? "", 10) * 1_000;
+  }
+
+  return null;
+}
+
+function resolveContextWindowTokens(input: {
+  providerId?: ProviderKind | null;
+  model?: string | null;
+}) {
+  const model = input.model?.trim() ?? "";
+  if (model) {
+    const suffixWindow = parseModelSuffixContextWindow(model);
+    if (suffixWindow && suffixWindow >= 8_000) {
+      return suffixWindow;
+    }
+
+    for (const entry of modelContextWindowPatterns) {
+      if (entry.pattern.test(model)) {
+        return entry.tokens;
+      }
+    }
+  }
+
+  if (input.providerId) {
+    return providerFallbackContextWindowTokens[input.providerId] ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+  }
+
+  return DEFAULT_CONTEXT_WINDOW_TOKENS;
+}
+
+function deriveOutputHeadroomTokens(contextWindowTokens: number) {
+  if (contextWindowTokens >= 1_000_000) return 64_000;
+  if (contextWindowTokens >= 400_000) return 40_000;
+  if (contextWindowTokens >= 256_000) return 24_000;
+  if (contextWindowTokens >= 200_000) return 18_000;
+  if (contextWindowTokens >= 128_000) return 12_000;
+  if (contextWindowTokens >= 64_000) return 8_000;
+  return 4_000;
+}
+
+function deriveCompactBufferTokens(contextWindowTokens: number) {
+  if (contextWindowTokens >= 1_000_000) return 32_000;
+  if (contextWindowTokens >= 400_000) return 24_000;
+  if (contextWindowTokens >= 256_000) return 16_000;
+  if (contextWindowTokens >= 200_000) return 12_000;
+  if (contextWindowTokens >= 128_000) return 8_000;
+  if (contextWindowTokens >= 64_000) return 4_000;
+  return 2_000;
+}
+
 export function listProviderDefinitions(): ProviderDefinition[] {
   return providerDefinitions.map((definition) => ({ ...definition }));
 }
@@ -134,4 +224,25 @@ export function recommendToolModel(providerId: ProviderKind, models: string[]): 
   }
 
   return normalizedModels[0] ?? null;
+}
+
+export function resolveModelContextBudget(input: {
+  providerId?: ProviderKind | null;
+  model?: string | null;
+}): ModelContextBudget {
+  const contextWindowTokens = resolveContextWindowTokens(input);
+  const outputHeadroomTokens = deriveOutputHeadroomTokens(contextWindowTokens);
+  const compactBufferTokens = deriveCompactBufferTokens(contextWindowTokens);
+  const compactTriggerTokens = Math.max(
+    8_000,
+    contextWindowTokens - outputHeadroomTokens - compactBufferTokens,
+  );
+
+  return {
+    contextWindowTokens,
+    outputHeadroomTokens,
+    compactBufferTokens,
+    staticOverheadTokens: DEFAULT_STATIC_CONTEXT_OVERHEAD_TOKENS,
+    compactTriggerTokens,
+  };
 }

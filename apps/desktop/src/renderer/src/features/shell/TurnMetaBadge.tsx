@@ -26,40 +26,44 @@ export function TurnMetaBadge({ tools, skills }: TurnMetaBadgeProps) {
 
   return (
     <aside className="workspace__turn-meta" aria-label="工具与技能">
-      <div className="workspace__turn-meta-summary" tabIndex={0}>
-        <span className="workspace__turn-meta-count">
+      <div className="workspace__turn-meta-anchor">
+        <button type="button" className="workspace__turn-meta-trigger">
           <ToolIcon />
           <span>{`${tools.length} tools`}</span>
-        </span>
-        <span className="workspace__turn-meta-divider" aria-hidden="true">
-          ·
-        </span>
-        <span className="workspace__turn-meta-count">
+        </button>
+        <div className="workspace__turn-meta-panel" role="tooltip">
+          <section className="workspace__turn-meta-section">
+            <span className="workspace__turn-meta-label">tools</span>
+            <ul className="workspace__turn-meta-list">
+              {tools.length > 0 ? (
+                tools.map((item) => <li key={item}>{item}</li>)
+              ) : (
+                <li className="workspace__turn-meta-empty">无</li>
+              )}
+            </ul>
+          </section>
+        </div>
+      </div>
+      <span className="workspace__turn-meta-divider" aria-hidden="true">
+        ·
+      </span>
+      <div className="workspace__turn-meta-anchor">
+        <button type="button" className="workspace__turn-meta-trigger">
           <SkillIcon />
           <span>{`${skills.length} skills`}</span>
-        </span>
-      </div>
-      <div className="workspace__turn-meta-panel" role="tooltip">
-        <section className="workspace__turn-meta-section">
-          <span className="workspace__turn-meta-label">tools</span>
-          <ul className="workspace__turn-meta-list">
-            {tools.length > 0 ? (
-              tools.map((item) => <li key={item}>{item}</li>)
-            ) : (
-              <li className="workspace__turn-meta-empty">无</li>
-            )}
-          </ul>
-        </section>
-        <section className="workspace__turn-meta-section">
-          <span className="workspace__turn-meta-label">skills</span>
-          <ul className="workspace__turn-meta-list">
-            {skills.length > 0 ? (
-              skills.map((item) => <li key={item}>{item}</li>)
-            ) : (
-              <li className="workspace__turn-meta-empty">无</li>
-            )}
-          </ul>
-        </section>
+        </button>
+        <div className="workspace__turn-meta-panel" role="tooltip">
+          <section className="workspace__turn-meta-section">
+            <span className="workspace__turn-meta-label">skills</span>
+            <ul className="workspace__turn-meta-list">
+              {skills.length > 0 ? (
+                skills.map((item) => <li key={item}>{item}</li>)
+              ) : (
+                <li className="workspace__turn-meta-empty">无</li>
+              )}
+            </ul>
+          </section>
+        </div>
       </div>
     </aside>
   );

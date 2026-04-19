@@ -6,12 +6,19 @@ import {
   primarySessionId,
   type JobRunDetail,
   type RuntimePresence,
+  type SessionCompactionState,
   type SessionEvent,
+  type SessionFocusState,
+  type SessionMemoryState,
   type SessionMessage,
+  type SessionPlanModeState,
+  type SessionRollingSummary,
   type SessionSnapshot,
   type SessionThreadSummary,
   type StudyArtifact,
+  type TaskNotification,
   type ToolApproval,
+  type ToolApprovalDecisionOption,
   type ToolCallStatus,
   type ToolWorkflowEntry,
 } from "@aliceloop/runtime-core";
@@ -22,6 +29,76 @@ const desktopSessionDeviceStorageKey = "aliceloop-shell-session-device-id";
 const activeSessionStorageKey = "aliceloop-shell-active-session-id";
 const localDraftSessionId = "__local_draft__";
 const streamRetryMs = 2_000;
+
+function createEmptyFocusState(sessionId: string): SessionFocusState {
+  return {
+    sessionId,
+    goal: "",
+    constraints: [],
+    priorities: [],
+    nextStep: "",
+    doneCriteria: [],
+    blockers: [],
+    updatedAt: null,
+  };
+}
+
+function createEmptyRollingSummary(sessionId: string): SessionRollingSummary {
+  return {
+    sessionId,
+    currentPhase: "",
+    summary: "",
+    completed: [],
+    remaining: [],
+    decisions: [],
+    summarizedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
+function createEmptySessionMemoryState(sessionId: string): SessionMemoryState {
+  return {
+    sessionId,
+    currentPhase: "",
+    summary: "",
+    completed: [],
+    remaining: [],
+    decisions: [],
+    rememberedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
+function createEmptyCompactionState(sessionId: string): SessionCompactionState {
+  return {
+    sessionId,
+    checkpointSummary: "",
+    checkpointToolTranscript: "",
+    checkpointResearchMemory: "",
+    checkpointFocusSnapshot: "",
+    checkpointPlanSnapshot: "",
+    checkpointVolatileKey: "",
+    checkpointSnapshotVersion: 0,
+    promptProjectionCarryForwardKey: "",
+    promptProjectionCarryForwardVersion: 0,
+    promptProjectionHotTailKey: "",
+    promptProjectionHotTailVersion: 0,
+    compactedTurnCount: 0,
+    lastCompactedMessageId: null,
+    consecutiveFailures: 0,
+    updatedAt: null,
+  };
+}
+
+function createInactivePlanModeState(sessionId: string): SessionPlanModeState {
+  return {
+    sessionId,
+    active: false,
+    activePlanId: null,
+    enteredAt: null,
+    updatedAt: null,
+  };
+}
 
 interface SendResult {
   ok: boolean;
@@ -50,6 +127,13 @@ export interface ShellConversationState {
   daemonBaseUrl: string | null;
   sessionId: string;
   sessionTitle: string;
+  planMode: SessionPlanModeState;
+  activePlan: ShellPlanRecord | null;
+  planModeAvailable: boolean;
+  focusState: SessionFocusState;
+  rollingSummary: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
+  compactionState: SessionCompactionState;
   threads: SessionThreadSummary[];
   messages: SessionMessage[];
   runtimePresence: RuntimePresence;
@@ -59,6 +143,8 @@ export interface ShellConversationState {
   toolWorkflowEntries: ToolWorkflowEntry[];
   sessionEvents: SessionEvent[];
   pendingToolApprovals: ToolApproval[];
+  pendingCommandApprovals: ToolApproval[];
+  pendingQuestionApprovals: ToolApproval[];
   resolvedToolApprovals: ToolApproval[];
   pending: boolean;
   pendingUpload: boolean;
@@ -66,7 +152,10 @@ export interface ShellConversationState {
   thinkingSteps: string[];
   isResponding: boolean;
   isAwaitingToolApproval: boolean;
+  isAwaitingUserQuestion: boolean;
   stoppingResponse: boolean;
+  enteringPlanMode: boolean;
+  exitingPlanMode: boolean;
   resolvingToolApprovalId: string | null;
   error?: string;
   selectSession(sessionId: string): void;
@@ -82,8 +171,22 @@ export interface ShellConversationState {
   }): Promise<UploadResult>;
   uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult>;
   stopResponse(): Promise<SendResult>;
-  approveToolApproval(approvalId: string): Promise<SendResult>;
-  rejectToolApproval(approvalId: string): Promise<SendResult>;
+  enterPlanMode(): Promise<SendResult>;
+  exitPlanMode(): Promise<SendResult>;
+  approveToolApproval(approvalId: string, decisionOption?: ToolApprovalDecisionOption): Promise<SendResult>;
+  rejectToolApproval(approvalId: string, decisionOption?: ToolApprovalDecisionOption): Promise<SendResult>;
+}
+
+export interface ShellPlanRecord {
+  id: string;
+  sessionId: string | null;
+  title: string;
+  goal: string;
+  steps: string[];
+  status: "draft" | "approved" | "archived";
+  createdAt: string;
+  updatedAt: string;
+  approvedAt: string | null;
 }
 
 interface ActiveToolCall {
@@ -195,6 +298,10 @@ function upsertResolvedToolApproval(approvals: ToolApproval[], approval: ToolApp
   return next;
 }
 
+function isQuestionApproval(approval: ToolApproval) {
+  return approval.kind === "question" && approval.question;
+}
+
 function upsertThread(threads: SessionThreadSummary[], thread: SessionThreadSummary) {
   const next = threads.filter((item) => item.id !== thread.id);
   next.unshift(thread);
@@ -212,6 +319,26 @@ function buildThreadFromSnapshot(snapshot: SessionSnapshot): SessionThreadSummar
     messageCount: snapshot.messages.length,
     latestMessagePreview: latestMessage?.content ?? null,
     latestMessageAt: latestMessage?.createdAt ?? null,
+    planMode: snapshot.planMode ?? createInactivePlanModeState(snapshot.session.id),
+  };
+}
+
+function normalizeThread(thread: SessionThreadSummary): SessionThreadSummary {
+  return {
+    ...thread,
+    planMode: thread.planMode ?? createInactivePlanModeState(thread.id),
+  };
+}
+
+function normalizeSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
+  return {
+    ...snapshot,
+    planMode: snapshot.planMode ?? createInactivePlanModeState(snapshot.session.id),
+    focusState: snapshot.focusState ?? createEmptyFocusState(snapshot.session.id),
+    rollingSummary: snapshot.rollingSummary ?? createEmptyRollingSummary(snapshot.session.id),
+    sessionMemory: snapshot.sessionMemory ?? createEmptySessionMemoryState(snapshot.session.id),
+    compactionState: snapshot.compactionState ?? createEmptyCompactionState(snapshot.session.id),
+    toolWorkflowEntries: snapshot.toolWorkflowEntries ?? [],
   };
 }
 
@@ -286,6 +413,11 @@ function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
       createdAt: now,
       updatedAt: now,
     },
+    planMode: createInactivePlanModeState(localDraftSessionId),
+    focusState: createEmptyFocusState(localDraftSessionId),
+    rollingSummary: createEmptyRollingSummary(localDraftSessionId),
+    sessionMemory: createEmptySessionMemoryState(localDraftSessionId),
+    compactionState: createEmptyCompactionState(localDraftSessionId),
     messages: [],
     attachments: [],
     toolWorkflowEntries: [],
@@ -306,6 +438,11 @@ function createEmptySnapshotFromThread(thread: SessionThreadSummary, current: Se
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
     },
+    planMode: thread.planMode ?? createInactivePlanModeState(thread.id),
+    focusState: createEmptyFocusState(thread.id),
+    rollingSummary: createEmptyRollingSummary(thread.id),
+    sessionMemory: createEmptySessionMemoryState(thread.id),
+    compactionState: createEmptyCompactionState(thread.id),
     messages: [],
     attachments: [],
     toolWorkflowEntries: [],
@@ -354,6 +491,20 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
         jobs: upsertJob(snapshot.jobs, job),
       };
     }
+    case "task.notification": {
+      const notification = (event.payload as { notification?: TaskNotification }).notification;
+      if (!notification) {
+        return snapshot;
+      }
+
+      return {
+        ...snapshot,
+        session: {
+          ...snapshot.session,
+          updatedAt: event.createdAt,
+        },
+      };
+    }
     case "attachment.ready": {
       const attachment = (event.payload as { attachment?: Attachment }).attachment;
       if (!attachment) {
@@ -396,6 +547,21 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
         artifacts: upsertArtifact(snapshot.artifacts, artifact),
       };
     }
+    case "plan_mode.updated": {
+      const planMode = (event.payload as { planMode?: SessionPlanModeState }).planMode;
+      if (!planMode) {
+        return snapshot;
+      }
+
+      return {
+        ...snapshot,
+        session: {
+          ...snapshot.session,
+          updatedAt: event.createdAt,
+        },
+        planMode,
+      };
+    }
     case "presence.updated":
     case "runtime.offline": {
       const payload = event.payload as { runtimePresence?: RuntimePresence };
@@ -415,7 +581,7 @@ async function fetchSessionThreads(baseUrl: string) {
     throw new Error(`Failed to load session threads (${response.status})`);
   }
 
-  return (await response.json()) as SessionThreadSummary[];
+  return ((await response.json()) as SessionThreadSummary[]).map(normalizeThread);
 }
 
 async function fetchSessionSnapshot(baseUrl: string, sessionId: string) {
@@ -424,7 +590,16 @@ async function fetchSessionSnapshot(baseUrl: string, sessionId: string) {
     throw new Error(`Failed to load session snapshot (${response.status})`);
   }
 
-  return (await response.json()) as SessionSnapshot;
+  return normalizeSnapshot((await response.json()) as SessionSnapshot);
+}
+
+async function fetchPlan(baseUrl: string, planId: string) {
+  const response = await fetch(`${baseUrl}/api/plans/${planId}`);
+  if (!response.ok) {
+    throw new Error(`Failed to load plan (${response.status})`);
+  }
+
+  return (await response.json()) as ShellPlanRecord;
 }
 
 async function fetchSessionEvents(baseUrl: string, sessionId: string, since = 0) {
@@ -453,12 +628,16 @@ export function useShellConversation(): ShellConversationState {
   const [activeSessionId, setActiveSessionId] = useState(getStoredActiveSessionId());
   const [status, setStatus] = useState<ShellConversationState["status"]>("loading");
   const [daemonBaseUrl, setDaemonBaseUrl] = useState<string | null>(null);
+  const [activePlan, setActivePlan] = useState<ShellPlanRecord | null>(null);
   const [pending, setPending] = useState(false);
   const [pendingUpload, setPendingUpload] = useState(false);
   const [sessionEvents, setSessionEvents] = useState<SessionEvent[]>([]);
   const [stoppingResponse, setStoppingResponse] = useState(false);
+  const [enteringPlanMode, setEnteringPlanMode] = useState(false);
+  const [exitingPlanMode, setExitingPlanMode] = useState(false);
   const [resolvingToolApprovalId, setResolvingToolApprovalId] = useState<string | null>(null);
   const [error, setError] = useState<string>();
+  const planModeAvailable = Boolean(daemonBaseUrl);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -481,6 +660,7 @@ export function useShellConversation(): ShellConversationState {
           setActiveSessionId(preferredSessionId ?? fallbackSessionId);
           if (nextThreads.length === 0) {
             setSnapshot((current) => createLocalDraftSnapshot(current));
+            setActivePlan(null);
             setSessionEvents([]);
             lastEventSeqRef.current = 0;
             setStatus("ready");
@@ -505,6 +685,7 @@ export function useShellConversation(): ShellConversationState {
   useEffect(() => {
     if (!daemonBaseUrl || !activeSessionId || activeSessionId === localDraftSessionId) {
       if (activeSessionId === localDraftSessionId) {
+        setActivePlan(null);
         setSessionEvents([]);
         setStatus("ready");
       }
@@ -552,6 +733,37 @@ export function useShellConversation(): ShellConversationState {
 
     setThreads((current) => upsertThread(current, buildThreadFromSnapshot(snapshot)));
   }, [snapshot]);
+
+  useEffect(() => {
+    if (!daemonBaseUrl || snapshot.session.id === localDraftSessionId) {
+      setActivePlan(null);
+      return;
+    }
+
+    const planId = snapshot.planMode.activePlanId;
+    if (!planId) {
+      setActivePlan(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    void fetchPlan(daemonBaseUrl, planId)
+      .then((plan) => {
+        if (!cancelled) {
+          setActivePlan(plan);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setActivePlan((current) => (current?.id === planId ? current : null));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [daemonBaseUrl, snapshot.session.id, snapshot.planMode.activePlanId, snapshot.planMode.updatedAt, snapshot.messages.length]);
 
   useEffect(() => {
     if (!daemonBaseUrl || !activeSessionId || activeSessionId === localDraftSessionId) {
@@ -632,7 +844,8 @@ export function useShellConversation(): ShellConversationState {
 
         if (
           sessionEvent.type === "message.created" ||
-          sessionEvent.type === "message.acked"
+          sessionEvent.type === "message.acked" ||
+          sessionEvent.type === "plan_mode.updated"
         ) {
           void refreshThreads();
         }
@@ -682,6 +895,7 @@ export function useShellConversation(): ShellConversationState {
     activeSessionIdRef.current = sessionId;
     rememberActiveSessionId(sessionId);
     setStatus("loading");
+    setActivePlan(null);
     setSnapshot((current) => {
       if (sessionId === localDraftSessionId) {
         return createLocalDraftSnapshot(current);
@@ -697,6 +911,7 @@ export function useShellConversation(): ShellConversationState {
     activeSessionIdRef.current = createdThread.id;
     rememberActiveSessionId(createdThread.id);
     setSnapshot((current) => createEmptySnapshotFromThread(createdThread, current));
+    setActivePlan(null);
     setSessionEvents([]);
     lastEventSeqRef.current = 0;
     setStatus("ready");
@@ -755,6 +970,7 @@ export function useShellConversation(): ShellConversationState {
     activeSessionIdRef.current = localDraftSessionId;
     rememberActiveSessionId(localDraftSessionId);
     setSnapshot((current) => createLocalDraftSnapshot(current));
+    setActivePlan(null);
     setSessionEvents([]);
     lastEventSeqRef.current = 0;
     setStatus("ready");
@@ -1096,7 +1312,116 @@ export function useShellConversation(): ShellConversationState {
     }
   }
 
-  async function resolveToolApproval(approvalId: string, action: "approve" | "reject"): Promise<SendResult> {
+  async function enterPlanMode(): Promise<SendResult> {
+    if (!planModeAvailable) {
+      return {
+        ok: false,
+        error: "当前没有可切换计划模式的会话。",
+      };
+    }
+
+    if (snapshot.planMode.active) {
+      return {
+        ok: false,
+        error: "当前线程已经在计划模式。",
+      };
+    }
+
+    setEnteringPlanMode(true);
+
+    try {
+      const ensuredSession = await ensureTargetSession(daemonBaseUrl!);
+      if (!ensuredSession.ok) {
+        return {
+          ok: false,
+          error: ensuredSession.error,
+        };
+      }
+
+      const response = await fetch(`${daemonBaseUrl}/api/session/${ensuredSession.sessionId}/plan-mode/enter`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      const payload = (await response.json()) as SessionPlanModeState & { error?: string };
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: payload.error ?? "进入计划模式失败",
+        };
+      }
+
+      setSnapshot((current) => ({
+        ...current,
+        planMode: payload,
+      }));
+
+      return { ok: true };
+    } catch (enterError) {
+      return {
+        ok: false,
+        error: enterError instanceof Error ? enterError.message : "进入计划模式失败",
+      };
+    } finally {
+      setEnteringPlanMode(false);
+    }
+  }
+
+  async function exitPlanMode(): Promise<SendResult> {
+    if (!daemonBaseUrl || activeSessionId === localDraftSessionId) {
+      return {
+        ok: false,
+        error: "当前没有可切换计划模式的会话。",
+      };
+    }
+
+    if (!snapshot.planMode.active) {
+      return {
+        ok: false,
+        error: "当前线程不在计划模式。",
+      };
+    }
+
+    setExitingPlanMode(true);
+
+    try {
+      const response = await fetch(`${daemonBaseUrl}/api/session/${activeSessionId}/plan-mode/exit`, {
+        method: "POST",
+      });
+      const payload = (await response.json()) as SessionPlanModeState & { error?: string };
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: payload.error ?? "退出计划模式失败",
+        };
+      }
+
+      setSnapshot((current) => ({
+        ...current,
+        planMode: payload,
+      }));
+      setActivePlan(null);
+
+      return { ok: true };
+    } catch (exitError) {
+      return {
+        ok: false,
+        error: exitError instanceof Error ? exitError.message : "退出计划模式失败",
+      };
+    } finally {
+      setExitingPlanMode(false);
+    }
+  }
+
+  async function resolveToolApproval(
+    approvalId: string,
+    action: "approve" | "reject",
+    decisionOption?: ToolApprovalDecisionOption,
+  ): Promise<SendResult> {
     if (!daemonBaseUrl || activeSessionId === localDraftSessionId) {
       return {
         ok: false,
@@ -1109,6 +1434,12 @@ export function useShellConversation(): ShellConversationState {
     try {
       const response = await fetch(`${daemonBaseUrl}/api/session/${activeSessionId}/tool-approvals/${approvalId}/${action}`, {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          decisionOption,
+        }),
       });
       const payload = (await response.json()) as {
         error?: string;
@@ -1144,10 +1475,15 @@ export function useShellConversation(): ShellConversationState {
   const latestReply = [...snapshot.messages].reverse().find((message) => message.role !== "user") ?? null;
   const latestJob = snapshot.jobs.find((job) => job.kind === "provider-completion") ?? null;
   const latestArtifact = snapshot.artifacts[0] ?? null;
-  const isAwaitingToolApproval = snapshot.pendingToolApprovals.length > 0;
-  const currentToolName = activeToolCalls.at(-1)?.toolName ?? snapshot.pendingToolApprovals[0]?.toolName ?? null;
+  const pendingQuestionApprovals = snapshot.planMode.active
+    ? snapshot.pendingToolApprovals.filter(isQuestionApproval)
+    : [];
+  const pendingCommandApprovals = snapshot.pendingToolApprovals.filter((approval) => !isQuestionApproval(approval));
+  const isAwaitingToolApproval = pendingCommandApprovals.length > 0;
+  const isAwaitingUserQuestion = pendingQuestionApprovals.length > 0;
+  const currentToolName = activeToolCalls.at(-1)?.toolName ?? pendingCommandApprovals[0]?.toolName ?? null;
   const thinkingSteps = activeToolCalls.map((toolCall) => formatThinkingStep(toolCall.toolName, toolCall.backend));
-  const isResponding = isProviderCompletionActive(latestJob) && !isAwaitingToolApproval;
+  const isResponding = isProviderCompletionActive(latestJob) && !isAwaitingToolApproval && !isAwaitingUserQuestion;
   const sessionTitle =
     (activeSessionId === localDraftSessionId ? null : threads.find((thread) => thread.id === activeSessionId)?.title) ??
     snapshot.session.title;
@@ -1163,6 +1499,13 @@ export function useShellConversation(): ShellConversationState {
     daemonBaseUrl,
     sessionId: activeSessionId,
     sessionTitle,
+    planMode: snapshot.planMode,
+    activePlan,
+    planModeAvailable,
+    focusState: snapshot.focusState,
+    rollingSummary: snapshot.rollingSummary,
+    sessionMemory: snapshot.sessionMemory,
+    compactionState: snapshot.compactionState,
     threads,
     messages: snapshot.messages,
     runtimePresence: snapshot.runtimePresence,
@@ -1172,6 +1515,8 @@ export function useShellConversation(): ShellConversationState {
     toolWorkflowEntries: snapshot.toolWorkflowEntries,
     sessionEvents,
     pendingToolApprovals: snapshot.pendingToolApprovals,
+    pendingCommandApprovals,
+    pendingQuestionApprovals,
     resolvedToolApprovals: snapshot.resolvedToolApprovals,
     pending,
     pendingUpload,
@@ -1179,7 +1524,10 @@ export function useShellConversation(): ShellConversationState {
     thinkingSteps,
     isResponding,
     isAwaitingToolApproval,
+    isAwaitingUserQuestion,
     stoppingResponse,
+    enteringPlanMode,
+    exitingPlanMode,
     resolvingToolApprovalId,
     error,
     selectSession,
@@ -1190,7 +1538,11 @@ export function useShellConversation(): ShellConversationState {
     uploadPreparedAttachment,
     uploadPreparedFolder,
     stopResponse,
-    approveToolApproval: (approvalId: string) => resolveToolApproval(approvalId, "approve"),
-    rejectToolApproval: (approvalId: string) => resolveToolApproval(approvalId, "reject"),
+    enterPlanMode,
+    exitPlanMode,
+    approveToolApproval: (approvalId: string, decisionOption?: ToolApprovalDecisionOption) =>
+      resolveToolApproval(approvalId, "approve", decisionOption),
+    rejectToolApproval: (approvalId: string, decisionOption?: ToolApprovalDecisionOption) =>
+      resolveToolApproval(approvalId, "reject", decisionOption),
   };
 }

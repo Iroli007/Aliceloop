@@ -432,6 +432,7 @@ export const schemaStatements = [
       reasoning_effort TEXT NOT NULL DEFAULT 'medium',
       tool_provider_id TEXT,
       tool_model TEXT,
+      recent_turns_count INTEGER NOT NULL DEFAULT 4,
       updated_at TEXT NOT NULL
     )
   `,

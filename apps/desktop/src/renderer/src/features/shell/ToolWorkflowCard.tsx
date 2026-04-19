@@ -1,3 +1,6 @@
+import { extractStructuredPlanDraft } from "@aliceloop/runtime-core";
+
+import { MessageContent } from "./MessageContent";
 import { SourceLinksSection, type SourceLink } from "./SourceLinks";
 import type { ToolWorkflowEntry } from "./useShellConversation";
 
@@ -20,6 +23,8 @@ const toolLabelMap: Record<string, string> = {
   grep: "Grep",
   read: "Read",
   skill: "Skill",
+  agent: "Agent",
+  task_output: "Background Agent",
   web_fetch: "Web Fetch",
   web_search: "Web Search",
   write: "Write",
@@ -815,6 +820,36 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
     return "调用技能";
   }
 
+  if (entry.toolName === "agent") {
+    const prompt = isRecord(resolvedInput)
+      ? pickFirstString(resolvedInput, ["prompt"])
+      : typeof resolvedInput === "string"
+        ? resolvedInput
+        : null;
+    const runInBackground = isRecord(resolvedInput) && resolvedInput.run_in_background === true;
+    if (prompt) {
+      return `${runInBackground ? "后台子代理" : "子代理"}: ${compactInline(prompt, 28)}`;
+    }
+    return runInBackground ? "启动后台子代理" : "运行子代理";
+  }
+
+  if (entry.toolName === "task_output") {
+    const resolvedOutput = resolveEntryOutput(entry);
+    if (isRecord(resolvedOutput)) {
+      const status = pickFirstString(resolvedOutput, ["status"]);
+      if (status === "completed") {
+        return "读取后台子代理结果";
+      }
+      if (status === "failed") {
+        return "后台子代理失败";
+      }
+      if (status === "running" || status === "queued") {
+        return "查看后台子代理状态";
+      }
+    }
+    return "查看后台子代理";
+  }
+
   if (entry.toolName === "bash") {
     if (typeof resolvedInput === "string") {
       const trimmed = resolvedInput.trim();
@@ -860,7 +895,7 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
   }
 
   if (isRecord(resolvedInput)) {
-    const keyPriority = ["path", "filePath", "targetPath", "relativePath", "pattern", "query", "q", "url", "skill", "skillId", "name"];
+    const keyPriority = ["path", "filePath", "targetPath", "relativePath", "pattern", "prompt", "query", "q", "url", "task_id", "skill", "skillId", "name"];
 
     const direct = pickFirstString(resolvedInput, keyPriority);
     if (direct) {
@@ -892,6 +927,10 @@ function getPrimaryDetailLabel(toolName: string) {
     case "write":
     case "edit":
       return "路径";
+    case "agent":
+      return "任务";
+    case "task_output":
+      return "后台任务";
     default:
       return "参数";
   }
@@ -909,6 +948,13 @@ function getStatusMeta(entry: ToolWorkflowEntry) {
     return {
       tone: "waiting" as const,
       label: "待批准",
+    };
+  }
+
+  if (entry.status === "queued") {
+    return {
+      tone: "waiting" as const,
+      label: "排队中",
     };
   }
 
@@ -985,6 +1031,17 @@ function ToolWorkflowGlyph({ toolName }: { toolName: string }) {
     );
   }
 
+  if (toolName.startsWith("task_")) {
+    return (
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <rect x="3.5" y="4" width="13" height="12" rx="2" />
+        <path d="M6.5 8.5h7" />
+        <path d="M6.5 11.5h4.5" />
+        <path d="m12.8 13.1 1.5 1.4 2.2-2.4" />
+      </svg>
+    );
+  }
+
   if (toolName.startsWith("web_") || toolName.startsWith("browser_") || toolName === "skill") {
     return (
       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1054,6 +1111,9 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
   const summaryTitle = buildSummaryTitle(entry);
   const argumentsBlock = formatArgumentsBlock(entry);
   const resultBlock = formatResultBlock(entry);
+  const planDraft = entry.toolName === "write" && typeof resultBlock === "string"
+    ? extractStructuredPlanDraft(resultBlock)
+    : null;
   const sourceLinks = buildToolSourceLinks(entry);
   const durationLabel = formatDurationLabel(entry);
   const primaryDetailLabel = getPrimaryDetailLabel(entry.toolName);
@@ -1099,7 +1159,19 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
           {resultBlock ? (
             <div className="tool-workflow-card__detail">
               <span className="tool-workflow-card__detail-label">{resultDetailLabel}</span>
-              <pre className="tool-workflow-card__detail-value">{resultBlock}</pre>
+              {planDraft ? (
+                <div className="tool-workflow-card__detail-value tool-workflow-card__detail-value--plan">
+                  <div className="tool-workflow-card__plan-preview-head">
+                    <span className="tool-workflow-card__plan-preview-eyebrow">计划草案</span>
+                    <strong className="tool-workflow-card__plan-preview-title">{planDraft.title}</strong>
+                  </div>
+                  <div className="tool-workflow-card__plan-preview-body">
+                    <MessageContent content={planDraft.bodyContent} renderMarkdown />
+                  </div>
+                </div>
+              ) : (
+                <pre className="tool-workflow-card__detail-value">{resultBlock}</pre>
+              )}
             </div>
           ) : null}
           {entry.error ? (

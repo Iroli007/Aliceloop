@@ -12,10 +12,15 @@ import {
   type ProjectDirectoryKind,
   type RuntimePresence,
   type Session,
+  type SessionCompactionState,
   type SessionEvent,
+  type SessionFocusState,
+  type SessionMemoryState,
   type SessionMessage,
   type SessionMessageStatus,
+  type SessionPlanModeState,
   type SessionProjectBinding,
+  type SessionRollingSummary,
   type SessionRole,
   type SessionSnapshot,
   type SessionThreadSummary,
@@ -215,6 +220,134 @@ function summarizeSessionTitle(content: string) {
   }
 
   return normalized.length > 24 ? `${normalized.slice(0, 24).trimEnd()}…` : normalized;
+}
+
+function createInactivePlanModeState(sessionId: string): SessionPlanModeState {
+  return {
+    sessionId,
+    active: false,
+    activePlanId: null,
+    enteredAt: null,
+    updatedAt: null,
+  };
+}
+
+export function createEmptySessionFocusState(sessionId: string): SessionFocusState {
+  return {
+    sessionId,
+    goal: "",
+    constraints: [],
+    priorities: [],
+    nextStep: "",
+    doneCriteria: [],
+    blockers: [],
+    updatedAt: null,
+  };
+}
+
+export function createEmptySessionRollingSummary(sessionId: string): SessionRollingSummary {
+  return {
+    sessionId,
+    currentPhase: "",
+    summary: "",
+    completed: [],
+    remaining: [],
+    decisions: [],
+    summarizedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
+export function createEmptySessionMemoryState(sessionId: string): SessionMemoryState {
+  return {
+    sessionId,
+    currentPhase: "",
+    summary: "",
+    completed: [],
+    remaining: [],
+    decisions: [],
+    rememberedTurnCount: 0,
+    updatedAt: null,
+  };
+}
+
+export function createEmptySessionCompactionState(sessionId: string): SessionCompactionState {
+  return {
+    sessionId,
+    checkpointSummary: "",
+    checkpointToolTranscript: "",
+    checkpointResearchMemory: "",
+    checkpointFocusSnapshot: "",
+    checkpointPlanSnapshot: "",
+    checkpointVolatileKey: "",
+    checkpointSnapshotVersion: 0,
+    promptProjectionCarryForwardKey: "",
+    promptProjectionCarryForwardVersion: 0,
+    promptProjectionHotTailKey: "",
+    promptProjectionHotTailVersion: 0,
+    compactedTurnCount: 0,
+    lastCompactedMessageId: null,
+    consecutiveFailures: 0,
+    updatedAt: null,
+  };
+}
+
+function isSessionPlanModeState(value: unknown): value is SessionPlanModeState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const planMode = value as Partial<SessionPlanModeState>;
+  return typeof planMode.sessionId === "string"
+    && typeof planMode.active === "boolean"
+    && (typeof planMode.activePlanId === "string" || planMode.activePlanId === null)
+    && (typeof planMode.enteredAt === "string" || planMode.enteredAt === null)
+    && (typeof planMode.updatedAt === "string" || planMode.updatedAt === null);
+}
+
+export function getSessionPlanModeState(sessionId: string): SessionPlanModeState {
+  const events = listSessionEventsSince(sessionId, 0);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "plan_mode.updated") {
+      continue;
+    }
+
+    const planMode = (event.payload as { planMode?: unknown }).planMode;
+    if (isSessionPlanModeState(planMode)) {
+      return planMode;
+    }
+  }
+
+  return createInactivePlanModeState(sessionId);
+}
+
+function updateSessionPlanModeState(sessionId: string, planMode: SessionPlanModeState) {
+  const event = appendSessionEvent(sessionId, "plan_mode.updated", { planMode }, planMode.updatedAt ?? new Date().toISOString());
+  return { planMode, event };
+}
+
+export function enterSessionPlanMode(sessionId: string, activePlanId: string | null = null) {
+  const current = getSessionPlanModeState(sessionId);
+  const now = new Date().toISOString();
+  return updateSessionPlanModeState(sessionId, {
+    sessionId,
+    active: true,
+    activePlanId,
+    enteredAt: current.enteredAt ?? now,
+    updatedAt: now,
+  });
+}
+
+export function exitSessionPlanMode(sessionId: string) {
+  const now = new Date().toISOString();
+  return updateSessionPlanModeState(sessionId, {
+    sessionId,
+    active: false,
+    activePlanId: null,
+    enteredAt: null,
+    updatedAt: now,
+  });
 }
 
 function escapeSqlLikePattern(value: string) {
@@ -709,6 +842,7 @@ function toSessionThreadSummary(row: SessionThreadSummaryRow): SessionThreadSumm
     projectName: row.projectName,
     projectPath: row.projectPath,
     projectKind: row.projectKind,
+    planMode: getSessionPlanModeState(row.id),
   };
 }
 
@@ -1583,6 +1717,11 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
       projectKind: project?.projectKind ?? null,
     },
     project,
+    planMode: getSessionPlanModeState(sessionId),
+    focusState: createEmptySessionFocusState(sessionId),
+    rollingSummary: createEmptySessionRollingSummary(sessionId),
+    sessionMemory: createEmptySessionMemoryState(sessionId),
+    compactionState: createEmptySessionCompactionState(sessionId),
     messages,
     attachments,
     toolWorkflowEntries,

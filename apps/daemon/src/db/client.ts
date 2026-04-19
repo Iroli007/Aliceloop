@@ -564,6 +564,7 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, "runtime_settings", "auto_approve_tool_requests", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "runtime_settings", "tool_provider_id", "TEXT");
   ensureColumn(db, "runtime_settings", "tool_model", "TEXT");
+  ensureColumn(db, "runtime_settings", "recent_turns_count", "INTEGER NOT NULL DEFAULT 4");
   ensureColumn(db, "device_presence", "capabilities_json", "TEXT NOT NULL DEFAULT '{}'");
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();

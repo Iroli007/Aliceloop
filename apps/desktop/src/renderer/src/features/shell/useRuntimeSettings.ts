@@ -14,6 +14,7 @@ interface SaveRuntimeSettingsInput {
   reasoningEffort?: ReasoningEffort;
   toolProviderId?: ProviderKind | null;
   toolModel?: string | null;
+  recentTurnsCount?: number;
 }
 
 export interface RuntimeSettingsState {
@@ -80,6 +81,7 @@ export function useRuntimeSettings(): RuntimeSettingsState {
           reasoningEffort: input.reasoningEffort,
           toolProviderId: input.toolProviderId,
           toolModel: input.toolModel,
+          recentTurnsCount: input.recentTurnsCount,
         }),
       });
 

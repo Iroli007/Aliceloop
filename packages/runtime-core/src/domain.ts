@@ -36,9 +36,12 @@ export type SandboxExecutionAccess = "standard" | "elevated";
 export type SandboxPrimitive = "read" | "write" | "edit" | "delete" | "bash";
 export type SandboxRunStatus = "running" | "done" | "failed" | "blocked";
 export type ToolApprovalStatus = "pending" | "approved" | "rejected";
+export type ToolApprovalDecisionOption = "allow_once" | "deny_once" | "allow_always" | "deny_always";
 export type ToolCallStatus =
   | "input-streaming"
   | "input-available"
+  | "queued"
+  | "executing"
   | "approval-requested"
   | "approval-responded"
   | "output-available"
@@ -56,6 +59,7 @@ export type SessionEventType =
   | "message.created"
   | "message.acked"
   | "message.updated"
+  | "task.notification"
   | "job.updated"
   | "artifact.created"
   | "artifact.block.created"
@@ -69,7 +73,16 @@ export type SessionEventType =
   | "tool.approval.resolved"
   | "tool.call.started"
   | "tool.call.completed"
-  | "tool.state.change";
+  | "tool.state.change"
+  | "plan_mode.updated";
+
+export interface SessionPlanModeState {
+  sessionId: string;
+  active: boolean;
+  activePlanId: string | null;
+  enteredAt: string | null;
+  updatedAt: string | null;
+}
 
 export interface LibraryItem {
   id: string;
@@ -205,6 +218,7 @@ export interface SessionThreadSummary {
   projectName?: string | null;
   projectPath?: string | null;
   projectKind?: ProjectDirectoryKind | null;
+  planMode?: SessionPlanModeState;
 }
 
 export interface ProjectDirectory {
@@ -305,6 +319,7 @@ export interface RuntimeSettings {
   reasoningEffort: ReasoningEffort;
   toolProviderId: ProviderKind | null;
   toolModel: string | null;
+  recentTurnsCount: number;
   updatedAt: string | null;
 }
 
@@ -397,6 +412,25 @@ export function normalizeAutoApproveToolRequests(
   return true;
 }
 
+export const MIN_RECENT_TURNS_COUNT = 1;
+export const MAX_RECENT_TURNS_COUNT = 20;
+
+export function normalizeRecentTurnsCount(
+  value: number | string | null | undefined,
+): number {
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string"
+      ? Number.parseInt(value, 10)
+      : Number.NaN;
+
+  if (!Number.isFinite(parsed)) {
+    return 4;
+  }
+
+  return Math.max(MIN_RECENT_TURNS_COUNT, Math.min(MAX_RECENT_TURNS_COUNT, Math.round(parsed)));
+}
+
 export const sandboxProfileDefinitions: SandboxProfileDefinition[] = [
   {
     id: "development",
@@ -461,6 +495,7 @@ export const defaultRuntimeSettings: RuntimeSettings = {
   reasoningEffort: "medium",
   toolProviderId: null,
   toolModel: null,
+  recentTurnsCount: 4,
   updatedAt: null,
 };
 
@@ -553,13 +588,26 @@ export interface SandboxRun {
 export interface ToolApproval {
   id: string;
   sessionId: string;
+  toolCallId?: string | null;
   toolName: string;
+  kind?: "command" | "question";
   title: string;
   detail: string;
   commandLine: string;
   command: string;
   args: string[];
   cwd: string;
+  question?: {
+    header: string;
+    question: string;
+    options: Array<{
+      label: string;
+      description?: string | null;
+    }>;
+    multiSelect?: boolean;
+  } | null;
+  decisionOption?: ToolApprovalDecisionOption | null;
+  responseText?: string | null;
   status: ToolApprovalStatus;
   requestedAt: string;
   resolvedAt: string | null;
@@ -577,9 +625,79 @@ export interface ToolCallState {
   updatedAt: number;
 }
 
+export interface SessionFocusState {
+  sessionId: string;
+  goal: string;
+  constraints: string[];
+  priorities: string[];
+  nextStep: string;
+  doneCriteria: string[];
+  blockers: string[];
+  updatedAt: string | null;
+}
+
+export interface SessionRollingSummary {
+  sessionId: string;
+  currentPhase: string;
+  summary: string;
+  completed: string[];
+  remaining: string[];
+  decisions: string[];
+  summarizedTurnCount: number;
+  updatedAt: string | null;
+}
+
+export interface SessionMemoryState {
+  sessionId: string;
+  currentPhase: string;
+  summary: string;
+  completed: string[];
+  remaining: string[];
+  decisions: string[];
+  rememberedTurnCount: number;
+  updatedAt: string | null;
+}
+
+export interface SessionCompactionState {
+  sessionId: string;
+  checkpointSummary: string;
+  checkpointToolTranscript: string;
+  checkpointResearchMemory: string;
+  checkpointFocusSnapshot: string;
+  checkpointPlanSnapshot: string;
+  checkpointVolatileKey: string;
+  checkpointSnapshotVersion: number;
+  promptProjectionCarryForwardKey: string;
+  promptProjectionCarryForwardVersion: number;
+  promptProjectionHotTailKey: string;
+  promptProjectionHotTailVersion: number;
+  compactedTurnCount: number;
+  lastCompactedMessageId: string | null;
+  consecutiveFailures: number;
+  updatedAt: string | null;
+}
+
+export interface TaskNotification {
+  id: string;
+  taskId: string;
+  role: string | null;
+  status: "completed" | "failed";
+  title: string;
+  objective: string;
+  outputPath: string;
+  preview: string | null;
+  childSessionId: string;
+  createdAt: string;
+}
+
 export interface SessionSnapshot {
   session: Session;
   project: SessionProjectBinding | null;
+  planMode: SessionPlanModeState;
+  focusState: SessionFocusState;
+  rollingSummary: SessionRollingSummary;
+  sessionMemory: SessionMemoryState;
+  compactionState: SessionCompactionState;
   messages: SessionMessage[];
   attachments: Attachment[];
   toolWorkflowEntries: ToolWorkflowEntry[];

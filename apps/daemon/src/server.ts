@@ -69,6 +69,8 @@ import {
   createAttachment,
   createSession,
   deleteSession,
+  enterSessionPlanMode,
+  exitSessionPlanMode,
   createSessionMessage,
   hasSession,
   listSessionMessageReactions,
@@ -236,12 +238,17 @@ interface UpdateSessionProjectBody {
   projectId?: string | null;
 }
 
+interface UpdateSessionPlanModeBody {
+  planId?: string | null;
+}
+
 interface UpdateRuntimeSettingsBody {
   sandboxProfile?: SandboxPermissionProfile;
   autoApproveToolRequests?: boolean;
   reasoningEffort?: ReasoningEffort;
   toolProviderId?: ProviderKind | null;
   toolModel?: string | null;
+  recentTurnsCount?: number;
 }
 
 interface TaskParams {
@@ -1520,6 +1527,30 @@ export async function createServer() {
     };
   });
 
+  server.post<{ Params: SessionParams; Body: UpdateSessionPlanModeBody }>("/api/session/:id/plan-mode/enter", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    const result = enterSessionPlanMode(request.params.id, request.body?.planId?.trim() || null);
+    publishSessionEvent(result.event);
+    return result.planMode;
+  });
+
+  server.post<{ Params: SessionParams }>("/api/session/:id/plan-mode/exit", async (request, reply) => {
+    if (!hasSession(request.params.id)) {
+      return reply.code(404).send({
+        error: "session_not_found",
+      });
+    }
+
+    const result = exitSessionPlanMode(request.params.id);
+    publishSessionEvent(result.event);
+    return result.planMode;
+  });
+
   server.get<{ Params: SessionParams; Querystring: { since?: string } }>("/api/session/:id/stream", (request, reply) => {
     const sessionId = request.params.id;
     const since = Math.max(
@@ -1920,6 +1951,7 @@ export async function createServer() {
       reasoningEffort: request.body?.reasoningEffort,
       toolProviderId: request.body?.toolProviderId,
       toolModel: request.body?.toolModel,
+      recentTurnsCount: request.body?.recentTurnsCount,
     });
   });
 

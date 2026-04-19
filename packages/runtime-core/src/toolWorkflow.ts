@@ -37,12 +37,14 @@ interface ToolWorkflowEntryUpdate {
 const toolWorkflowStatusOrder: Record<ToolCallStatus, number> = {
   "input-streaming": 0,
   "input-available": 1,
-  "approval-requested": 2,
-  "approval-responded": 3,
-  "output-available": 4,
-  "output-error": 5,
-  "permission-denied": 5,
-  "done": 6,
+  "queued": 2,
+  "executing": 3,
+  "approval-requested": 4,
+  "approval-responded": 5,
+  "output-available": 6,
+  "output-error": 7,
+  "permission-denied": 7,
+  "done": 8,
 };
 
 function summarizeUnknown(value: unknown, maxLength = 320) {
