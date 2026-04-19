@@ -41,6 +41,7 @@ export interface AgentContext {
   safetyConfig: SafetyConfig;
   timings: Record<string, number | string | null>;
   routedSkillIds: string[];
+  directRoutedSkillIds: string[];
 }
 
 const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
@@ -95,18 +96,29 @@ export async function loadContext(
   timings.sessionWorksetActiveSkillCount = activeWorksetSkillIds.length;
   timings.sessionWorksetActiveToolCount = activeWorksetToolNames.length;
 
-  const routeHints = mergeSkillRouteHints(
+  const directRouteHints = mergeSkillRouteHints(
     recentConversationFocus.routeHints,
-    activeWorksetSkillIds.length > 0
-      ? {
-          stickySkillIds: activeWorksetSkillIds,
-          reasons: ["session-workset"],
-        }
-      : null,
     (options?.additionalStickySkillIds?.length ?? 0) > 0
       ? {
           stickySkillIds: options?.additionalStickySkillIds ?? [],
           reasons: ["runtime-capability-recovery"],
+        }
+      : null,
+  );
+  const directIntentDecision = buildTurnIntentDecision(userQuery, {
+    hints: directRouteHints,
+    hasImageAttachment: latestUserHasImageAttachment,
+    researchContinuation: recentConversationFocus.researchContinuation,
+    continuationLike: recentConversationFocus.continuationLike,
+  });
+  const directRoutedSkills = selectRelevantSkillDefinitions(userQuery, directIntentDecision.routeHints);
+
+  const routeHints = mergeSkillRouteHints(
+    directRouteHints,
+    activeWorksetSkillIds.length > 0
+      ? {
+          stickySkillIds: activeWorksetSkillIds,
+          reasons: ["session-workset"],
         }
       : null,
   );
@@ -334,5 +346,6 @@ export async function loadContext(
     },
     timings,
     routedSkillIds: routedSkills.map((skill) => skill.id),
+    directRoutedSkillIds: directRoutedSkills.map((skill) => skill.id),
   };
 }

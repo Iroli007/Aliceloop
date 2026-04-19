@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
-import type { ReasoningEffort } from "@aliceloop/runtime-core";
 import { stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
 import { autoCompactMessages } from "./autoCompact";
-import { reflectOnTurn } from "../context/memory/memoryDistiller";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
@@ -21,37 +19,29 @@ import {
   createAttachment,
   createSessionMessage,
   getSessionWorksetState,
-  updateSessionMessage,
-  updateSessionWorksetState,
   upsertSessionJob,
 } from "../repositories/sessionRepository";
-import { createMemory } from "../context/memory/memoryRepository";
-import { maybeCreateArtifactFromReply } from "../services/artifactWriter";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
 import { enqueueSessionRun } from "../services/sessionRunQueue";
 import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
 import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
-import { saveStreamCheckpoint, clearStreamCheckpoint } from "./streamCheckpoint";
 import { ToolStateMachine, type ToolCallState } from "./toolStateMachine";
 import {
   buildAgentProviderOptions,
-  getRenderableAssistantText,
   resolveProviderTransport,
 } from "./providerRuntimeAdapter";
 import { executeMiniMaxTextToolCallFallback } from "./minimaxTextToolFallback";
+import { consumeTextStream } from "./streamPersistence";
+import { createToolOrchestration } from "./toolOrchestration";
 import {
   buildCapabilityFailureReply,
   inferCapabilityRecoveryRequest,
   looksLikeCapabilitySeekingReply,
   MAX_CAPABILITY_RECOVERY_ATTEMPTS,
 } from "./capabilityRecovery";
-import { inferSkillIdsForToolCall } from "../context/tools/toolSkillRouting";
-import {
-  cloneWorksetState,
-  type SessionWorksetState,
-  type WorksetEntryState,
-} from "../context/workset/worksetState";
+import { settleWorksetAfterTurn } from "./worksetSettlement";
+import { schedulePostProcessing } from "./postProcessing";
 
 // ---------------------------------------------------------------------------
 // Helpers (unchanged)
@@ -107,128 +97,6 @@ function buildAssistantEventPayload(skills: string[], tools: string[]) {
     payload.tools = tools;
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
-}
-
-function createWorksetEntryState(): WorksetEntryState {
-  return {
-    score: 0,
-    idleTurns: 0,
-    active: false,
-    lastAttachedTurn: null,
-    lastUsedTurn: null,
-  };
-}
-
-function normalizeAttachedNames(values: Iterable<string>) {
-  return [...new Set(
-    [...values]
-      .map((value) => value.trim())
-      .filter(Boolean),
-  )];
-}
-
-function isCountedToolCall(state: ToolCallState) {
-  return ![
-    "input-streaming",
-    "input-available",
-    "approval-requested",
-    "approval-responded",
-  ].includes(state.status);
-}
-
-function settleWorksetAfterTurn(input: {
-  sessionId: string;
-  startingState: SessionWorksetState;
-  attachedSkillIds: Iterable<string>;
-  attachedToolNames: Iterable<string>;
-  toolCalls: ToolCallState[];
-}) {
-  const nextState = cloneWorksetState(input.startingState);
-  const turnCounter = nextState.turnCounter + 1;
-  nextState.turnCounter = turnCounter;
-
-  const attachedSkillIds = normalizeAttachedNames(input.attachedSkillIds);
-  const attachedToolNames = normalizeAttachedNames(input.attachedToolNames);
-  const attachedSkillSet = new Set(attachedSkillIds);
-  const attachedToolSet = new Set(attachedToolNames);
-
-  const usedToolCalls = input.toolCalls.filter((state) => isCountedToolCall(state));
-  const usedToolNames = new Set(usedToolCalls.map((state) => state.toolName));
-  const usedSkillIds = new Set<string>();
-
-  for (const call of usedToolCalls) {
-    for (const skillId of inferSkillIdsForToolCall(call.toolName, call.input, attachedSkillSet)) {
-      usedSkillIds.add(skillId);
-    }
-  }
-
-  const settleEntry = (
-    entries: Record<string, WorksetEntryState>,
-    key: string,
-    isAttached: boolean,
-    isUsed: boolean,
-    wasActive: boolean,
-  ) => {
-    const entry = entries[key] ?? createWorksetEntryState();
-    if (isAttached && !wasActive) {
-      entry.idleTurns = 0;
-      entry.score += 2;
-      entry.active = true;
-    }
-
-    if (isAttached) {
-      entry.lastAttachedTurn = turnCounter;
-      if (isUsed) {
-        entry.score += 1;
-        entry.idleTurns = 0;
-        entry.lastUsedTurn = turnCounter;
-      } else {
-        entry.score = Math.max(0, entry.score - 1);
-        entry.idleTurns += 1;
-      }
-
-      if (entry.idleTurns >= 2 || entry.score <= 0) {
-        entry.score = 0;
-        entry.active = false;
-      }
-    }
-
-    entries[key] = entry;
-  };
-
-  const skillKeys = new Set([
-    ...Object.keys(nextState.skills),
-    ...attachedSkillIds,
-    ...usedSkillIds,
-  ]);
-  for (const skillId of skillKeys) {
-    const wasActive = Boolean(input.startingState.skills[skillId]?.active);
-    settleEntry(
-      nextState.skills,
-      skillId,
-      attachedSkillSet.has(skillId),
-      usedSkillIds.has(skillId),
-      wasActive,
-    );
-  }
-
-  const toolKeys = new Set([
-    ...Object.keys(nextState.tools),
-    ...attachedToolNames,
-    ...usedToolNames,
-  ]);
-  for (const toolName of toolKeys) {
-    const wasActive = Boolean(input.startingState.tools[toolName]?.active);
-    settleEntry(
-      nextState.tools,
-      toolName,
-      attachedToolSet.has(toolName),
-      usedToolNames.has(toolName),
-      wasActive,
-    );
-  }
-
-  updateSessionWorksetState(input.sessionId, nextState);
 }
 
 function resolveImageMimeType(filePath: string): string | null {
@@ -693,22 +561,18 @@ async function executeStreamAttempt(
   existingAssistantMessageId?: string | null,
 ): Promise<StreamResult & { assistantMessageId: string | null; attachedToolNames: string[]; toolCalls: ToolCallState[] }> {
   const requestStartedAt = nowMs();
-  const toolCallInputs = new Map<string, unknown>();
   const runtimeSettings = getRuntimeSettings();
-
-  // Tool state machine for tracking tool call lifecycle
   const stateMachine = new ToolStateMachine();
-
-  // Publish state changes as session events
-  stateMachine.onStateChange((state) => {
-    publishRuntimeEvent(run.sessionId, "tool.state.change", {
-      toolCallId: state.toolCallId,
-      toolName: state.toolName,
-      status: state.status,
-      input: state.input,
-      output: state.output,
-      error: state.error,
-    });
+  const toolOrchestration = createToolOrchestration({
+    sessionId: run.sessionId,
+    stateMachine,
+    autoApproveToolRequests: runtimeSettings.autoApproveToolRequests,
+    checkActive: () => run.safety.checkActive(),
+    summarizeUnknown,
+    predictToolBackend,
+    extractBrowserToolPayload,
+    publishRuntimeEvent,
+    maybePublishToolImageAttachment,
   });
 
   const stream = streamText({
@@ -731,91 +595,39 @@ async function executeStreamAttempt(
     experimental_onStepStart() {
       run.safety.checkStep();
     },
-    experimental_onToolCallStart({ toolCall }) {
-      run.safety.checkActive();
-      toolCallInputs.set(toolCall.toolCallId, toolCall.input);
-
-      // Start tracking tool call state
-      stateMachine.start(toolCall.toolCallId, toolCall.toolName, toolCall.input);
-      stateMachine.markInputAvailable(toolCall.toolCallId);
-
-      // Check if this tool needs approval
-      if (!runtimeSettings.autoApproveToolRequests && stateMachine.needsApproval(toolCall.toolName)) {
-        // Publish approval request event
-        publishRuntimeEvent(run.sessionId, "tool.approval.requested", {
-          toolCallId: toolCall.toolCallId,
-          toolName: toolCall.toolName,
-          inputPreview: summarizeUnknown(toolCall.input),
-        });
-      }
-
-      const predictedRuntime = predictToolBackend(run.sessionId, toolCall.toolName);
-      publishRuntimeEvent(run.sessionId, "tool.call.started", {
-        toolCallId: toolCall.toolCallId,
-        toolName: toolCall.toolName,
-        inputPreview: summarizeUnknown(toolCall.input),
-        backend: predictedRuntime.backend,
-        tabId: predictedRuntime.tabId,
-        state: "input-available",
-      });
-    },
-    experimental_onToolCallFinish(event) {
-      run.safety.checkActive();
-      const resultPreview = event.success ? summarizeUnknown(event.output) : summarizeUnknown(event.error);
-      const browserPayload = extractBrowserToolPayload(event.success ? event.output : event.error);
-      const completedBackend = browserPayload.backend
-        ?? predictToolBackend(run.sessionId, event.toolCall.toolName).backend
-        ?? null;
-      const completedTabId = browserPayload.tabId ?? null;
-
-      // Update tool state machine
-      if (event.success) {
-        stateMachine.markOutputAvailable(event.toolCall.toolCallId, event.output);
-      } else {
-        stateMachine.markError(event.toolCall.toolCallId, event.error);
-      }
-      stateMachine.complete(event.toolCall.toolCallId);
-
-      publishRuntimeEvent(run.sessionId, "tool.call.completed", {
-        toolCallId: event.toolCall.toolCallId,
-        toolName: event.toolCall.toolName,
-        success: event.success,
-        resultPreview,
-        durationMs: event.durationMs,
-        backend: completedBackend,
-        tabId: completedTabId,
-        state: event.success ? "output-available" : "output-error",
-      });
-      logPerfTrace("tool_call", {
-        sessionId: run.sessionId,
-        toolCallId: event.toolCall.toolCallId,
-        toolName: event.toolCall.toolName,
-        success: event.success ? 1 : 0,
-        durationMs: typeof event.durationMs === "number" ? roundMs(event.durationMs) : null,
-        browserBackend: completedBackend,
-        tabId: completedTabId,
-      });
-      if (event.success) {
-        void maybePublishToolImageAttachment(
-          run.sessionId,
-          event.toolCall.toolName,
-          event.output,
-          toolCallInputs.get(event.toolCall.toolCallId),
-        ).catch(() => {});
-      }
-      toolCallInputs.delete(event.toolCall.toolCallId);
-    },
+    ...toolOrchestration,
   });
   const streamSetupMs = roundMs(nowMs() - requestStartedAt);
 
-  const { text, timings, diagnostics, assistantMessageId } = await consumeTextStream(
-    run,
+  const { text, timings, diagnostics, assistantMessageId } = await consumeTextStream({
+    sessionId: run.sessionId,
+    providerId: run.provider.id,
+    context: run.context,
     stream,
     stateMachine,
-    runtimeSettings.reasoningEffort,
+    reasoningEffort: runtimeSettings.reasoningEffort,
     requestStartedAt,
-    existingAssistantMessageId ?? null,
-  );
+    existingAssistantMessageId: existingAssistantMessageId ?? null,
+    checkActive: () => run.safety.checkActive(),
+    buildAssistantEventPayload,
+    summarizeUnknown,
+    resolveTextFallback: ({ assistantText, stateMachine: fallbackStateMachine, reasoningEffort }) => {
+      return executeMiniMaxTextToolCallFallback({
+        sessionId: run.sessionId,
+        provider: run.provider,
+        context: run.context,
+        abortSignal: run.abortController.signal,
+        stateMachine: fallbackStateMachine,
+        reasoningEffort,
+        assistantText,
+        summarizeUnknown,
+        predictToolBackend,
+        extractBrowserToolPayload,
+        publishRuntimeEvent,
+        maybePublishToolImageAttachment,
+      });
+    },
+  });
   return {
     text,
     timings: {
@@ -837,6 +649,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   const accumulatedStickySkillIds = new Set<string>();
   const accumulatedToolNames = new Set<string>();
   const accumulatedAttachedSkillIds = new Set<string>();
+  const accumulatedDirectSkillIds = new Set<string>();
   const accumulatedAttachedToolNames = new Set<string>();
   const accumulatedToolCalls: ToolCallState[] = [];
   const attemptedRecoveryReasons = new Set<string>();
@@ -854,6 +667,9 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
 
       for (const skillId of run.context.routedSkillIds) {
         accumulatedAttachedSkillIds.add(skillId);
+      }
+      for (const skillId of run.context.directRoutedSkillIds) {
+        accumulatedDirectSkillIds.add(skillId);
       }
       for (const toolName of result.attachedToolNames) {
         accumulatedAttachedToolNames.add(toolName);
@@ -900,6 +716,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
       sessionId: run.sessionId,
       startingState: startingWorksetState,
       attachedSkillIds: accumulatedAttachedSkillIds,
+      directSkillIds: accumulatedDirectSkillIds,
       attachedToolNames: accumulatedAttachedToolNames,
       toolCalls: accumulatedToolCalls,
     });
@@ -925,252 +742,6 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   }
 
   return fallbackResult;
-}
-
-// ---------------------------------------------------------------------------
-// consumeTextStream — stream delta → DB with debounce
-// ---------------------------------------------------------------------------
-
-const DEBOUNCE_MS = 80;
-
-async function consumeTextStream(
-  run: AgentRun,
-  stream: Awaited<ReturnType<typeof streamText>>,
-  stateMachine: ToolStateMachine,
-  reasoningEffort: ReasoningEffort,
-  requestStartedAt: number,
-  existingAssistantMessageId: string | null,
-): Promise<{
-  text: string;
-  assistantMessageId: string | null;
-  timings: Record<string, number | null>;
-  diagnostics: StreamResult["diagnostics"];
-}> {
-  let text = "";
-  const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
-  const routedSkillIds = run.context.routedSkillIds;
-  let assistantMessageId: string | null = existingAssistantMessageId;
-  let pendingFlush = false;
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
-  let firstTokenMs: number | null = null;
-  let resolvedToolCalls: unknown[] = [];
-  const attachedToolNames = Object.keys(run.context.tools);
-  let fallbackToolCallCount = 0;
-
-  function getChatContent(final = false) {
-    return getRenderableAssistantText(run.provider.id, text, final);
-  }
-
-  function flush() {
-    if (!assistantMessageId || !pendingFlush) return;
-    pendingFlush = false;
-    const content = getChatContent();
-    if (content === null) {
-      return;
-    }
-    const updateResult = updateSessionMessage({
-      sessionId: run.sessionId,
-      messageId: assistantMessageId,
-      content,
-      eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
-    });
-    publishSessionEvent(updateResult.event);
-  }
-
-  for await (const delta of stream.textStream) {
-    run.safety.checkActive();
-    if (!delta) continue;
-
-    text += delta;
-
-    // 保存checkpoint，防止中断丢失进度
-    saveStreamCheckpoint(run.sessionId, text);
-
-    if (!assistantMessageId) {
-      const content = getChatContent();
-      if (content === null || !content) {
-        continue;
-      }
-
-      firstTokenMs = roundMs(nowMs() - requestStartedAt);
-      // First delta: create the message immediately
-      const messageResult = createSessionMessage({
-        sessionId: run.sessionId,
-        clientMessageId: assistantClientMessageId,
-        deviceId: "runtime-agent",
-        role: "assistant",
-        content,
-        attachmentIds: [],
-        eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
-      });
-
-      assistantMessageId = messageResult.message.id;
-      for (const event of messageResult.events) {
-        publishSessionEvent(event);
-      }
-      continue;
-    }
-
-    // Subsequent deltas: debounce updates
-    pendingFlush = true;
-    if (!flushTimer) {
-      flushTimer = setTimeout(() => {
-        flush();
-        flushTimer = null;
-      }, DEBOUNCE_MS);
-    }
-  }
-
-  // Flush any remaining content after the stream ends
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
-  }
-  if (pendingFlush) flush();
-
-  resolvedToolCalls = await stream.toolCalls;
-
-  if (resolvedToolCalls.length === 0 && text.trim()) {
-    const fallback = await executeMiniMaxTextToolCallFallback({
-      sessionId: run.sessionId,
-      provider: run.provider,
-      context: run.context,
-      abortSignal: run.abortController.signal,
-      stateMachine,
-      reasoningEffort,
-      assistantText: text,
-      summarizeUnknown,
-      predictToolBackend,
-      extractBrowserToolPayload,
-      publishRuntimeEvent,
-      maybePublishToolImageAttachment,
-    });
-
-    if (fallback) {
-      fallbackToolCallCount = fallback.toolCallCount;
-      text = fallback.replacementText;
-    }
-  }
-
-  // Handle tool-only replies with no text
-  if (!text.trim()) {
-    if (resolvedToolCalls.length > 0) {
-      text = `已完成 ${resolvedToolCalls.length} 次工具调用。`;
-    }
-  }
-
-  const finalContent = getChatContent(true);
-
-  if (assistantMessageId && typeof finalContent === "string") {
-    const updateResult = updateSessionMessage({
-      sessionId: run.sessionId,
-      messageId: assistantMessageId,
-      content: finalContent,
-      eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
-    });
-    publishSessionEvent(updateResult.event);
-  }
-
-  // Handle late message creation (text appeared after stream end, or tool-only fallback)
-  if (!assistantMessageId && finalContent) {
-    const messageResult = createSessionMessage({
-      sessionId: run.sessionId,
-      clientMessageId: assistantClientMessageId,
-      deviceId: "runtime-agent",
-      role: "assistant",
-      content: finalContent,
-      attachmentIds: [],
-      eventPayload: buildAssistantEventPayload(routedSkillIds, attachedToolNames),
-    });
-    assistantMessageId = messageResult.message.id;
-    for (const event of messageResult.events) {
-      publishSessionEvent(event);
-    }
-  }
-
-  await syncSessionProjectHistory(run.sessionId);
-
-  // 清理checkpoint
-  clearStreamCheckpoint(run.sessionId);
-
-  // Log cache statistics if available
-  const metadata = await stream.providerMetadata;
-  let cacheCreationInputTokens: number | null = null;
-  let cacheReadInputTokens: number | null = null;
-  if (metadata?.anthropic) {
-    cacheCreationInputTokens = typeof metadata.anthropic.cacheCreationInputTokens === "number"
-      ? metadata.anthropic.cacheCreationInputTokens
-      : null;
-    cacheReadInputTokens = typeof metadata.anthropic.cacheReadInputTokens === "number"
-      ? metadata.anthropic.cacheReadInputTokens
-      : null;
-    if (cacheCreationInputTokens || cacheReadInputTokens) {
-      console.log(`[Cache] write=${cacheCreationInputTokens ?? 0} read=${cacheReadInputTokens ?? 0}`);
-    }
-  }
-
-  return {
-    text,
-    assistantMessageId,
-    timings: {
-      firstTokenMs,
-      streamTotalMs: roundMs(nowMs() - requestStartedAt),
-      cacheCreationInputTokens,
-      cacheReadInputTokens,
-    },
-    diagnostics: {
-      resolvedToolCallCount: Array.isArray(resolvedToolCalls) ? resolvedToolCalls.length + fallbackToolCallCount : fallbackToolCallCount,
-      providerMetadataPreview: summarizeUnknown(metadata),
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// schedulePostProcessing — fire-and-forget, never blocks the main turn
-// ---------------------------------------------------------------------------
-
-function schedulePostProcessing(run: AgentRun, text: string) {
-  const userMessages = run.context.messages
-    .filter((m) => m.role === "user")
-    .map((m) => (typeof m.content === "string" ? m.content : ""));
-  const latestUserMessage = userMessages.at(-1) ?? null;
-
-  if (latestUserMessage) {
-    void maybeCreateArtifactFromReply(run.sessionId, latestUserMessage, text).catch((err) => {
-      const detail = err instanceof Error ? err.message : "工件写入失败";
-      publishRuntimeNotice(run.sessionId, `工件流式写入失败：${detail}`);
-    });
-  }
-
-  if (!latestUserMessage) {
-    return;
-  }
-
-  void (async () => {
-    const distilled = await reflectOnTurn({
-      userMessages,
-      assistantResponse: text,
-    });
-
-    for (const memory of distilled.permanent) {
-      try {
-        await createMemory({
-          content: memory.content,
-          source: "auto",
-          durability: "permanent",
-          factKind: memory.factKind,
-          factKey: memory.factKey,
-          relatedTopics: memory.relatedTopics,
-        });
-      } catch {
-        // A single fact write should not block the rest of the post-turn updates.
-      }
-    }
-
-  })().catch(() => {
-    // Summary refresh failure should not fail the user-visible turn.
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,7 +783,12 @@ export async function runAgent(sessionId: string) {
         ...timings,
         resolvedToolCallCount: diagnostics?.resolvedToolCallCount ?? null,
       });
-      schedulePostProcessing(run, text);
+      schedulePostProcessing({
+        sessionId: run.sessionId,
+        messages: run.context.messages,
+        assistantText: text,
+        publishRuntimeNotice,
+      });
     } catch (error) {
       run.reportFailed(error);
     } finally {

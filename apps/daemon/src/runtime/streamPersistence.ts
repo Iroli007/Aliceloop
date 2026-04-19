@@ -1,0 +1,224 @@
+import { randomUUID } from "node:crypto";
+import type { ReasoningEffort } from "@aliceloop/runtime-core";
+import type { AgentContext } from "../context/index";
+import { publishSessionEvent } from "../realtime/sessionStreams";
+import {
+  createSessionMessage,
+  updateSessionMessage,
+} from "../repositories/sessionRepository";
+import { syncSessionProjectHistory } from "../services/sessionProjectService";
+import { getRenderableAssistantText } from "./providerRuntimeAdapter";
+import { nowMs, roundMs } from "./perfTrace";
+import { clearStreamCheckpoint, saveStreamCheckpoint } from "./streamCheckpoint";
+import type { ToolStateMachine } from "./toolStateMachine";
+
+const DEBOUNCE_MS = 80;
+
+interface TextStreamLike {
+  textStream: AsyncIterable<string>;
+  toolCalls: PromiseLike<unknown[]>;
+  providerMetadata: PromiseLike<{
+    anthropic?: {
+      cacheCreationInputTokens?: unknown;
+      cacheReadInputTokens?: unknown;
+    };
+  } | undefined>;
+}
+
+type AssistantEventPayload = {
+  skills?: string[];
+  tools?: string[];
+};
+
+interface TextFallbackResult {
+  replacementText: string;
+  toolCallCount: number;
+}
+
+interface ConsumeTextStreamInput {
+  sessionId: string;
+  providerId: string;
+  context: AgentContext;
+  stream: TextStreamLike;
+  stateMachine: ToolStateMachine;
+  reasoningEffort: ReasoningEffort;
+  requestStartedAt: number;
+  existingAssistantMessageId: string | null;
+  checkActive(): void;
+  buildAssistantEventPayload(skills: string[], tools: string[]): AssistantEventPayload | undefined;
+  summarizeUnknown(value: unknown, maxLength?: number): string | null;
+  resolveTextFallback(input: {
+    assistantText: string;
+    stateMachine: ToolStateMachine;
+    reasoningEffort: ReasoningEffort;
+  }): Promise<TextFallbackResult | null>;
+}
+
+export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<{
+  text: string;
+  assistantMessageId: string | null;
+  timings: Record<string, number | null>;
+  diagnostics: {
+    resolvedToolCallCount: number;
+    providerMetadataPreview: string | null;
+  };
+}> {
+  let text = "";
+  const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
+  const routedSkillIds = input.context.routedSkillIds;
+  let assistantMessageId: string | null = input.existingAssistantMessageId;
+  let pendingFlush = false;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let firstTokenMs: number | null = null;
+  let resolvedToolCalls: unknown[] = [];
+  const attachedToolNames = Object.keys(input.context.tools);
+  let fallbackToolCallCount = 0;
+
+  function getChatContent(final = false) {
+    return getRenderableAssistantText(input.providerId, text, final);
+  }
+
+  function flush() {
+    if (!assistantMessageId || !pendingFlush) return;
+    pendingFlush = false;
+    const content = getChatContent();
+    if (content === null) {
+      return;
+    }
+    const updateResult = updateSessionMessage({
+      sessionId: input.sessionId,
+      messageId: assistantMessageId,
+      content,
+      eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+    });
+    publishSessionEvent(updateResult.event);
+  }
+
+  for await (const delta of input.stream.textStream) {
+    input.checkActive();
+    if (!delta) continue;
+
+    text += delta;
+    saveStreamCheckpoint(input.sessionId, text);
+
+    if (!assistantMessageId) {
+      const content = getChatContent();
+      if (content === null || !content) {
+        continue;
+      }
+
+      firstTokenMs = roundMs(nowMs() - input.requestStartedAt);
+      const messageResult = createSessionMessage({
+        sessionId: input.sessionId,
+        clientMessageId: assistantClientMessageId,
+        deviceId: "runtime-agent",
+        role: "assistant",
+        content,
+        attachmentIds: [],
+        eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+      });
+
+      assistantMessageId = messageResult.message.id;
+      for (const event of messageResult.events) {
+        publishSessionEvent(event);
+      }
+      continue;
+    }
+
+    pendingFlush = true;
+    if (!flushTimer) {
+      flushTimer = setTimeout(() => {
+        flush();
+        flushTimer = null;
+      }, DEBOUNCE_MS);
+    }
+  }
+
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (pendingFlush) flush();
+
+  resolvedToolCalls = await input.stream.toolCalls;
+
+  if (resolvedToolCalls.length === 0 && text.trim()) {
+    const fallback = await input.resolveTextFallback({
+      assistantText: text,
+      stateMachine: input.stateMachine,
+      reasoningEffort: input.reasoningEffort,
+    });
+
+    if (fallback) {
+      fallbackToolCallCount = fallback.toolCallCount;
+      text = fallback.replacementText;
+    }
+  }
+
+  if (!text.trim() && resolvedToolCalls.length > 0) {
+    text = `已完成 ${resolvedToolCalls.length} 次工具调用。`;
+  }
+
+  const finalContent = getChatContent(true);
+
+  if (assistantMessageId && typeof finalContent === "string") {
+    const updateResult = updateSessionMessage({
+      sessionId: input.sessionId,
+      messageId: assistantMessageId,
+      content: finalContent,
+      eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+    });
+    publishSessionEvent(updateResult.event);
+  }
+
+  if (!assistantMessageId && finalContent) {
+    const messageResult = createSessionMessage({
+      sessionId: input.sessionId,
+      clientMessageId: assistantClientMessageId,
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content: finalContent,
+      attachmentIds: [],
+      eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+    });
+    assistantMessageId = messageResult.message.id;
+    for (const event of messageResult.events) {
+      publishSessionEvent(event);
+    }
+  }
+
+  await syncSessionProjectHistory(input.sessionId);
+  clearStreamCheckpoint(input.sessionId);
+
+  const metadata = await input.stream.providerMetadata;
+  let cacheCreationInputTokens: number | null = null;
+  let cacheReadInputTokens: number | null = null;
+  if (metadata?.anthropic) {
+    cacheCreationInputTokens = typeof metadata.anthropic.cacheCreationInputTokens === "number"
+      ? metadata.anthropic.cacheCreationInputTokens
+      : null;
+    cacheReadInputTokens = typeof metadata.anthropic.cacheReadInputTokens === "number"
+      ? metadata.anthropic.cacheReadInputTokens
+      : null;
+    if (cacheCreationInputTokens || cacheReadInputTokens) {
+      console.log(`[Cache] write=${cacheCreationInputTokens ?? 0} read=${cacheReadInputTokens ?? 0}`);
+    }
+  }
+
+  return {
+    text,
+    assistantMessageId,
+    timings: {
+      firstTokenMs,
+      streamTotalMs: roundMs(nowMs() - input.requestStartedAt),
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
+    },
+    diagnostics: {
+      resolvedToolCallCount: Array.isArray(resolvedToolCalls)
+        ? resolvedToolCalls.length + fallbackToolCallCount
+        : fallbackToolCallCount,
+      providerMetadataPreview: input.summarizeUnknown(metadata),
+    },
+  };
+}

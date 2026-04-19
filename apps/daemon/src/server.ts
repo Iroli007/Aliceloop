@@ -17,7 +17,6 @@ import {
   type ProviderKind,
   type ReasoningEffort,
   type SandboxPermissionProfile,
-  type ProviderTransportKind,
   type SectionSpan,
   type SessionRole,
   type SourceKind,
@@ -58,22 +57,11 @@ import {
   listStudyArtifacts,
   shellOverviewRoute,
 } from "./repositories/overviewRepository";
-import { getProviderConfig, listProviderConfigs, updateProviderConfig } from "./repositories/providerRepository";
-import { fetchProviderModels } from "./providers/providerModelCatalogService";
 import {
   getRuntimeCatalogSnapshot,
   getSkillDefinition,
-  getRuntimeScriptDefinition,
-  getStoredRuntimeScriptDefinition,
-  listRuntimeScriptDefinitions,
   listActiveSkillDefinitions,
 } from "./repositories/runtimeCatalogRepository";
-import {
-  getMcpServerDefinition,
-  installMcpServer,
-  listMcpServerDefinitions,
-  uninstallMcpServer,
-} from "./repositories/mcpServerRepository";
 import { getSandboxRun, listSandboxRuns } from "./repositories/sandboxRunRepository";
 import {
   addSessionMessageReaction,
@@ -138,6 +126,9 @@ import {
   resyncProjectSessionHistories,
   syncSessionProjectHistory,
 } from "./services/sessionProjectService";
+import { registerMcpRoutes } from "./routes/mcpRoutes";
+import { registerProviderRoutes } from "./routes/providerRoutes";
+import { registerRuntimeScriptRoutes } from "./routes/runtimeScriptRoutes";
 
 interface SessionParams {
   id: string;
@@ -151,19 +142,7 @@ interface ProjectParams {
   id: string;
 }
 
-interface ProviderParams {
-  id: ProviderKind;
-}
-
 interface SkillParams {
-  id: string;
-}
-
-interface McpServerParams {
-  id: string;
-}
-
-interface RuntimeScriptParams {
   id: string;
 }
 
@@ -234,14 +213,6 @@ interface HeartbeatBody {
   label?: string;
   sessionId?: string;
   capabilities?: DeviceCapabilities;
-}
-
-interface UpdateProviderBody {
-  transport?: ProviderTransportKind;
-  baseUrl?: string;
-  model?: string;
-  apiKey?: string;
-  enabled?: boolean;
 }
 
 interface CreateSessionBody {
@@ -315,13 +286,6 @@ interface RunSkillBody {
   sourceKind?: SourceKind;
   documentKind?: DocumentKind;
   command?: string;
-  args?: string[];
-  cwd?: string;
-}
-
-interface RunRuntimeScriptBody {
-  sessionId?: string | null;
-  title?: string;
   args?: string[];
   cwd?: string;
 }
@@ -969,76 +933,8 @@ export async function createServer() {
       skill,
     });
   });
-  server.get("/api/mcp/servers", async () => listMcpServerDefinitions());
-  server.get<{ Params: McpServerParams }>("/api/mcp/servers/:id", async (request, reply) => {
-    const serverDefinition = getMcpServerDefinition(request.params.id);
-    if (!serverDefinition) {
-      return reply.code(404).send({
-        error: "mcp_server_not_found",
-      });
-    }
-
-    return serverDefinition;
-  });
-  server.post<{ Params: McpServerParams }>("/api/mcp/servers/:id/install", async (request, reply) => {
-    try {
-      const serverDefinition = installMcpServer(request.params.id);
-      if (!serverDefinition) {
-        return reply.code(404).send({
-          error: "mcp_server_not_found",
-        });
-      }
-
-      return serverDefinition;
-    } catch (error) {
-      if (error instanceof Error && error.message === "mcp_server_not_installable") {
-        return reply.code(409).send({
-          error: "mcp_server_not_installable",
-        });
-      }
-
-      throw error;
-    }
-  });
-  server.delete<{ Params: McpServerParams }>("/api/mcp/servers/:id/install", async (request, reply) => {
-    const serverDefinition = uninstallMcpServer(request.params.id);
-    if (!serverDefinition) {
-      return reply.code(404).send({
-        error: "mcp_server_not_found",
-      });
-    }
-
-    return serverDefinition;
-  });
-  server.get("/api/runtime/scripts", async () => listRuntimeScriptDefinitions());
-  server.get<{ Params: RuntimeScriptParams }>("/api/runtime/scripts/:id", async (request, reply) => {
-    const script = getRuntimeScriptDefinition(request.params.id);
-    if (!script) {
-      return reply.code(404).send({
-        error: "runtime_script_not_found",
-      });
-    }
-
-    return script;
-  });
-  server.post<{ Params: RuntimeScriptParams; Body: RunRuntimeScriptBody }>("/api/runtime/scripts/:id/run", async (request, reply) => {
-    const script = getStoredRuntimeScriptDefinition(request.params.id);
-    if (!script || script.status !== "available") {
-      return reply.code(404).send({
-        error: "runtime_script_not_found",
-      });
-    }
-
-    const body = request.body;
-    return runManagedTask({
-      taskType: "script-runner",
-      sessionId: body.sessionId ?? null,
-      title: body.title ?? `运行脚本 · ${script.label}`,
-      command: script.launchCommand,
-      args: [...script.launchArgsPrefix, script.entryPath, ...script.defaultArgs, ...(Array.isArray(body.args) ? body.args : [])],
-      cwd: body.cwd ?? script.defaultCwd,
-    });
-  });
+  registerMcpRoutes(server);
+  registerRuntimeScriptRoutes(server);
 
   server.get("/api/library", async () => listLibraryItems());
   server.get<{ Querystring: ArtifactQuery }>("/api/artifacts", async (request) => {
@@ -2059,41 +1955,7 @@ export async function createServer() {
     return sandboxRun;
   });
 
-  server.get("/api/providers", async () => listProviderConfigs());
-
-  server.get<{ Params: ProviderParams }>("/api/providers/:id", async (request) => {
-    return getProviderConfig(request.params.id);
-  });
-
-  server.get<{ Params: ProviderParams }>("/api/providers/:id/models", async (request, reply) => {
-    try {
-      return await fetchProviderModels(request.params.id);
-    } catch (error) {
-      if (error instanceof Error) {
-        if (error.message === "provider_api_key_required") {
-          return reply.code(409).send({
-            error: "provider_api_key_required",
-          });
-        }
-
-        if (error.message.startsWith("provider_models_fetch_failed:")) {
-          return reply.code(502).send({
-            error: "provider_models_fetch_failed",
-            detail: error.message,
-          });
-        }
-      }
-
-      throw error;
-    }
-  });
-
-  server.put<{ Params: ProviderParams; Body: UpdateProviderBody }>("/api/providers/:id", async (request) => {
-    return updateProviderConfig({
-      providerId: request.params.id,
-      ...request.body,
-    });
-  });
+  registerProviderRoutes(server);
 
   server.post<{ Body: HeartbeatBody }>("/api/runtime/presence/heartbeat", async (request) => {
     const sessionId = request.body.sessionId

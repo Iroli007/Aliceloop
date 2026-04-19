@@ -213,10 +213,23 @@
   - missing tool / intent-driven recovery / capability failure reply 已从 core runtime 文件移出。
   - 新增 MiniMax text tool fallback module。
   - MiniMax 文本工具调用解析、fallback tool 执行、二次生成回复已从 core runtime 文件移出。
+  - 新增 stream persistence module。
+  - 文本 delta 落库、debounced update、checkpoint、provider metadata 诊断已从 core runtime 文件移出。
+  - 新增 tool orchestration module。
+  - tool state event、tool start/finish、审批事件、tool perf trace、工具截图附件触发已从 core runtime 文件移出。
+  - 新增 workset settlement module。
+  - workset 打分、衰减、tool-call 反推 skill 使用已从 core runtime 文件移出。
+  - 修正 workset 结算：本轮直接路由命中的 skill 不再因为没有工具调用而被误判为 idle；仅由旧 workset 带入且持续未命中的 skill 仍会自然衰减。
+  - 新增 post-processing module。
+  - artifact 写入、turn reflection、自动记忆写入已从 core runtime 文件移出，并保持 fire-and-forget 语义。
+- 第三阶段已启动：拆 `server.ts`。
+  - 新增 route module 目录。
+  - provider routes 已迁移到 `routes/providerRoutes.ts`。
+  - MCP server routes 已迁移到 `routes/mcpRoutes.ts`。
+  - runtime script routes 已迁移到 `routes/runtimeScriptRoutes.ts`。
 
 ## 下一步
 
-- 继续拆 `agentRuntime.ts` 里的 tool orchestration 与 stream persistence。
-- 再拆 `server.ts` 的 route modules。
+- 继续拆 `server.ts` 的 session / runtime / project route modules。
 
 后续整改将继续按这个报告里的优先级推进，而不是同时做大范围重构。
