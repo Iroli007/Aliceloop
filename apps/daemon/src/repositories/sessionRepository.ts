@@ -305,6 +305,30 @@ function isSessionPlanModeState(value: unknown): value is SessionPlanModeState {
     && (typeof planMode.updatedAt === "string" || planMode.updatedAt === null);
 }
 
+function isSessionCompactionState(value: unknown): value is SessionCompactionState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const compaction = value as Partial<SessionCompactionState>;
+  return typeof compaction.sessionId === "string"
+    && typeof compaction.checkpointSummary === "string"
+    && typeof compaction.checkpointToolTranscript === "string"
+    && typeof compaction.checkpointResearchMemory === "string"
+    && typeof compaction.checkpointFocusSnapshot === "string"
+    && typeof compaction.checkpointPlanSnapshot === "string"
+    && typeof compaction.checkpointVolatileKey === "string"
+    && typeof compaction.checkpointSnapshotVersion === "number"
+    && typeof compaction.promptProjectionCarryForwardKey === "string"
+    && typeof compaction.promptProjectionCarryForwardVersion === "number"
+    && typeof compaction.promptProjectionHotTailKey === "string"
+    && typeof compaction.promptProjectionHotTailVersion === "number"
+    && typeof compaction.compactedTurnCount === "number"
+    && (typeof compaction.lastCompactedMessageId === "string" || compaction.lastCompactedMessageId === null)
+    && typeof compaction.consecutiveFailures === "number"
+    && (typeof compaction.updatedAt === "string" || compaction.updatedAt === null);
+}
+
 export function getSessionPlanModeState(sessionId: string): SessionPlanModeState {
   const events = listSessionEventsSince(sessionId, 0);
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -325,6 +349,33 @@ export function getSessionPlanModeState(sessionId: string): SessionPlanModeState
 function updateSessionPlanModeState(sessionId: string, planMode: SessionPlanModeState) {
   const event = appendSessionEvent(sessionId, "plan_mode.updated", { planMode }, planMode.updatedAt ?? new Date().toISOString());
   return { planMode, event };
+}
+
+export function getSessionCompactionState(sessionId: string): SessionCompactionState {
+  const events = listSessionEventsSince(sessionId, 0);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "compaction.updated") {
+      continue;
+    }
+
+    const compactionState = (event.payload as { compactionState?: unknown }).compactionState;
+    if (isSessionCompactionState(compactionState)) {
+      return compactionState;
+    }
+  }
+
+  return createEmptySessionCompactionState(sessionId);
+}
+
+export function updateSessionCompactionState(sessionId: string, compactionState: SessionCompactionState) {
+  const event = appendSessionEvent(
+    sessionId,
+    "compaction.updated",
+    { compactionState },
+    compactionState.updatedAt ?? new Date().toISOString(),
+  );
+  return { compactionState, event };
 }
 
 export function enterSessionPlanMode(sessionId: string, activePlanId: string | null = null) {
@@ -1721,7 +1772,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     focusState: createEmptySessionFocusState(sessionId),
     rollingSummary: createEmptySessionRollingSummary(sessionId),
     sessionMemory: createEmptySessionMemoryState(sessionId),
-    compactionState: createEmptySessionCompactionState(sessionId),
+    compactionState: getSessionCompactionState(sessionId),
     messages,
     attachments,
     toolWorkflowEntries,

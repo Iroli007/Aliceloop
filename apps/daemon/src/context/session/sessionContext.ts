@@ -16,13 +16,22 @@ import {
   type SessionAttachmentSandboxRoots,
   getSessionSnapshot,
   listSessionEventsSince,
+  updateSessionCompactionState,
 } from "../../repositories/sessionRepository";
+import { withMessageCacheBreakpoint } from "../cacheControl";
 import { getAttentionState } from "../../repositories/overviewRepository";
 import { listPlans, type PlanRecord } from "../../repositories/planRepository";
 import { listTaskRuns } from "../../repositories/taskRunRepository";
+import {
+  buildCompactionSummarySystemMessage,
+  deriveSessionCompactionState,
+  getCompactedConversationMessages,
+  SESSION_COMPACTION_TRIGGER_MESSAGE_COUNT,
+  SESSION_HOT_TAIL_MESSAGE_COUNT,
+} from "../../runtime/autoCompact";
 import { nowMs, roundMs } from "../../runtime/perfTrace";
 
-const MAX_HISTORY_MESSAGES = 8;
+const MAX_HISTORY_MESSAGES = SESSION_HOT_TAIL_MESSAGE_COUNT + SESSION_COMPACTION_TRIGGER_MESSAGE_COUNT;
 const MAX_FOCUS_MESSAGES = 6;
 const MAX_TOOL_ACTIVITY_EVENTS = 20;
 const MAX_TOOL_ACTIVITY_ITEMS = 4;
@@ -534,21 +543,49 @@ function serializeMessageContent(message: SessionMessage): string {
   return parts.join("\n\n");
 }
 
-function buildSessionMessagesFromSnapshot(snapshot: SessionSnapshot): ModelMessage[] {
-  const messages = snapshot.messages
-    .filter((m) => m.role !== "system")
-    .slice(-MAX_HISTORY_MESSAGES);
+function syncCompactionStateForSnapshot(sessionId: string, snapshot: SessionSnapshot) {
+  const nextCompactionState = deriveSessionCompactionState({
+    sessionId,
+    messages: snapshot.messages,
+    currentState: snapshot.compactionState,
+  });
 
-  return messages.map(sessionMessageToCore);
+  const changed = nextCompactionState.updatedAt !== snapshot.compactionState.updatedAt
+    || nextCompactionState.lastCompactedMessageId !== snapshot.compactionState.lastCompactedMessageId
+    || nextCompactionState.checkpointSummary !== snapshot.compactionState.checkpointSummary
+    || nextCompactionState.checkpointSnapshotVersion !== snapshot.compactionState.checkpointSnapshotVersion;
+
+  if (changed) {
+    updateSessionCompactionState(sessionId, nextCompactionState);
+  }
+
+  return changed ? { ...snapshot, compactionState: nextCompactionState } : snapshot;
+}
+
+function buildSessionMessagesFromSnapshot(snapshot: SessionSnapshot): ModelMessage[] {
+  const compactedMessages = getCompactedConversationMessages(snapshot.messages, snapshot.compactionState)
+    .slice(-MAX_HISTORY_MESSAGES);
+  const summaryMessage = buildCompactionSummarySystemMessage(snapshot.compactionState);
+  const messages = compactedMessages.map(sessionMessageToCore);
+
+  return withMessageCacheBreakpoint(summaryMessage ? [summaryMessage, ...messages] : messages);
 }
 
 function buildActiveTurnBlockFromFocus(recentConversationFocus: RecentConversationFocus): string {
+  const sections = buildActiveTurnPromptSectionsFromFocus(recentConversationFocus);
+  return [sections.prefix, sections.tail].filter(Boolean).join("\n");
+}
+
+export function buildActiveTurnPromptSectionsFromFocus(recentConversationFocus: RecentConversationFocus) {
   const latestContent = recentConversationFocus.latestContent;
   if (!latestContent) {
-    return "";
+    return {
+      prefix: "",
+      tail: "",
+    };
   }
 
-  return [
+  const prefix = [
     "## Active Turn",
     "- The final user message in the conversation history is the only current request for this turn.",
     "- Never treat text from any earlier user turn as if it appeared in the latest user message.",
@@ -557,6 +594,9 @@ function buildActiveTurnBlockFromFocus(recentConversationFocus: RecentConversati
     "- If a nickname, preference, or instruction appears only in older history, treat it as past context rather than a fresh instruction in this reply.",
     "- When the latest user message conflicts with, narrows, or replaces an older framing, follow the latest user message.",
     "- If the latest user message is brief, elliptical, or continuation-like, resolve what it refers to from the immediately preceding turns instead of pretending the context is missing.",
+  ].join("\n");
+
+  const tail = [
     ...(recentConversationFocus.latestOpeningLines.length > 0
       ? [
           "- Anchor on the opening lines of the latest user message before interpreting older context.",
@@ -612,6 +652,11 @@ function buildActiveTurnBlockFromFocus(recentConversationFocus: RecentConversati
     latestContent,
     "</latest_user_message>",
   ].join("\n");
+
+  return {
+    prefix,
+    tail,
+  };
 }
 
 function buildRecentConversationFocusFromSnapshot(
@@ -1274,7 +1319,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const startedAt = nowMs();
 
   const snapshotStartedAt = nowMs();
-  const snapshot = getSessionSnapshot(sessionId);
+  const snapshot = syncCompactionStateForSnapshot(sessionId, getSessionSnapshot(sessionId));
   const snapshotMs = roundMs(nowMs() - snapshotStartedAt);
 
   const latestUserStartedAt = nowMs();
@@ -1353,7 +1398,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
 }
 
 export function buildSessionMessages(sessionId: string): ModelMessage[] {
-  return buildSessionMessagesFromSnapshot(getSessionSnapshot(sessionId));
+  return buildSessionMessagesFromSnapshot(syncCompactionStateForSnapshot(sessionId, getSessionSnapshot(sessionId)));
 }
 
 export function buildActiveTurnBlock(sessionId: string): string {

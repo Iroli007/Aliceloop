@@ -679,15 +679,12 @@ interface BuildSkillContextBlockOptions {
 }
 
 export function buildSkillContextBlock(skills: SkillDefinition[], options?: BuildSkillContextBlockOptions) {
-  if (skills.length === 0) {
-    return [
-      "No extra local skill was selected for this turn.",
-      "Select skills from metadata only when they materially help the task.",
-      "Tool routing is separate from skill selection.",
-    ].join("\n");
-  }
+  const sections = buildSkillContextSections(skills, options);
+  return [sections.prefix, sections.tail].filter(Boolean).join("\n");
+}
 
-  const sections = [
+export function buildSkillContextSections(skills: SkillDefinition[], options?: BuildSkillContextBlockOptions) {
+  const prefixLines = [
     "Project skills live in the local context catalog.",
     `Skill catalog root: ${skillsRootDir}`,
     "Architecture rule: skills are AI-native instruction blocks selected from metadata; they are not workflow scripts.",
@@ -698,6 +695,19 @@ export function buildSkillContextBlock(skills: SkillDefinition[], options?: Buil
     "Do not expose internal routing labels such as `web_search`, `web-fetch`, `memory-management`, or `thread-management` in a normal user-facing answer unless the user explicitly asked for runtime diagnostics.",
     "If a turn needs better capability coverage, improve retrieval quality or use skill-hub / skill-search instead of expanding the default tool base.",
     "Selection policy: prefer the smallest relevant subset of skills for this turn instead of loading the whole catalog.",
+  ];
+
+  if (skills.length === 0) {
+    return {
+      prefix: prefixLines.join("\n"),
+      tail: [
+        "No extra local skill was selected for this turn.",
+        "Select skills from metadata only when they materially help the task.",
+      ].join("\n"),
+    };
+  }
+
+  const sections = [
     "The skills below were selected as relevant for this turn. Read their SKILL.md files before acting when needed.",
     "",
     "Selected skills for this turn:",
@@ -740,5 +750,8 @@ export function buildSkillContextBlock(skills: SkillDefinition[], options?: Buil
     sections.push(`- ${skill.label}: ${skill.description} [${relativeSourcePath}]`);
   }
 
-  return sections.join("\n");
+  return {
+    prefix: prefixLines.join("\n"),
+    tail: sections.join("\n"),
+  };
 }

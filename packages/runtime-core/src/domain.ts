@@ -74,7 +74,8 @@ export type SessionEventType =
   | "tool.call.started"
   | "tool.call.completed"
   | "tool.state.change"
-  | "plan_mode.updated";
+  | "plan_mode.updated"
+  | "compaction.updated";
 
 export interface SessionPlanModeState {
   sessionId: string;

@@ -1,12 +1,17 @@
 import type { ModelMessage, ToolChoice, ToolSet } from "ai";
 import { logPerfTrace, nowMs, roundMs } from "../runtime/perfTrace";
+import {
+  buildPromptCacheRequestTrace,
+  type PromptCacheRequestTrace,
+} from "../runtime/promptCacheTelemetry";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
 import { buildProfileFactMemoryBlock } from "./memory/memoryContext";
 import {
+  buildActiveTurnPromptSectionsFromFocus,
   buildSessionContextFragments,
 } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
-import { buildSkillContextBlock, selectRelevantSkillDefinitions } from "./skills/skillLoader";
+import { buildSkillContextSections, selectRelevantSkillDefinitions } from "./skills/skillLoader";
 import { buildTurnIntentDecision, mergeSkillRouteHints, needsEpisodicHistoryRecall } from "./skills/skillRouting";
 import { buildToolSet } from "./tools/toolRegistry";
 import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
@@ -26,6 +31,10 @@ import {
   getActiveWorksetSkillIds,
   getActiveWorksetToolNames,
 } from "./workset/worksetState";
+import {
+  createCachedSystemPromptMessage,
+  type CachedSystemPromptMessage,
+} from "./cacheControl";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -34,9 +43,10 @@ export interface SafetyConfig {
 }
 
 export interface AgentContext {
-  systemPrompt: string | Array<{ role: "system"; content: string; providerOptions?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }>;
+  systemPrompt: string | CachedSystemPromptMessage[];
   messages: ModelMessage[];
   tools: ToolSet;
+  promptCacheTrace: PromptCacheRequestTrace;
   firstStepToolChoice?: ToolChoice<ToolSet>;
   safetyConfig: SafetyConfig;
   timings: Record<string, number | string | null>;
@@ -144,7 +154,7 @@ export async function loadContext(
   timings.fallbackSkillCount = 0;
   const browserRelayAvailable = hasHealthyDesktopRelay();
   const skillsStartedAt = nowMs();
-  const skills = buildSkillContextBlock(routedSkills, {
+  const skillContext = buildSkillContextSections(routedSkills, {
     browserRelayAvailable,
     routeHints: turnRouteHints,
   });
@@ -283,21 +293,30 @@ export async function loadContext(
     return undefined;
   })();
 
+  const activeTurnSections = buildActiveTurnPromptSectionsFromFocus(recentConversationFocus);
+
   const dynamicBlocks = [
     recentConversationFocus.content,
-    sessionContext.activeTurn,
+    activeTurnSections.tail,
     sessionContext.recentToolActivity,
     sessionContext.recentResearchMemory,
     profileFactMemory.content,
     historicalContext.content,
-    skills,
+    skillContext.tail,
   ].filter(Boolean);
+  const stableExecutionPrefix = [
+    activeTurnSections.prefix,
+    skillContext.prefix,
+  ].filter(Boolean).join("\n\n");
 
   const promptAssemblyStartedAt = nowMs();
   let systemPrompt: AgentContext["systemPrompt"];
   if (Array.isArray(persona)) {
     // persona is already system messages with cache control
     systemPrompt = [...persona];
+    if (stableExecutionPrefix) {
+      systemPrompt.push(createCachedSystemPromptMessage(stableExecutionPrefix));
+    }
     if (dynamicBlocks.length > 0) {
       systemPrompt.push({
         role: "system",
@@ -306,7 +325,7 @@ export async function loadContext(
     }
   } else {
     // fallback: persona is a string
-    systemPrompt = [persona, ...dynamicBlocks].filter(Boolean).join("\n\n");
+    systemPrompt = [persona, stableExecutionPrefix, ...dynamicBlocks].filter(Boolean).join("\n\n");
   }
   timings.promptAssemblyMs = roundMs(nowMs() - promptAssemblyStartedAt);
   if (Array.isArray(systemPrompt)) {
@@ -318,6 +337,16 @@ export async function loadContext(
   }
   timings.dynamicBlockCount = dynamicBlocks.length;
   timings.dynamicPromptChars = roundMs(dynamicBlocks.reduce((sum, block) => sum + block.length, 0));
+  const promptCacheTelemetryStartedAt = nowMs();
+  const promptCacheTrace = await buildPromptCacheRequestTrace({
+    systemPrompt,
+    tools,
+    messages,
+  });
+  timings.promptCacheTelemetryMs = roundMs(nowMs() - promptCacheTelemetryStartedAt);
+  timings.promptCacheBreakpointCount = promptCacheTrace.breakpointCount;
+  timings.promptCacheBreakpointIds = promptCacheTrace.breakpointIds.join(",");
+  timings.promptCacheRequestHash = promptCacheTrace.requestHash;
   timings.totalMs = roundMs(Object.values({
     personaMs: timings.personaMs,
     sessionContextMs: timings.sessionContextMs,
@@ -328,6 +357,7 @@ export async function loadContext(
     activeSkillsMs: timings.activeSkillsMs,
     toolsMs: timings.toolsMs,
     promptAssemblyMs: timings.promptAssemblyMs,
+    promptCacheTelemetryMs: timings.promptCacheTelemetryMs,
   }).reduce((sum, value) => sum + (typeof value === "number" ? value : 0), 0));
 
   logPerfTrace("load_context", {
@@ -339,6 +369,7 @@ export async function loadContext(
     systemPrompt,
     messages,
     tools,
+    promptCacheTrace,
     firstStepToolChoice: initialToolChoice,
     safetyConfig: {
       ...DEFAULT_SAFETY,

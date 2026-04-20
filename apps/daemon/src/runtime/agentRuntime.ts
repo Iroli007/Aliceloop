@@ -3,7 +3,6 @@ import { basename } from "node:path";
 import { statSync } from "node:fs";
 import { stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
-import { autoCompactMessages } from "./autoCompact";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
@@ -40,6 +39,7 @@ import {
   looksLikeCapabilitySeekingReply,
   MAX_CAPABILITY_RECOVERY_ATTEMPTS,
 } from "./capabilityRecovery";
+import type { PromptCacheRunTrace } from "./promptCacheTelemetry";
 import { settleWorksetAfterTurn } from "./worksetSettlement";
 import { schedulePostProcessing } from "./postProcessing";
 
@@ -496,6 +496,14 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
         endToEndMs,
         responseChars: text.length,
         iterations: safety.iterationCount,
+        promptCache: {
+          cacheCreationInputTokens: typeof streamTimings.cacheCreationInputTokens === "number"
+            ? streamTimings.cacheCreationInputTokens
+            : null,
+          cacheReadInputTokens: typeof streamTimings.cacheReadInputTokens === "number"
+            ? streamTimings.cacheReadInputTokens
+            : null,
+        },
       });
     },
 
@@ -553,6 +561,7 @@ interface StreamResult {
   diagnostics?: {
     resolvedToolCallCount: number;
     providerMetadataPreview: string | null;
+    promptCache: PromptCacheRunTrace | null;
   };
 }
 
@@ -578,7 +587,7 @@ async function executeStreamAttempt(
   const stream = streamText({
     model: createProviderModel(run.provider),
     system: run.context.systemPrompt,
-    messages: autoCompactMessages(run.context.messages, 8),
+    messages: run.context.messages,
     tools: run.context.tools,
     providerOptions: buildAgentProviderOptions(run.provider, runtimeSettings.reasoningEffort),
     stopWhen: stepCountIs(run.context.safetyConfig.maxIterations),
@@ -728,6 +737,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
     diagnostics: {
       resolvedToolCallCount: 0,
       providerMetadataPreview: null,
+      promptCache: null,
     },
   };
 

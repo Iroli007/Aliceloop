@@ -134,12 +134,13 @@ function isActiveWorksetEntry(entry: WorksetEntryState) {
 export function getActiveWorksetSkillIds(state: SessionWorksetState) {
   return Object.entries(state.skills)
     .filter(([, entry]) => isActiveWorksetEntry(entry))
-    .map(([skillId]) => skillId);
+    .map(([skillId]) => skillId)
+    .sort((left, right) => left.localeCompare(right, "en"));
 }
 
 export function getActiveWorksetToolNames(state: SessionWorksetState) {
   return Object.entries(state.tools)
     .filter(([, entry]) => isActiveWorksetEntry(entry))
-    .map(([toolName]) => toolName);
+    .map(([toolName]) => toolName)
+    .sort((left, right) => left.localeCompare(right, "en"));
 }
-
