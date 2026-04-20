@@ -8,7 +8,8 @@ import {
 } from "../repositories/sessionRepository";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
 import { getRenderableAssistantText } from "./providerRuntimeAdapter";
-import { nowMs, roundMs } from "./perfTrace";
+import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
+import { finalizePromptCacheRunTrace, type PromptCacheRunTrace } from "./promptCacheTelemetry";
 import { clearStreamCheckpoint, saveStreamCheckpoint } from "./streamCheckpoint";
 import type { ToolStateMachine } from "./toolStateMachine";
 
@@ -61,6 +62,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
   diagnostics: {
     resolvedToolCallCount: number;
     providerMetadataPreview: string | null;
+    promptCache: PromptCacheRunTrace | null;
   };
 }> {
   let text = "";
@@ -205,6 +207,36 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     }
   }
 
+  const promptCache = finalizePromptCacheRunTrace(
+    input.sessionId,
+    input.context.promptCacheTrace,
+    {
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
+    },
+  );
+
+  logPerfTrace("prompt_cache", {
+    sessionId: input.sessionId,
+    providerId: input.providerId,
+    requestHash: promptCache.requestHash,
+    breakpoints: promptCache.breakpoints.map((breakpoint) => ({
+      id: breakpoint.id,
+      stage: breakpoint.stage,
+      marker: breakpoint.marker,
+      prefixHash: breakpoint.prefixHash,
+      prefixChars: breakpoint.prefixChars,
+    })),
+    stableBreakpointIdsVsPrevious: promptCache.stableBreakpointIdsVsPrevious,
+    likelyHitBreakpointIds: promptCache.likelyHitBreakpointIds,
+    likelyMissBreakpointIds: promptCache.likelyMissBreakpointIds,
+    highestStableBreakpointId: promptCache.highestStableBreakpointId,
+    cacheCreationInputTokens: promptCache.cacheCreationInputTokens,
+    cacheReadInputTokens: promptCache.cacheReadInputTokens,
+    comparedToPreviousRun: promptCache.comparedToPreviousRun,
+    comparisonBasis: promptCache.comparisonBasis,
+  });
+
   return {
     text,
     assistantMessageId,
@@ -219,6 +251,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
         ? resolvedToolCalls.length + fallbackToolCallCount
         : fallbackToolCallCount,
       providerMetadataPreview: input.summarizeUnknown(metadata),
+      promptCache,
     },
   };
 }

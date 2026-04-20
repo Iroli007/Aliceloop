@@ -2,6 +2,10 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getUserProfile } from "../../repositories/userProfileRepository";
+import {
+  createCachedSystemPromptMessage,
+  type CachedSystemPromptMessage,
+} from "../cacheControl";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -76,7 +80,7 @@ function buildUserBlock(): string | null {
  * Static parts (IDENTITY, SOUL, TOOLS, HEARTBEAT) are marked for caching.
  * Dynamic parts (USER) are not cached.
  */
-export function buildPersonaPrompt(): Array<{ role: "system"; content: string; providerOptions?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> {
+export function buildPersonaPrompt(): CachedSystemPromptMessage[] {
   const staticContent = [
     readIdentity(),
     readSoul(),
@@ -85,14 +89,8 @@ export function buildPersonaPrompt(): Array<{ role: "system"; content: string; p
     readHeartbeat(),
   ].filter(Boolean).join("\n\n");
 
-  const messages: Array<{ role: "system"; content: string; providerOptions?: { anthropic?: { cacheControl?: { type: "ephemeral" } } } }> = [
-    {
-      role: "system",
-      content: staticContent,
-      providerOptions: {
-        anthropic: { cacheControl: { type: "ephemeral" } }
-      }
-    }
+  const messages: CachedSystemPromptMessage[] = [
+    createCachedSystemPromptMessage(staticContent),
   ];
 
   const dynamicBlocks: string[] = [];

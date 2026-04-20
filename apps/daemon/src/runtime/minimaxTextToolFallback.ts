@@ -4,7 +4,6 @@ import { generateText } from "ai";
 import type { AgentContext } from "../context/index";
 import { createProviderModel } from "../providers/providerModelFactory";
 import type { StoredProviderConfig } from "../repositories/providerRepository";
-import { autoCompactMessages } from "./autoCompact";
 import { buildAgentProviderOptions } from "./providerRuntimeAdapter";
 import { repairTextToolCall } from "./toolCallRepair";
 import type { ToolStateMachine } from "./toolStateMachine";
@@ -133,7 +132,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
         model: createProviderModel(input.provider),
         system: input.context.systemPrompt,
         messages: [
-          ...autoCompactMessages(input.context.messages, 8),
+          ...input.context.messages,
           {
             role: "assistant",
             content: input.assistantText,
