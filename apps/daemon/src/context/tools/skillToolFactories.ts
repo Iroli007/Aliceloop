@@ -1,3 +1,4 @@
+import { anthropic } from "@ai-sdk/anthropic";
 import { createAudioUnderstandTool } from "./audioUnderstandTool";
 import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
@@ -24,6 +25,7 @@ const cachedWebFetchTools = new Map<string, ToolSet>();
 const cachedWebSearchTools = new Map<string, ToolSet>();
 const cachedAudioUnderstandTools = new Map<string, ToolSet>();
 const cachedViewImageTools = new Map<string, ToolSet>();
+let cachedAnthropicToolSearchTools: ToolSet | null = null;
 
 interface SkillToolFactoryOptions {
   sessionId?: string;
@@ -103,6 +105,17 @@ function getViewImageToolSet(sessionId?: string) {
   const tools = createViewImageTool(sessionId);
   cachedViewImageTools.set(cacheKey, tools);
   return tools;
+}
+
+export function getAnthropicToolSearchToolSet() {
+  if (cachedAnthropicToolSearchTools) {
+    return cachedAnthropicToolSearchTools;
+  }
+
+  cachedAnthropicToolSearchTools = {
+    tool_search_tool_bm25: anthropic.tools.toolSearchBm25_20251119(),
+  };
+  return cachedAnthropicToolSearchTools;
 }
 
 const BROWSER_TOOL_NAMES = new Set([
@@ -223,6 +236,8 @@ export function listAvailableToolAdapterNames() {
     ...BROWSER_TOOL_NAMES,
     ...CHROME_RELAY_TOOL_NAMES,
     ...skillToolFactories.keys(),
+    "tool_search",
+    "tool_search_tool_bm25",
   ])].sort();
 }
 
@@ -235,4 +250,5 @@ export function resetSkillToolCache() {
   cachedWebSearchTools.clear();
   cachedAudioUnderstandTools.clear();
   cachedViewImageTools.clear();
+  cachedAnthropicToolSearchTools = null;
 }

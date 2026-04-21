@@ -696,88 +696,69 @@ function dedupeToolSourceLinks(links: ToolSourceLink[]) {
   });
 }
 
-function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflowEntries: ToolWorkflowEntry[]): TimelineEntry[] {
-  const chunks: TimelineEntry[] = [];
-  const currentTurnChunks: TimelineEntry[] = [];
-  const currentTurnSourceLinks: ToolSourceLink[] = [];
-  const currentTurnTools = new Set<string>();
-  const currentTurnSkills = new Set<string>();
+function buildAssistantTurnMetadata(
+  sessionEvents: SessionEvent[],
+  toolWorkflowEntries: ToolWorkflowEntry[],
+) {
   const sourceLinksByToolCallId = new Map<string, ToolSourceLink[]>(
     toolWorkflowEntries.map((entry) => [entry.toolCallId, buildToolSourceLinks(entry)] as const),
   );
+  const turnMetadataByMessageId = new Map<string, {
+    tools: string[];
+    skills: string[];
+    sourceLinks: ToolSourceLink[];
+  }>();
+  const currentTurnTools = new Set<string>();
+  const currentTurnSkills = new Set<string>();
+  const currentTurnSourceLinks: ToolSourceLink[] = [];
+  const currentTurnAssistantMessageIds: string[] = [];
   const seenSourceToolCallIds = new Set<string>();
-  let activeMessage: SessionMessage | null = null;
-  let currentContent = "";
-  let lastEmittedContent = "";
-  let chunkIndex = 0;
-
-  function flush(sortSeq: number, sortTime: string) {
-    if (!activeMessage) {
-      return;
-    }
-
-    if (!currentContent || currentContent === lastEmittedContent) {
-      return;
-    }
-
-    const emittedContent = currentContent.startsWith(lastEmittedContent)
-      ? currentContent.slice(lastEmittedContent.length)
-      : currentContent;
-
-    currentTurnChunks.push({
-      kind: "message",
-      message: {
-        ...activeMessage,
-        id: `${activeMessage.id}::chunk-${chunkIndex++}`,
-        content: emittedContent,
-      },
-      sortSeq,
-      sortTime,
-      sourceLinks: [],
-      turnMeta: null,
-    });
-
-    lastEmittedContent = currentContent;
-  }
 
   function finalizeTurn() {
-    if (currentTurnChunks.length === 0) {
+    if (currentTurnAssistantMessageIds.length === 0) {
+      currentTurnTools.clear();
+      currentTurnSkills.clear();
       currentTurnSourceLinks.length = 0;
       return;
     }
 
-    const sourceLinks = dedupeToolSourceLinks(currentTurnSourceLinks);
-    if (sourceLinks.length > 0) {
-      const lastChunk = currentTurnChunks.at(-1);
-      if (lastChunk?.kind === "message") {
-        lastChunk.sourceLinks = sourceLinks;
-      }
+    const turnTools = [...currentTurnTools];
+    const turnSkills = [...currentTurnSkills];
+    const turnSourceLinks = dedupeToolSourceLinks(currentTurnSourceLinks);
+    const lastAssistantMessageId = currentTurnAssistantMessageIds.at(-1) ?? null;
+
+    for (const messageId of currentTurnAssistantMessageIds) {
+      turnMetadataByMessageId.set(messageId, {
+        tools: turnTools,
+        skills: turnSkills,
+        sourceLinks: messageId === lastAssistantMessageId ? turnSourceLinks : [],
+      });
     }
-    const turnMeta = {
-      tools: [...currentTurnTools],
-      skills: [...currentTurnSkills],
-    };
-    for (const chunk of currentTurnChunks) {
-      if (chunk.kind === "message") {
-        chunk.turnMeta = turnMeta;
-      }
-    }
-    chunks.push(...currentTurnChunks);
-    currentTurnChunks.length = 0;
-    currentTurnSourceLinks.length = 0;
+
     currentTurnTools.clear();
     currentTurnSkills.clear();
+    currentTurnSourceLinks.length = 0;
+    currentTurnAssistantMessageIds.length = 0;
   }
 
   for (const event of sessionEvents) {
     if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
-      const payload = event.payload as { message?: SessionMessage; skills?: unknown; tools?: unknown };
+      const payload = event.payload as { message?: SessionMessage; skills?: unknown };
       const message = payload.message;
       if (!message) {
         continue;
       }
 
-      if (message.role === "assistant" && Array.isArray(payload.skills)) {
+      if (message.role !== "assistant") {
+        finalizeTurn();
+        continue;
+      }
+
+      if (!currentTurnAssistantMessageIds.includes(message.id)) {
+        currentTurnAssistantMessageIds.push(message.id);
+      }
+
+      if (Array.isArray(payload.skills)) {
         for (const skill of payload.skills) {
           if (typeof skill === "string" && skill.trim()) {
             currentTurnSkills.add(skill.trim());
@@ -785,30 +766,10 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
         }
       }
 
-      if (message.role === "assistant" && Array.isArray(payload.tools)) {
-        for (const tool of payload.tools) {
-          if (typeof tool === "string" && tool.trim()) {
-            currentTurnTools.add(tool.trim());
-          }
-        }
-      }
-
-      if (message.role !== "assistant") {
-        flush(event.seq - 0.5, event.createdAt);
-        finalizeTurn();
-        activeMessage = null;
-        currentContent = "";
-        lastEmittedContent = "";
-        continue;
-      }
-
-      activeMessage = message;
-      currentContent = message.content;
       continue;
     }
 
     if (event.type.startsWith("tool.")) {
-      flush(event.seq, event.createdAt);
       const payload = event.payload as { toolCallId?: unknown; toolName?: unknown };
       if (typeof payload.toolName === "string" && payload.toolName.trim()) {
         currentTurnTools.add(payload.toolName.trim());
@@ -820,24 +781,16 @@ function buildAssistantMessageChunks(sessionEvents: SessionEvent[], toolWorkflow
           currentTurnSourceLinks.push(...sourceLinks);
         }
       }
+      continue;
     }
 
     if (event.type === "task.notification") {
-      flush(event.seq - 0.5, event.createdAt);
       finalizeTurn();
-      activeMessage = null;
-      currentContent = "";
-      lastEmittedContent = "";
     }
   }
 
-  const lastEvent = sessionEvents.at(-1);
-  if (activeMessage) {
-    flush((lastEvent?.seq ?? 0) + 1, lastEvent?.createdAt ?? activeMessage.createdAt);
-  }
-
   finalizeTurn();
-  return chunks;
+  return turnMetadataByMessageId;
 }
 
 type TimelineEntry =
@@ -944,6 +897,7 @@ function buildTimeline(
 ): TimelineBlock[] {
   const messageSeqById = new Map<string, number>();
   const approvalSeqById = new Map<string, number>();
+  const assistantTurnMetadataByMessageId = buildAssistantTurnMetadata(sessionEvents, toolWorkflowEntries);
   const entries: TimelineEntry[] = [];
 
   for (const event of sessionEvents) {
@@ -994,17 +948,22 @@ function buildTimeline(
   }
 
   for (const message of messages) {
-    if (message.role === "assistant") {
-      continue;
-    }
+    const assistantTurnMetadata = message.role === "assistant"
+      ? assistantTurnMetadataByMessageId.get(message.id)
+      : null;
 
     entries.push({
       kind: "message",
       message,
       sortSeq: messageSeqById.get(message.id) ?? null,
       sortTime: message.createdAt,
-      sourceLinks: [],
-      turnMeta: null,
+      sourceLinks: assistantTurnMetadata?.sourceLinks ?? [],
+      turnMeta: assistantTurnMetadata
+        ? {
+            tools: assistantTurnMetadata.tools,
+            skills: assistantTurnMetadata.skills,
+          }
+        : null,
     });
   }
 
@@ -1037,8 +996,6 @@ function buildTimeline(
       sortTime: activePlanUpdatedAt,
     });
   }
-
-  entries.push(...buildAssistantMessageChunks(sessionEvents, toolWorkflowEntries));
 
   entries.sort((a, b) => {
     if (a.sortSeq !== null || b.sortSeq !== null) {

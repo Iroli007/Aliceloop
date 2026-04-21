@@ -21,7 +21,6 @@ export const schemaStatements = [
       project_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      workset_state_json TEXT NOT NULL DEFAULT '{}',
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
     )
   `,

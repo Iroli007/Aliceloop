@@ -17,7 +17,6 @@ import {
   appendSessionEvent,
   createAttachment,
   createSessionMessage,
-  getSessionWorksetState,
   upsertSessionJob,
 } from "../repositories/sessionRepository";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
@@ -25,7 +24,7 @@ import { enqueueSessionRun } from "../services/sessionRunQueue";
 import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
 import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
 import { createSafetyChecker, SafetyLimitError } from "./safetyGuard";
-import { ToolStateMachine, type ToolCallState } from "./toolStateMachine";
+import { ToolStateMachine } from "./toolStateMachine";
 import {
   buildAgentProviderOptions,
   resolveProviderTransport,
@@ -40,7 +39,6 @@ import {
   MAX_CAPABILITY_RECOVERY_ATTEMPTS,
 } from "./capabilityRecovery";
 import type { PromptCacheRunTrace } from "./promptCacheTelemetry";
-import { settleWorksetAfterTurn } from "./worksetSettlement";
 import { schedulePostProcessing } from "./postProcessing";
 
 // ---------------------------------------------------------------------------
@@ -70,7 +68,7 @@ function publishRuntimeNotice(sessionId: string, content: string) {
   void syncSessionProjectHistory(sessionId).catch(() => {});
 }
 
-function publishAssistantReply(sessionId: string, content: string, skills: string[] = []) {
+function publishAssistantReply(sessionId: string, content: string) {
   const result = createSessionMessage({
     sessionId,
     clientMessageId: `assistant-reply-${randomUUID()}`,
@@ -78,7 +76,6 @@ function publishAssistantReply(sessionId: string, content: string, skills: strin
     role: "assistant",
     content,
     attachmentIds: [],
-    eventPayload: skills.length > 0 ? { skills } : undefined,
   });
 
   for (const event of result.events) {
@@ -86,17 +83,6 @@ function publishAssistantReply(sessionId: string, content: string, skills: strin
   }
 
   void syncSessionProjectHistory(sessionId).catch(() => {});
-}
-
-function buildAssistantEventPayload(skills: string[], tools: string[]) {
-  const payload: { skills?: string[]; tools?: string[] } = {};
-  if (skills.length > 0) {
-    payload.skills = skills;
-  }
-  if (tools.length > 0) {
-    payload.tools = tools;
-  }
-  return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
 function resolveImageMimeType(filePath: string): string | null {
@@ -405,6 +391,7 @@ interface AgentRun {
   sessionId: string;
   jobId: string;
   provider: StoredProviderConfig;
+  enableAnthropicToolSearch: boolean;
   abortController: AbortController;
   context: AgentContext;
   safety: ReturnType<typeof createSafetyChecker>;
@@ -436,11 +423,16 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
 
   const abortController = new AbortController();
   activeAgents.set(sessionId, abortController);
+  const enableAnthropicToolSearch = activeProvider.id === "anthropic"
+    && resolveProviderTransport(activeProvider) === "anthropic"
+    && /claude-(?:sonnet|opus|mythos)/iu.test(activeProvider.model);
 
   let context: AgentContext;
   const contextStartedAt = nowMs();
   try {
-    context = await loadContext(sessionId, abortController.signal);
+    context = await loadContext(sessionId, abortController.signal, {
+      enableAnthropicToolSearch,
+    });
   } catch (error) {
     activeAgents.delete(sessionId);
     throw error;
@@ -454,6 +446,7 @@ async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: str
     sessionId,
     jobId,
     provider: activeProvider,
+    enableAnthropicToolSearch,
     abortController,
     context,
     safety,
@@ -568,7 +561,7 @@ interface StreamResult {
 async function executeStreamAttempt(
   run: AgentRun,
   existingAssistantMessageId?: string | null,
-): Promise<StreamResult & { assistantMessageId: string | null; attachedToolNames: string[]; toolCalls: ToolCallState[] }> {
+): Promise<StreamResult & { assistantMessageId: string | null; attachedToolNames: string[] }> {
   const requestStartedAt = nowMs();
   const runtimeSettings = getRuntimeSettings();
   const stateMachine = new ToolStateMachine();
@@ -585,7 +578,10 @@ async function executeStreamAttempt(
   });
 
   const stream = streamText({
-    model: createProviderModel(run.provider),
+    model: createProviderModel(run.provider, {
+      sessionId: run.sessionId,
+      enablePromptCacheEditing: true,
+    }),
     system: run.context.systemPrompt,
     messages: run.context.messages,
     tools: run.context.tools,
@@ -618,7 +614,6 @@ async function executeStreamAttempt(
     requestStartedAt,
     existingAssistantMessageId: existingAssistantMessageId ?? null,
     checkActive: () => run.safety.checkActive(),
-    buildAssistantEventPayload,
     summarizeUnknown,
     resolveTextFallback: ({ assistantText, stateMachine: fallbackStateMachine, reasoningEffort }) => {
       return executeMiniMaxTextToolCallFallback({
@@ -646,7 +641,6 @@ async function executeStreamAttempt(
     diagnostics,
     assistantMessageId,
     attachedToolNames: Object.keys(run.context.tools),
-    toolCalls: stateMachine.getAll(),
   };
 }
 
@@ -654,80 +648,54 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
   let assistantMessageId: string | null = null;
   let lastResult: StreamResult | null = null;
   let finalResult: StreamResult | null = null;
-  const startingWorksetState = getSessionWorksetState(run.sessionId);
   const accumulatedStickySkillIds = new Set<string>();
   const accumulatedToolNames = new Set<string>();
-  const accumulatedAttachedSkillIds = new Set<string>();
-  const accumulatedDirectSkillIds = new Set<string>();
-  const accumulatedAttachedToolNames = new Set<string>();
-  const accumulatedToolCalls: ToolCallState[] = [];
   const attemptedRecoveryReasons = new Set<string>();
   const latestUserMessage = getLatestUserMessage(run.sessionId);
 
-  try {
-    for (let attempt = 0; attempt < MAX_CAPABILITY_RECOVERY_ATTEMPTS; attempt += 1) {
-      const result = await executeStreamAttempt(run, assistantMessageId);
-      assistantMessageId = result.assistantMessageId;
-      lastResult = {
-        text: result.text,
-        timings: result.timings,
-        diagnostics: result.diagnostics,
-      };
+  for (let attempt = 0; attempt < MAX_CAPABILITY_RECOVERY_ATTEMPTS; attempt += 1) {
+    const result = await executeStreamAttempt(run, assistantMessageId);
+    assistantMessageId = result.assistantMessageId;
+    lastResult = {
+      text: result.text,
+      timings: result.timings,
+      diagnostics: result.diagnostics,
+    };
 
-      for (const skillId of run.context.routedSkillIds) {
-        accumulatedAttachedSkillIds.add(skillId);
+    const recovery = inferCapabilityRecoveryRequest(
+      latestUserMessage,
+      result.text,
+      result.attachedToolNames,
+      result.diagnostics?.resolvedToolCallCount ?? 0,
+    );
+    const isLastAttempt = attempt >= MAX_CAPABILITY_RECOVERY_ATTEMPTS - 1;
+    if (!recovery || attemptedRecoveryReasons.has(recovery.reason) || isLastAttempt) {
+      if (
+        lastResult
+        && (lastResult.diagnostics?.resolvedToolCallCount ?? 0) === 0
+        && looksLikeCapabilitySeekingReply(lastResult.text)
+      ) {
+        lastResult = {
+          ...lastResult,
+          text: buildCapabilityFailureReply(latestUserMessage, result.attachedToolNames),
+        };
       }
-      for (const skillId of run.context.directRoutedSkillIds) {
-        accumulatedDirectSkillIds.add(skillId);
-      }
-      for (const toolName of result.attachedToolNames) {
-        accumulatedAttachedToolNames.add(toolName);
-      }
-      accumulatedToolCalls.push(...result.toolCalls);
-
-      const recovery = inferCapabilityRecoveryRequest(
-        latestUserMessage,
-        result.text,
-        result.attachedToolNames,
-        result.diagnostics?.resolvedToolCallCount ?? 0,
-      );
-      const isLastAttempt = attempt >= MAX_CAPABILITY_RECOVERY_ATTEMPTS - 1;
-      if (!recovery || attemptedRecoveryReasons.has(recovery.reason) || isLastAttempt) {
-        if (
-          lastResult
-          && (lastResult.diagnostics?.resolvedToolCallCount ?? 0) === 0
-          && looksLikeCapabilitySeekingReply(lastResult.text)
-        ) {
-          lastResult = {
-            ...lastResult,
-            text: buildCapabilityFailureReply(latestUserMessage, result.attachedToolNames),
-          };
-        }
-        finalResult = lastResult;
-        break;
-      }
-
-      attemptedRecoveryReasons.add(recovery.reason);
-      for (const skillId of recovery.additionalStickySkillIds) {
-        accumulatedStickySkillIds.add(skillId);
-      }
-      for (const toolName of recovery.additionalToolNames) {
-        accumulatedToolNames.add(toolName);
-      }
-
-      run.context = await loadContext(run.sessionId, run.abortController.signal, {
-        additionalStickySkillIds: [...accumulatedStickySkillIds],
-        additionalToolNames: [...accumulatedToolNames],
-      });
+      finalResult = lastResult;
+      break;
     }
-  } finally {
-    settleWorksetAfterTurn({
-      sessionId: run.sessionId,
-      startingState: startingWorksetState,
-      attachedSkillIds: accumulatedAttachedSkillIds,
-      directSkillIds: accumulatedDirectSkillIds,
-      attachedToolNames: accumulatedAttachedToolNames,
-      toolCalls: accumulatedToolCalls,
+
+    attemptedRecoveryReasons.add(recovery.reason);
+    for (const skillId of recovery.additionalStickySkillIds) {
+      accumulatedStickySkillIds.add(skillId);
+    }
+    for (const toolName of recovery.additionalToolNames) {
+      accumulatedToolNames.add(toolName);
+    }
+
+    run.context = await loadContext(run.sessionId, run.abortController.signal, {
+      additionalStickySkillIds: [...accumulatedStickySkillIds],
+      additionalToolNames: [...accumulatedToolNames],
+      enableAnthropicToolSearch: run.enableAnthropicToolSearch,
     });
   }
 

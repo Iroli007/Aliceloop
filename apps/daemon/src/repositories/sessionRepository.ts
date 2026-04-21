@@ -37,12 +37,6 @@ import {
   clearSessionTranscriptExports,
   pruneEmptyTranscriptParents,
 } from "../services/threadTranscriptPaths";
-import {
-  createEmptyWorksetState,
-  normalizeWorksetState,
-  serializeWorksetState,
-  type SessionWorksetState,
-} from "../context/workset/worksetState";
 
 const runtimeHeartbeatWindowMs = 25_000;
 
@@ -52,7 +46,6 @@ interface SessionRow {
   projectId: string | null;
   createdAt: string;
   updatedAt: string;
-  worksetStateJson: string | null;
 }
 
 interface SessionProjectBindingRow {
@@ -792,26 +785,12 @@ function getSessionRow(sessionId: string): SessionRow | undefined {
           title,
           project_id AS projectId,
           created_at AS createdAt,
-          updated_at AS updatedAt,
-          workset_state_json AS worksetStateJson
+          updated_at AS updatedAt
         FROM sessions
         WHERE id = ?
       `,
     )
     .get(sessionId) as SessionRow | undefined;
-}
-
-function readSessionWorksetStateRow(sessionId: string): SessionWorksetState {
-  const session = getSessionRow(sessionId);
-  if (!session?.worksetStateJson) {
-    return createEmptyWorksetState();
-  }
-
-  try {
-    return normalizeWorksetState(JSON.parse(session.worksetStateJson));
-  } catch {
-    return createEmptyWorksetState();
-  }
 }
 
 export function hasSession(sessionId: string) {
@@ -839,28 +818,6 @@ export function getSessionProjectBinding(sessionId: string): SessionProjectBindi
   ).get(sessionId) as SessionProjectBindingRow | undefined;
 
   return toSessionProjectBinding(row);
-}
-
-export function getSessionWorksetState(sessionId: string) {
-  return readSessionWorksetStateRow(sessionId);
-}
-
-export function updateSessionWorksetState(sessionId: string, state: SessionWorksetState) {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const serialized = serializeWorksetState(state);
-
-  db.transaction(() => {
-    db.prepare(
-      `
-        UPDATE sessions
-        SET workset_state_json = ?, updated_at = ?
-        WHERE id = ?
-      `,
-    ).run(serialized, now, sessionId);
-  })();
-
-  return readSessionWorksetStateRow(sessionId);
 }
 
 function countMessagesForSession(sessionId: string) {

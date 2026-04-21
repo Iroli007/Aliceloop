@@ -1,3 +1,4 @@
+import { buildTurnIntentDecision } from "../context/skills/skillRouting";
 import { repairTextToolCall } from "./toolCallRepair";
 
 export interface CapabilityRecoveryRequest {
@@ -23,7 +24,8 @@ function buildCapabilityRecoveryRequest(
 }
 
 function isRecoverableToolName(toolName: string) {
-  return toolName === "bash"
+  return toolName === "tool_search"
+    || toolName === "bash"
     || toolName === "web_search"
     || toolName === "web_fetch"
     || toolName.startsWith("browser_")
@@ -31,6 +33,10 @@ function isRecoverableToolName(toolName: string) {
 }
 
 function inferStickySkillsForToolName(toolName: string) {
+  if (toolName === "tool_search") {
+    return ["skill-hub", "skill-search"];
+  }
+
   if (toolName === "web_search") {
     return ["web-search"];
   }
@@ -47,7 +53,7 @@ function inferStickySkillsForToolName(toolName: string) {
 }
 
 function extractReferencedToolNameFromAssistantText(text: string) {
-  const toolMatch = text.match(/\b(bash|web_search|web_fetch|browser_[a-z_]+|chrome_relay_[a-z_]+)\b/u);
+  const toolMatch = text.match(/\b(tool_search|bash|web_search|web_fetch|browser_[a-z_]+|chrome_relay_[a-z_]+)\b/u);
   return toolMatch?.[1] ?? null;
 }
 
@@ -60,12 +66,25 @@ function inferIntentDrivenRecoveryRequest(
   }
 
   const attached = new Set(attachedToolNames);
+  const intentDecision = buildTurnIntentDecision(userMessage);
 
-  if (
-    /https?:\/\/|查一下|搜一下|搜索|查查|最新|今天|今日|news|latest|today|发布了什么|发了什么|fact-check|research/iu.test(userMessage)
-    && (!attached.has("web_search") || !attached.has("web_fetch"))
-  ) {
-    const missingToolNames = ["web_search", "web_fetch"].filter((toolName) => !attached.has(toolName));
+  if (intentDecision.needs.toolDiscovery && !attached.has("tool_search")) {
+    return buildCapabilityRecoveryRequest("user_intent:tool_discovery", {
+      skillIds: ["skill-hub", "skill-search"],
+      toolNames: ["tool_search"],
+    });
+  }
+
+  if (intentDecision.needs.webResearch || intentDecision.needs.webFetch || intentDecision.needs.deepResearchFetch) {
+    const missingToolNames = [
+      !attached.has("web_search") ? "web_search" : null,
+      (intentDecision.needs.webFetch || intentDecision.needs.deepResearchFetch) && !attached.has("web_fetch")
+        ? "web_fetch"
+        : null,
+    ].filter((toolName): toolName is string => Boolean(toolName));
+    if (missingToolNames.length === 0) {
+      return null;
+    }
     return buildCapabilityRecoveryRequest("user_intent:research", {
       skillIds: ["web-search", "web-fetch"],
       toolNames: missingToolNames,
@@ -73,7 +92,7 @@ function inferIntentDrivenRecoveryRequest(
   }
 
   if (
-    /浏览器|browser|网页|页面|网站|打开|登录|扫码|截图|click|tab|chrome|b站|bilibili|x\.com|twitter|小红书/iu.test(userMessage)
+    intentDecision.needs.browserAutomation
     && !attachedToolNames.some((toolName) => toolName.startsWith("browser_") || toolName.startsWith("chrome_relay_"))
   ) {
     return buildCapabilityRecoveryRequest("user_intent:browser", {
@@ -82,11 +101,15 @@ function inferIntentDrivenRecoveryRequest(
   }
 
   if (
-    /文件|文件夹|目录|回收站|缓存|cache|trash|workspace|ls\b|du\b|find\b|rm\b/iu.test(userMessage)
+    (intentDecision.needs.fileManagement || intentDecision.needs.systemInfo || intentDecision.needs.cameraCapture)
     && !attached.has("bash")
   ) {
     return buildCapabilityRecoveryRequest("user_intent:bash", {
-      skillIds: ["file-manager"],
+      skillIds: [
+        intentDecision.needs.fileManagement ? "file-manager" : null,
+        intentDecision.needs.systemInfo ? "system-info" : null,
+        intentDecision.needs.cameraCapture ? "selfie" : null,
+      ].filter((skillId): skillId is string => Boolean(skillId)),
       toolNames: ["bash"],
     });
   }
@@ -102,11 +125,17 @@ export function buildCapabilityFailureReply(
   userMessage: string | null,
   attachedToolNames: string[],
 ) {
-  if (userMessage && /https?:\/\/|查一下|搜一下|搜索|查查|最新|今天|今日|news|latest|today|发布了什么|发了什么|fact-check|research/iu.test(userMessage)) {
+  const intentDecision = userMessage ? buildTurnIntentDecision(userMessage) : null;
+
+  if (intentDecision?.needs.toolDiscovery) {
+    return "我这轮还没真正去查当前可用的工具或 skills，所以先不假装已经列出来。你可以继续让我直接走工具发现链路。";
+  }
+
+  if (intentDecision && (intentDecision.needs.webResearch || intentDecision.needs.webFetch || intentDecision.needs.deepResearchFetch)) {
     return "我这轮还没真正执行到搜索或网页读取，所以不能假装已经查过。你可以给我一个具体链接，我继续直接读；或者我下一轮继续按搜索链路重试。";
   }
 
-  if (userMessage && /浏览器|browser|网页|页面|网站|打开|登录|扫码|截图|click|tab|chrome|b站|bilibili|x\.com|twitter|小红书/iu.test(userMessage)) {
+  if (intentDecision?.needs.browserAutomation) {
     return "我这轮还没真正打开或操作页面，所以现在给不出可靠结果。你可以给我目标页面或账号链接，我下一轮直接走浏览器链路。";
   }
 
@@ -156,8 +185,13 @@ export function inferCapabilityRecoveryRequest(
   if (
     /我需要先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|让我先(?:查看|查询|看看|搜索).*(?:skill|技能|工具)|不是直接挂载的基座工具|需要通过 skill 路由|可用的 skill/u.test(assistantText)
   ) {
+    const intentDrivenRecovery = inferIntentDrivenRecoveryRequest(userMessage, attachedToolNames);
+    if (intentDrivenRecovery) {
+      return intentDrivenRecovery;
+    }
+
     return buildCapabilityRecoveryRequest("skill_discovery_needed", {
-      toolNames: attached.has("bash") ? [] : ["bash"],
+      toolNames: attached.has("tool_search") ? [] : ["tool_search"],
     });
   }
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { asSchema, type ModelMessage, type ToolSet } from "ai";
-import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
+import type { JSONObject, SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { CachedSystemPromptMessage } from "../context/cacheControl";
 import { hasAnthropicCacheBreakpoint } from "../context/cacheControl";
 
@@ -76,6 +76,15 @@ function normalizeProviderOptionsForTelemetry(providerOptions: SharedV3ProviderO
       },
     },
   };
+}
+
+function hasAnthropicDeferredLoading(providerOptions: SharedV3ProviderOptions | undefined) {
+  const anthropic = providerOptions?.anthropic;
+  if (!anthropic || typeof anthropic !== "object") {
+    return false;
+  }
+
+  return Boolean((anthropic as JSONObject).deferLoading);
 }
 
 function stableSerialize(value: unknown): string {
@@ -170,8 +179,14 @@ function buildSystemPromptParts(systemPrompt: string | CachedSystemPromptMessage
 }
 
 async function buildToolParts(tools: ToolSet): Promise<SerializedPromptPart[]> {
+  const visibleToolEntries = Object.entries(tools).filter(([, toolDefinition]) => {
+    return !hasAnthropicDeferredLoading(
+      toolDefinition.providerOptions as SharedV3ProviderOptions | undefined,
+    );
+  });
+
   return Promise.all(
-    Object.entries(tools).map(async ([toolName, toolDefinition]) => {
+    visibleToolEntries.map(async ([toolName, toolDefinition]) => {
       let inputSchema: unknown = null;
       try {
         inputSchema = await asSchema(toolDefinition.inputSchema).jsonSchema;

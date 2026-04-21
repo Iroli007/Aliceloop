@@ -13,12 +13,11 @@ import {
 import { buildHistoricalContextBlock } from "./session/historyContext";
 import { buildSkillContextSections, selectRelevantSkillDefinitions } from "./skills/skillLoader";
 import { buildTurnIntentDecision, mergeSkillRouteHints, needsEpisodicHistoryRecall } from "./skills/skillRouting";
-import { buildToolSet } from "./tools/toolRegistry";
+import { buildToolSet, getToolSchemaLifecycle } from "./tools/toolRegistry";
 import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import { getDefaultProjectDirectory } from "../repositories/projectRepository";
 import { getDataDir } from "../db/client";
-import { getSessionWorksetState } from "../repositories/sessionRepository";
 import {
   isAliceloopGeneratedFile,
   markGeneratedFileDeleted,
@@ -27,14 +26,12 @@ import {
 import { createPermissionSandboxExecutor } from "../services/sandboxExecutor";
 import { requestSessionToolApproval } from "../services/sessionToolApprovalService";
 import { getSandboxProjectRoot } from "../runtime/sandbox/toolPolicy";
+import { type CachedSystemPromptMessage } from "./cacheControl";
 import {
-  getActiveWorksetSkillIds,
-  getActiveWorksetToolNames,
-} from "./workset/worksetState";
-import {
-  createCachedSystemPromptMessage,
-  type CachedSystemPromptMessage,
-} from "./cacheControl";
+  buildSystemPromptFromSections,
+  cachedSystemPromptSection,
+  uncachedSystemPromptSection,
+} from "./systemPromptSections";
 
 export interface SafetyConfig {
   maxIterations: number;
@@ -50,8 +47,7 @@ export interface AgentContext {
   firstStepToolChoice?: ToolChoice<ToolSet>;
   safetyConfig: SafetyConfig;
   timings: Record<string, number | string | null>;
-  routedSkillIds: string[];
-  directRoutedSkillIds: string[];
+  displaySkillIds: string[];
 }
 
 const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
@@ -62,6 +58,7 @@ const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
 interface LoadContextOptions {
   additionalStickySkillIds?: string[];
   additionalToolNames?: string[];
+  enableAnthropicToolSearch?: boolean;
 }
 
 export async function loadContext(
@@ -98,37 +95,12 @@ export async function loadContext(
 
   const userQuery = recentConversationFocus.effectiveUserQuery ?? latestUserQuery;
   timings.effectiveUserQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
-  const sessionWorksetStateStartedAt = nowMs();
-  const sessionWorksetState = getSessionWorksetState(sessionId);
-  timings.sessionWorksetStateMs = roundMs(nowMs() - sessionWorksetStateStartedAt);
-  const activeWorksetSkillIds = getActiveWorksetSkillIds(sessionWorksetState);
-  const activeWorksetToolNames = getActiveWorksetToolNames(sessionWorksetState);
-  timings.sessionWorksetActiveSkillCount = activeWorksetSkillIds.length;
-  timings.sessionWorksetActiveToolCount = activeWorksetToolNames.length;
-
-  const directRouteHints = mergeSkillRouteHints(
+  const routeHints = mergeSkillRouteHints(
     recentConversationFocus.routeHints,
     (options?.additionalStickySkillIds?.length ?? 0) > 0
       ? {
           stickySkillIds: options?.additionalStickySkillIds ?? [],
           reasons: ["runtime-capability-recovery"],
-        }
-      : null,
-  );
-  const directIntentDecision = buildTurnIntentDecision(userQuery, {
-    hints: directRouteHints,
-    hasImageAttachment: latestUserHasImageAttachment,
-    researchContinuation: recentConversationFocus.researchContinuation,
-    continuationLike: recentConversationFocus.continuationLike,
-  });
-  const directRoutedSkills = selectRelevantSkillDefinitions(userQuery, directIntentDecision.routeHints);
-
-  const routeHints = mergeSkillRouteHints(
-    directRouteHints,
-    activeWorksetSkillIds.length > 0
-      ? {
-          stickySkillIds: activeWorksetSkillIds,
-          reasons: ["session-workset"],
         }
       : null,
   );
@@ -238,19 +210,35 @@ export async function loadContext(
     routeHints: turnRouteHints,
     hasImageAttachment: latestUserHasImageAttachment,
     browserRelayAvailable,
-    additionalToolNames: [
-      ...(options?.additionalToolNames ?? []),
-      ...activeWorksetToolNames,
-    ],
+    additionalToolNames: options?.additionalToolNames ?? [],
+    enableAnthropicToolSearch: options?.enableAnthropicToolSearch === true,
   });
   timings.toolsMs = roundMs(nowMs() - toolsStartedAt);
   timings.toolQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
+  timings.anthropicToolSearchEnabled = "tool_search_tool_bm25" in tools ? 1 : 0;
+  timings.deferredToolCount = Object.values(tools).filter((toolDefinition) => {
+    const providerOptions = toolDefinition.providerOptions;
+    const anthropic = providerOptions && typeof providerOptions === "object" && "anthropic" in providerOptions
+      ? providerOptions.anthropic
+      : null;
+    return Boolean(anthropic && typeof anthropic === "object" && "deferLoading" in anthropic);
+  }).length;
 
   const initialToolChoice = (() => {
     const toolNames = new Set(Object.keys(tools));
 
     if (toolNames.has("view_image") && (latestUserHasImageAttachment || intentDecision.needs.imageAnalysis)) {
       return { type: "tool", toolName: "view_image" } as const;
+    }
+
+    if (intentDecision.needs.toolDiscovery) {
+      if (toolNames.has("tool_search")) {
+        return { type: "tool", toolName: "tool_search" } as const;
+      }
+
+      if (toolNames.has("tool_search_tool_bm25")) {
+        return { type: "tool", toolName: "tool_search_tool_bm25" } as const;
+      }
     }
 
     if (toolNames.has("web_fetch") && (intentDecision.needs.webFetch || intentDecision.needs.deepResearchFetch)) {
@@ -295,38 +283,35 @@ export async function loadContext(
 
   const activeTurnSections = buildActiveTurnPromptSectionsFromFocus(recentConversationFocus);
 
-  const dynamicBlocks = [
-    recentConversationFocus.content,
-    activeTurnSections.tail,
-    sessionContext.recentToolActivity,
-    sessionContext.recentResearchMemory,
-    profileFactMemory.content,
-    historicalContext.content,
-    skillContext.tail,
-  ].filter(Boolean);
-  const stableExecutionPrefix = [
-    activeTurnSections.prefix,
-    skillContext.prefix,
-  ].filter(Boolean).join("\n\n");
-
   const promptAssemblyStartedAt = nowMs();
-  let systemPrompt: AgentContext["systemPrompt"];
-  if (Array.isArray(persona)) {
-    // persona is already system messages with cache control
-    systemPrompt = [...persona];
-    if (stableExecutionPrefix) {
-      systemPrompt.push(createCachedSystemPromptMessage(stableExecutionPrefix));
-    }
-    if (dynamicBlocks.length > 0) {
-      systemPrompt.push({
-        role: "system",
-        content: dynamicBlocks.join("\n\n"),
-      });
-    }
-  } else {
-    // fallback: persona is a string
-    systemPrompt = [persona, stableExecutionPrefix, ...dynamicBlocks].filter(Boolean).join("\n\n");
-  }
+  const {
+    systemPrompt,
+    cachedSectionIds,
+    uncachedSectionIds,
+  } = buildSystemPromptFromSections(persona, [
+    cachedSystemPromptSection(
+      "tool_search_guidance",
+      "tool_search_tool_bm25" in tools
+        ? [
+            "## Deferred Tool Discovery",
+            "- A BM25 tool search tool is available for this turn: use `tool_search_tool_bm25` when you need a more specialized tool that is not currently visible in the loaded tool set.",
+            "- Many less-common tools are intentionally deferred to preserve context and prompt caching. Search with natural language, then use the discovered tool references instead of assuming the capability is missing.",
+            "- Keep using already loaded core tools directly for common work: file editing, bash, web search/fetch, image viewing, and the basic browser entry tools.",
+          ].join("\n")
+        : "",
+    ),
+    uncachedSystemPromptSection("recent_conversation_focus", recentConversationFocus.content),
+    cachedSystemPromptSection("active_turn_prefix", activeTurnSections.prefix),
+    cachedSystemPromptSection("skill_context_prefix", skillContext.prefix),
+    cachedSystemPromptSection("task_working_memory_prefix", sessionContext.taskWorkingMemorySections.prefix),
+    uncachedSystemPromptSection("active_turn_tail", activeTurnSections.tail),
+    uncachedSystemPromptSection("task_working_memory_tail", sessionContext.taskWorkingMemorySections.tail),
+    uncachedSystemPromptSection("recent_tool_activity", sessionContext.recentToolActivity),
+    uncachedSystemPromptSection("recent_research_memory", sessionContext.recentResearchMemory),
+    uncachedSystemPromptSection("profile_fact_memory", profileFactMemory.content),
+    uncachedSystemPromptSection("historical_context", historicalContext.content),
+    uncachedSystemPromptSection("skill_context_tail", skillContext.tail),
+  ]);
   timings.promptAssemblyMs = roundMs(nowMs() - promptAssemblyStartedAt);
   if (Array.isArray(systemPrompt)) {
     timings.systemPromptParts = systemPrompt.length;
@@ -335,8 +320,27 @@ export async function loadContext(
     timings.systemPromptParts = 1;
     timings.systemPromptChars = roundMs(systemPrompt.length);
   }
-  timings.dynamicBlockCount = dynamicBlocks.length;
-  timings.dynamicPromptChars = roundMs(dynamicBlocks.reduce((sum, block) => sum + block.length, 0));
+  timings.systemPromptCachedSectionCount = cachedSectionIds.length;
+  timings.systemPromptCachedSectionIds = cachedSectionIds.join(",");
+  timings.systemPromptUncachedSectionCount = uncachedSectionIds.length;
+  timings.systemPromptUncachedSectionIds = uncachedSectionIds.join(",");
+  timings.dynamicBlockCount = uncachedSectionIds.length;
+  const uncachedSectionCharCount = [
+    recentConversationFocus.content,
+    activeTurnSections.tail,
+    sessionContext.taskWorkingMemorySections.tail,
+    sessionContext.recentToolActivity,
+    sessionContext.recentResearchMemory,
+    profileFactMemory.content,
+    historicalContext.content,
+    skillContext.tail,
+  ].filter(Boolean).reduce((sum, block) => sum + block.length, 0);
+  timings.dynamicPromptChars = roundMs(uncachedSectionCharCount);
+  const toolNames = Object.keys(tools);
+  timings.toolSchemaBaseCount = toolNames.filter((toolName) => getToolSchemaLifecycle(toolName) === "base").length;
+  timings.toolSchemaSessionStableCount = toolNames.filter((toolName) => getToolSchemaLifecycle(toolName) === "session-stable").length;
+  timings.toolSchemaDynamicCount = toolNames.filter((toolName) => getToolSchemaLifecycle(toolName) === "dynamic").length;
+  timings.toolSchemaVolatileCount = toolNames.filter((toolName) => getToolSchemaLifecycle(toolName) === "volatile").length;
   const promptCacheTelemetryStartedAt = nowMs();
   const promptCacheTrace = await buildPromptCacheRequestTrace({
     systemPrompt,
@@ -376,7 +380,6 @@ export async function loadContext(
       abortSignal,
     },
     timings,
-    routedSkillIds: routedSkills.map((skill) => skill.id),
-    directRoutedSkillIds: directRoutedSkills.map((skill) => skill.id),
+    displaySkillIds: routedSkills.map((skill) => skill.id),
   };
 }

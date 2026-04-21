@@ -20,6 +20,7 @@ export interface TurnIntentDecision {
     documentIngest: boolean;
     reviewCoach: boolean;
     deepResearchFetch: boolean;
+    toolDiscovery: boolean;
   };
   routeHints: SkillRouteHints;
   toolNames: string[];
@@ -68,6 +69,8 @@ function hasStickySkill(hints: SkillRouteHints | undefined, skillId: string) {
 const MEMORY_FACT_QUERY_PATTERN = /记忆|memory|记住|忘掉|forget|偏好|事实|稳定|长期|profile|account|fact|还记得|记不记得|记得我|我的偏好|我的习惯|记一下|帮我记住/u;
 const EPISODIC_HISTORY_QUERY_PATTERN = /聊天记录|历史会话|之前的对话|上次对话|conversation history|episodic history|上次聊|刚才说|之前说过|之前聊过|我们聊到哪|昨晚|昨天晚上|昨天聊|昨晚跟你说|昨天跟你说|今天我们做了什么|今天做了什么|今天都做了什么|今天聊了什么|今天聊了啥|我们今天聊了什么|我们今天做了什么|(?:这个|上个)?(?:线程|thread|会话|session).*(?:聊了什么|说了什么|提到什么|记录)/iu;
 const THREAD_MANAGEMENT_QUERY_PATTERN = /线程管理|管理线程|^threads?$|thread\s+(?:list|info|delete|new|search)|thread id|线程\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|会话\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|列出.*(?:线程|会话)|删除.*(?:线程|会话)|新建.*(?:线程|会话)|创建.*(?:线程|会话)|打开.*(?:线程|会话)|切换.*(?:线程|会话)/iu;
+const TOOL_DISCOVERY_QUERY_PATTERN =
+  /(?:你|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop).{0,24}(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能)|(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能).{0,16}(?:你|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop)|(?:可用|支持).{0,12}(?:tools?|skills?|能力|工具|技能)|(?:tools?|skills?|能力|工具|技能).{0,12}(?:列表|清单|目录|catalog|list)|(?:what|which).{0,16}(?:tools?|skills?|capabilit(?:y|ies)).{0,16}(?:do you have|are available|can you use)|\b(?:available tools?|tool list|skill list|available skills?|runtime tools?|tool catalog|skill catalog)\b/iu;
 const DEEP_RESEARCH_FETCH_PATTERN =
   /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u;
 
@@ -84,9 +87,12 @@ export function needsThreadManagement(query: string) {
 }
 
 export function needsWebResearch(query: string) {
+  if (needsToolDiscovery(query)) {
+    return false;
+  }
   return matches(
     query,
-    /^search$|^web[\s_-]?search$|^websearch$|搜索|搜搜看|research|调查|fact-?check|验证|核对|确认|准确|准不准|可靠吗|可靠性|事实依据|来源|source|天气|温度|粉丝|关注者|播放|点赞|价格|汇率|比分|政策|新闻|官网|网址|链接|url|https?:\/\/|网上.*(好玩|有意思|新鲜事)|互联网.*(好玩|有意思)|上网.*看看|搜搜看/iu,
+    /^search$|^web[\s_-]?search$|^websearch$|搜索|搜一下|搜一搜|搜搜看|research|调查|fact-?check|验证|核对|确认|准确|准不准|可靠吗|可靠性|事实依据|来源|source|天气|温度|粉丝|关注者|播放|点赞|价格|汇率|比分|政策|新闻|官网|网址|链接|url|https?:\/\/|网上.*(好玩|有意思|新鲜事)|互联网.*(好玩|有意思)|上网.*看看|搜搜看/iu,
   );
 }
 
@@ -148,6 +154,10 @@ export function prefersDeepResearchFetch(query: string) {
   return matches(query.trim(), DEEP_RESEARCH_FETCH_PATTERN);
 }
 
+export function needsToolDiscovery(query: string) {
+  return matches(query, TOOL_DISCOVERY_QUERY_PATTERN);
+}
+
 function buildBaseStickySkillIds(query: string) {
   const stickySkillIds = new Set<string>();
 
@@ -178,7 +188,7 @@ function buildBaseStickySkillIds(query: string) {
   if (matches(query, /视频文件|video file|本地视频|上传.*视频|发了.*视频|\.mp4\b|\.mov\b|\.mkv\b|\.webm\b|\.avi\b|\.m4v\b|\.3gp\b/iu)) {
     stickySkillIds.add("video-reader");
   }
-  if (matches(query, /(?:\bskills?\b|\bcapabilit(?:y|ies)\b|browser_click|browser_open|browser_type|browser relay|tool(s)?|能力|有哪些工具|哪些工具|缺少.*(?:工具|skills?|tools?|能力|capabilit(?:y|ies))|没有.*(?:工具|skills?|tools?|能力|capabilit(?:y|ies)))/iu)) {
+  if (needsToolDiscovery(query)) {
     stickySkillIds.add("skill-hub");
     stickySkillIds.add("skill-search");
   }
@@ -213,6 +223,7 @@ export function buildTurnIntentDecision(
     documentIngest: needsDocumentIngest(normalizedQuery),
     reviewCoach: needsReviewCoach(normalizedQuery),
     deepResearchFetch: prefersDeepResearchFetch(normalizedQuery),
+    toolDiscovery: needsToolDiscovery(normalizedQuery),
   };
   const recentToolNames = options?.recentToolNames ?? [];
   const sawRecentWebTool = recentToolNames.some((toolName) => toolName === "web_search" || toolName === "web_fetch");
@@ -261,6 +272,10 @@ export function buildTurnIntentDecision(
 
   if (needs.fileManagement || needs.cameraCapture || needs.systemInfo) {
     toolNames.add("bash");
+  }
+
+  if (needs.toolDiscovery || hasStickySkill(routeHints, "skill-hub") || hasStickySkill(routeHints, "skill-search")) {
+    toolNames.add("tool_search");
   }
 
   if (needs.webResearch || hasStickySkill(routeHints, "web-search")) {

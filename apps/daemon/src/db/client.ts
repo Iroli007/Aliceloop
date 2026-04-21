@@ -550,7 +550,6 @@ function ensureColumn(db: Database.Database, tableName: string, columnName: stri
 
 function runMigrations(db: Database.Database) {
   ensureColumn(db, "sessions", "project_id", "TEXT REFERENCES projects(id) ON DELETE SET NULL");
-  ensureColumn(db, "sessions", "workset_state_json", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(db, "attachments", "original_path", "TEXT");
   ensureColumn(db, "study_artifacts", "body", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "provider_configs", "transport", "TEXT");

@@ -25,6 +25,8 @@ const toolLabelMap: Record<string, string> = {
   skill: "Skill",
   agent: "Agent",
   task_output: "Background Agent",
+  tool_search: "Tool Search",
+  tool_search_tool_bm25: "Tool Search",
   web_fetch: "Web Fetch",
   web_search: "Web Search",
   write: "Write",

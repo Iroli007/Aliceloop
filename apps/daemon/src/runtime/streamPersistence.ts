@@ -26,11 +26,6 @@ interface TextStreamLike {
   } | undefined>;
 }
 
-type AssistantEventPayload = {
-  skills?: string[];
-  tools?: string[];
-};
-
 interface TextFallbackResult {
   replacementText: string;
   toolCallCount: number;
@@ -46,7 +41,6 @@ interface ConsumeTextStreamInput {
   requestStartedAt: number;
   existingAssistantMessageId: string | null;
   checkActive(): void;
-  buildAssistantEventPayload(skills: string[], tools: string[]): AssistantEventPayload | undefined;
   summarizeUnknown(value: unknown, maxLength?: number): string | null;
   resolveTextFallback(input: {
     assistantText: string;
@@ -67,14 +61,15 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
 }> {
   let text = "";
   const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
-  const routedSkillIds = input.context.routedSkillIds;
   let assistantMessageId: string | null = input.existingAssistantMessageId;
   let pendingFlush = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let firstTokenMs: number | null = null;
   let resolvedToolCalls: unknown[] = [];
-  const attachedToolNames = Object.keys(input.context.tools);
   let fallbackToolCallCount = 0;
+  const assistantEventPayload = input.context.displaySkillIds.length > 0
+    ? { skills: input.context.displaySkillIds }
+    : undefined;
 
   function getChatContent(final = false) {
     return getRenderableAssistantText(input.providerId, text, final);
@@ -91,7 +86,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
       sessionId: input.sessionId,
       messageId: assistantMessageId,
       content,
-      eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+      eventPayload: assistantEventPayload,
     });
     publishSessionEvent(updateResult.event);
   }
@@ -117,7 +112,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
         role: "assistant",
         content,
         attachmentIds: [],
-        eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+        eventPayload: assistantEventPayload,
       });
 
       assistantMessageId = messageResult.message.id;
@@ -168,7 +163,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
       sessionId: input.sessionId,
       messageId: assistantMessageId,
       content: finalContent,
-      eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+      eventPayload: assistantEventPayload,
     });
     publishSessionEvent(updateResult.event);
   }
@@ -181,7 +176,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
       role: "assistant",
       content: finalContent,
       attachmentIds: [],
-      eventPayload: input.buildAssistantEventPayload(routedSkillIds, attachedToolNames),
+      eventPayload: assistantEventPayload,
     });
     assistantMessageId = messageResult.message.id;
     for (const event of messageResult.events) {

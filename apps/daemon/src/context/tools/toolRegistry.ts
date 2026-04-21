@@ -1,11 +1,19 @@
 import type { ToolSet } from "ai";
+import type { JSONObject, SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { SkillDefinition } from "@aliceloop/runtime-core";
 import type { createPermissionSandboxExecutor } from "../../services/sandboxExecutor";
 import { withToolCacheBreakpoint } from "../cacheControl";
 import type { SkillRouteHints } from "../skills/skillRouting";
 import { setBrowserSessionPreference } from "./browserSessionRegistry";
 import { createSandboxTools } from "./sandboxTools";
-import { BASE_TOOL_NAMES, listAvailableToolAdapterNames, listUnresolvedSkillTools, resolveSkillTools } from "./skillToolFactories";
+import { createToolSearchTool, type ToolSearchCatalogEntry } from "./toolSearchTool";
+import {
+  BASE_TOOL_NAMES,
+  getAnthropicToolSearchToolSet,
+  listAvailableToolAdapterNames,
+  listUnresolvedSkillTools,
+  resolveSkillTools,
+} from "./skillToolFactories";
 import { routeToolNamesForTurn } from "./toolRouter";
 
 type SandboxExecutor = ReturnType<typeof createPermissionSandboxExecutor>;
@@ -17,10 +25,22 @@ interface BuildToolSetOptions {
   hasImageAttachment?: boolean;
   additionalToolNames?: string[];
   browserRelayAvailable?: boolean;
+  enableAnthropicToolSearch?: boolean;
 }
 
 const BASE_TOOL_ORDER = ["grep", "glob", "read", "write", "edit", "bash"] as const;
-const STABLE_TOOL_PREFIX_ORDER = [
+const TOOL_SEARCH_ALWAYS_LOADED = new Set([
+  ...BASE_TOOL_ORDER,
+  "tool_search",
+  "web_search",
+  "web_fetch",
+  "view_image",
+  "browser_snapshot",
+  "browser_navigate",
+]);
+const MIN_TOOL_COUNT_FOR_TOOL_SEARCH = 10;
+const SESSION_STABLE_TOOL_ORDER = [
+  "audio_understand",
   "web_search",
   "web_fetch",
   "view_image",
@@ -50,8 +70,32 @@ const STABLE_TOOL_PREFIX_ORDER = [
   "chrome_relay_eval",
   "chrome_relay_back",
   "chrome_relay_forward",
+  "document_ingest",
+  "review_coach",
 ] as const;
-const STABLE_TOOL_PREFIX_SET = new Set<string>(STABLE_TOOL_PREFIX_ORDER);
+const SESSION_STABLE_TOOL_SET = new Set<string>(SESSION_STABLE_TOOL_ORDER);
+const VOLATILE_TOOL_PREFIXES = ["runtime_script_"] as const;
+
+export type ToolSchemaLifecycle = "base" | "session-stable" | "dynamic" | "volatile";
+
+const SPECIAL_TOOL_NAMES = new Set(["tool_search"]);
+
+function isVolatileToolName(toolName: string) {
+  return VOLATILE_TOOL_PREFIXES.some((prefix) => toolName.startsWith(prefix));
+}
+
+export function getToolSchemaLifecycle(toolName: string): ToolSchemaLifecycle {
+  if (BASE_TOOL_NAMES.has(toolName)) {
+    return "base";
+  }
+  if (SESSION_STABLE_TOOL_SET.has(toolName)) {
+    return "session-stable";
+  }
+  if (isVolatileToolName(toolName)) {
+    return "volatile";
+  }
+  return "dynamic";
+}
 
 function inferBrowserBackendPreference(
   _query: string | null | undefined,
@@ -77,6 +121,75 @@ function addTool(tools: ToolSet, toolName: string, source: ToolSet) {
   }
 
   tools[toolName] = source[toolName];
+}
+
+function buildToolSearchCatalog(
+  sandboxTools: ToolSet,
+  orderedTools: ToolSet,
+  sessionId: string | undefined,
+): ToolSearchCatalogEntry[] {
+  const catalog: ToolSearchCatalogEntry[] = BASE_TOOL_ORDER.map((toolName) => ({
+    name: toolName,
+    description: sandboxTools[toolName]?.description ?? "",
+    attached: toolName in orderedTools,
+    lifecycle: "base",
+  }));
+
+  const discoverableToolNames = listAvailableToolAdapterNames().filter((toolName) => {
+    return !BASE_TOOL_NAMES.has(toolName) && !SPECIAL_TOOL_NAMES.has(toolName) && toolName !== "tool_search_tool_bm25";
+  });
+  const discoverableToolSet = resolveSkillTools(new Set(discoverableToolNames), { sessionId });
+
+  for (const [toolName, toolDefinition] of Object.entries(discoverableToolSet)) {
+    catalog.push({
+      name: toolName,
+      description: toolDefinition.description ?? "",
+      attached: toolName in orderedTools,
+      lifecycle: getToolSchemaLifecycle(toolName),
+    });
+  }
+
+  catalog.push({
+    name: "tool_search_tool_bm25",
+    description: "Anthropic BM25 server-side tool search for deferred tools when the current provider supports it.",
+    attached: "tool_search_tool_bm25" in orderedTools,
+    lifecycle: "external",
+  });
+
+  return catalog;
+}
+
+function withAnthropicDeferLoading(tools: ToolSet, deferredToolNames: Set<string>) {
+  if (deferredToolNames.size === 0) {
+    return tools;
+  }
+
+  const next: ToolSet = {};
+  for (const [toolName, toolDefinition] of Object.entries(tools)) {
+    if (!deferredToolNames.has(toolName)) {
+      next[toolName] = toolDefinition;
+      continue;
+    }
+
+    const providerOptions = toolDefinition.providerOptions as SharedV3ProviderOptions | undefined;
+    const anthropic = providerOptions?.anthropic;
+    const anthropicOptions = anthropic && typeof anthropic === "object"
+      ? anthropic as JSONObject
+      : {};
+
+    next[toolName] = {
+      ...toolDefinition,
+      providerOptions: {
+        ...(providerOptions ?? {}),
+        anthropic: {
+          ...anthropicOptions,
+          deferLoading: true,
+        },
+      },
+    };
+  }
+
+  return next;
 }
 
 export function buildToolSet(
@@ -105,20 +218,26 @@ export function buildToolSet(
     );
   }
 
-  const unresolved = listUnresolvedSkillTools(requested);
+  const requestedAdapterNames = new Set(
+    [...requested].filter((toolName) => !BASE_TOOL_NAMES.has(toolName) && !SPECIAL_TOOL_NAMES.has(toolName)),
+  );
+  const unresolved = listUnresolvedSkillTools(requestedAdapterNames);
   if (unresolved.length > 0) {
     throw new Error(
       `Tool router selected unresolved tool adapters: ${unresolved.sort().join(", ")}.`,
     );
   }
 
-  const resolvedSkillTools = resolveSkillTools(requested, { sessionId: options?.sessionId });
+  const resolvedSkillTools = resolveSkillTools(requestedAdapterNames, { sessionId: options?.sessionId });
   const orderedTools: ToolSet = {};
   const attachedBaseToolNames = BASE_TOOL_ORDER.filter((toolName) => requested.has(toolName));
   const attachedSkillToolNames = Object.keys(resolvedSkillTools);
-  const attachedStableSkillToolNames = STABLE_TOOL_PREFIX_ORDER.filter((toolName) => attachedSkillToolNames.includes(toolName));
-  const attachedDynamicSkillToolNames = attachedSkillToolNames
-    .filter((toolName) => !STABLE_TOOL_PREFIX_SET.has(toolName))
+  const attachedSessionStableToolNames = SESSION_STABLE_TOOL_ORDER.filter((toolName) => attachedSkillToolNames.includes(toolName));
+  const attachedDynamicToolNames = attachedSkillToolNames
+    .filter((toolName) => getToolSchemaLifecycle(toolName) === "dynamic")
+    .sort((left, right) => left.localeCompare(right, "en"));
+  const attachedVolatileToolNames = attachedSkillToolNames
+    .filter((toolName) => getToolSchemaLifecycle(toolName) === "volatile")
     .sort((left, right) => left.localeCompare(right, "en"));
 
   for (const toolName of attachedBaseToolNames) {
@@ -127,16 +246,44 @@ export function buildToolSet(
     }
   }
 
-  for (const toolName of attachedStableSkillToolNames) {
+  for (const toolName of attachedSessionStableToolNames) {
     addTool(orderedTools, toolName, resolvedSkillTools);
   }
 
-  for (const toolName of attachedDynamicSkillToolNames) {
+  for (const toolName of attachedDynamicToolNames) {
     addTool(orderedTools, toolName, resolvedSkillTools);
   }
 
-  const cacheMarkerToolName = attachedStableSkillToolNames.at(-1) ?? attachedBaseToolNames.at(-1) ?? null;
-  return withToolCacheBreakpoint(orderedTools, cacheMarkerToolName);
+  for (const toolName of attachedVolatileToolNames) {
+    addTool(orderedTools, toolName, resolvedSkillTools);
+  }
+
+  if (requested.has("tool_search")) {
+    const toolSearchCatalog = buildToolSearchCatalog(allSandboxTools, orderedTools, options?.sessionId);
+    Object.assign(orderedTools, createToolSearchTool(toolSearchCatalog));
+  }
+
+  const shouldEnableAnthropicToolSearch = options?.enableAnthropicToolSearch === true
+    && Object.keys(orderedTools).length >= MIN_TOOL_COUNT_FOR_TOOL_SEARCH;
+  const deferredToolNames = shouldEnableAnthropicToolSearch
+    ? new Set(Object.keys(orderedTools).filter((toolName) => !TOOL_SEARCH_ALWAYS_LOADED.has(toolName)))
+    : new Set<string>();
+  const toolSearchReadyTools = shouldEnableAnthropicToolSearch
+    ? withAnthropicDeferLoading(orderedTools, deferredToolNames)
+    : orderedTools;
+  const cacheMarkerToolName = [...attachedSessionStableToolNames, ...attachedBaseToolNames]
+    .filter((toolName) => !deferredToolNames.has(toolName))
+    .at(-1) ?? null;
+  const cacheReadyTools = withToolCacheBreakpoint(toolSearchReadyTools, cacheMarkerToolName);
+
+  if (!shouldEnableAnthropicToolSearch) {
+    return cacheReadyTools;
+  }
+
+  return {
+    ...getAnthropicToolSearchToolSet(),
+    ...cacheReadyTools,
+  };
 }
 
 export { listAvailableToolAdapterNames };

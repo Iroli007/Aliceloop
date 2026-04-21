@@ -296,7 +296,7 @@ function listSubstantialUserAnchors(messages: SessionMessage[]) {
   return anchors;
 }
 
-function summarizeWorksetConstraints(anchors: string[]) {
+function summarizeCarryForwardConstraints(anchors: string[]) {
   const constraintCandidates = anchors.filter((anchor) => {
     return /B站|哔哩哔哩|bilibili|抖音|douyin|推特|twitter|x\.com|平台|微博|官网|时间|日期|几月几日|粉丝|播放|数据|口径|截至|截止|最新|当前|wiki|wikipedia|维基/u.test(anchor);
   });
@@ -347,7 +347,7 @@ function buildResolvedCurrentRequest(input: {
   }
 
   if (input.carryForwardFacts) {
-    fragments.push(`Carry-forward workset: ${input.carryForwardFacts}`);
+    fragments.push(`Carry-forward context: ${input.carryForwardFacts}`);
   }
 
   fragments.push(`Latest user follow-up: ${input.latestContent}`);
@@ -395,7 +395,7 @@ export interface RecentConversationFocus {
   originalTopicAnchor: string | null;
   latestExplicitAnchor: string | null;
   carryForwardFacts: string | null;
-  worksetConstraints: string | null;
+  carryForwardConstraints: string | null;
   resolvedCurrentRequest: string | null;
   effectiveUserQuery: string | null;
   routeHints: SkillRouteHints;
@@ -462,7 +462,10 @@ export interface SessionContextFragments {
   recentResearchMemory: string;
   recentToolActivity: string;
   activeTurn: string;
-  taskWorkingMemory: string;
+  taskWorkingMemorySections: {
+    prefix: string;
+    tail: string;
+  };
   messages: ModelMessage[];
   timings: SessionContextFragmentTimings;
 }
@@ -685,7 +688,7 @@ function buildRecentConversationFocusFromSnapshot(
       originalTopicAnchor: null,
       latestExplicitAnchor: null,
       carryForwardFacts: null,
-      worksetConstraints: null,
+      carryForwardConstraints: null,
       resolvedCurrentRequest: null,
       effectiveUserQuery: null,
       routeHints: {
@@ -703,7 +706,7 @@ function buildRecentConversationFocusFromSnapshot(
   const researchContinuation = Boolean(
     continuationLike && carryForwardFacts && needsResearchContinuation(carryForwardFacts),
   );
-  const worksetConstraints = summarizeWorksetConstraints(anchors);
+  const carryForwardConstraints = summarizeCarryForwardConstraints(anchors);
   const recentToolNames = recentToolTraces.map((trace) => trace.toolName);
   const sawRecentWebTool = recentToolNames.some((toolName) => {
     return toolName === "web_search" || toolName === "web_fetch";
@@ -730,7 +733,7 @@ function buildRecentConversationFocusFromSnapshot(
     researchContinuation,
     recentToolNames,
     loginOrQrContinuation: looksLikeLoginOrQrContinuationContext(carryForwardFacts)
-      || looksLikeLoginOrQrContinuationContext(worksetConstraints),
+      || looksLikeLoginOrQrContinuationContext(carryForwardConstraints),
   }).routeHints;
 
   const lines = [
@@ -744,10 +747,10 @@ function buildRecentConversationFocusFromSnapshot(
     if (carryForwardFacts) {
       lines.push(`- Current unresolved research task: ${carryForwardFacts}`);
     }
-    if (worksetConstraints) {
-      lines.push(`- Current carried-forward constraints: ${worksetConstraints}`);
+    if (carryForwardConstraints) {
+      lines.push(`- Current carried-forward constraints: ${carryForwardConstraints}`);
     }
-    if (needsStrictSourcePolicy(carryForwardFacts) || needsStrictSourcePolicy(worksetConstraints)) {
+    if (needsStrictSourcePolicy(carryForwardFacts) || needsStrictSourcePolicy(carryForwardConstraints)) {
       lines.push("- Source policy for this turn: prioritize the primary platform pages for Bilibili, Douyin, and X/Twitter when relevant, then clearly dated reporting or reputable analytics. Treat wiki or encyclopedia pages only as background context for biography, not as the authoritative source for current metrics, latest activity, or date-specific facts.");
       lines.push("- Baidu Baike priority is extremely low for this thread. Use it only if primary platform pages, official pages, dated reporting, and reputable analytics all fail to establish the fact, and explicitly label it as `百度百科` if you end up citing it.");
       lines.push("- If the target account, creator page, or source domain is still ambiguous, ask the user for the exact profile URL or trusted site list so you can verify against the right pages.");
@@ -802,7 +805,7 @@ function buildRecentConversationFocusFromSnapshot(
     originalTopicAnchor,
     latestExplicitAnchor,
     carryForwardFacts,
-    worksetConstraints,
+    carryForwardConstraints,
     resolvedCurrentRequest,
     effectiveUserQuery,
     routeHints,
@@ -1009,20 +1012,19 @@ function buildTaskRunSection(taskRuns: TaskRun[]) {
   return lines.join("\n");
 }
 
-function buildTaskWorkingMemoryBlock(input: {
+function buildTaskWorkingMemorySections(input: {
   sessionId: string;
   projectBinding: SessionProjectBinding | null;
   recentConversationFocus: RecentConversationFocus;
-  activeTurn: string;
-  recentResearchMemory: string;
-  recentToolActivity: string;
 }) {
-  const sections: string[] = [];
-
   const workspaceBoundary = buildWorkspaceBoundarySection(input.projectBinding);
-  if (workspaceBoundary) {
-    sections.push(workspaceBoundary);
-  }
+  const prefix = [
+    "## Task Working Memory",
+    "- Treat this as the current task brain, not as long-term memory.",
+    workspaceBoundary,
+  ].filter(Boolean).join("\n\n");
+
+  const sections: string[] = [];
 
   const attention = buildAttentionSection(getAttentionState());
   if (attention) {
@@ -1043,28 +1045,13 @@ function buildTaskWorkingMemoryBlock(input: {
   if (input.recentConversationFocus.carryForwardFacts) {
     requestLines.push(`- Carry-forward facts: ${trimInline(input.recentConversationFocus.carryForwardFacts, 240)}`);
   }
-  if (input.recentConversationFocus.worksetConstraints) {
-    requestLines.push(`- Temporary constraints: ${trimInline(input.recentConversationFocus.worksetConstraints, 240)}`);
+  if (input.recentConversationFocus.carryForwardConstraints) {
+    requestLines.push(`- Temporary constraints: ${trimInline(input.recentConversationFocus.carryForwardConstraints, 240)}`);
   }
   if (input.recentConversationFocus.routeHints.reasons.length > 0) {
     requestLines.push(`- Routing hints: ${input.recentConversationFocus.routeHints.reasons.join("; ")}`);
   }
   sections.push(requestLines.join("\n"));
-
-  if (input.activeTurn) {
-    sections.push([
-      "### Turn Directive",
-      input.activeTurn,
-    ].join("\n"));
-  }
-
-  if (input.recentToolActivity) {
-    sections.push(input.recentToolActivity);
-  }
-
-  if (input.recentResearchMemory) {
-    sections.push(input.recentResearchMemory);
-  }
 
   const plans = listPlans({ sessionId: input.sessionId, limit: 2 });
   const planSection = buildPlanStateSection(plans);
@@ -1078,16 +1065,10 @@ function buildTaskWorkingMemoryBlock(input: {
     sections.push(taskSection);
   }
 
-  if (sections.length === 0) {
-    return "";
-  }
-
-  return [
-    "## Task Working Memory",
-    "- Treat this as the current task brain, not as long-term memory.",
-    "",
-    ...sections,
-  ].join("\n\n");
+  return {
+    prefix,
+    tail: sections.join("\n\n"),
+  };
 }
 
 function parseRecord(value: unknown) {
@@ -1355,13 +1336,10 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const recentResearchMemoryMs = roundMs(nowMs() - recentResearchMemoryStartedAt);
 
   const taskWorkingMemoryStartedAt = nowMs();
-  const taskWorkingMemory = buildTaskWorkingMemoryBlock({
+  const taskWorkingMemorySections = buildTaskWorkingMemorySections({
     sessionId,
     projectBinding,
     recentConversationFocus,
-    activeTurn,
-    recentResearchMemory,
-    recentToolActivity,
   });
   const taskWorkingMemoryMs = roundMs(nowMs() - taskWorkingMemoryStartedAt);
 
@@ -1377,7 +1355,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
     recentResearchMemory,
     recentToolActivity,
     activeTurn,
-    taskWorkingMemory,
+    taskWorkingMemorySections,
     messages,
     timings: {
       snapshotMs,
