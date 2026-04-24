@@ -911,6 +911,11 @@ async function handleThread(args: string[]) {
       throw new CliError("thread delete requires a session id");
     }
 
+    const currentSessionId = process.env.ALICELOOP_SESSION_ID?.trim();
+    if (currentSessionId && sessionId === currentSessionId) {
+      throw new CliError("cannot delete the current active thread; leave this thread undeleted or switch to another thread first");
+    }
+
     return apiRequest<{ ok: boolean; session: { id: string; title: string } }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
     });

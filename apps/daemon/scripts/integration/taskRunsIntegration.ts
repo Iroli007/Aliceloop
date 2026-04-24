@@ -15,11 +15,11 @@ async function main() {
     { getTaskRun, listTaskRuns },
     { runManagedTask },
   ] = await Promise.all([
-    import("../src/repositories/sessionRepository.ts"),
-    import("../src/repositories/overviewRepository.ts"),
-    import("../src/repositories/projectRepository.ts"),
-    import("../src/repositories/taskRunRepository.ts"),
-    import("../src/services/taskRunner.ts"),
+    import("../../src/repositories/sessionRepository.ts"),
+    import("../../src/repositories/overviewRepository.ts"),
+    import("../../src/repositories/projectRepository.ts"),
+    import("../../src/repositories/taskRunRepository.ts"),
+    import("../../src/services/taskRunner.ts"),
   ]);
 
   const session = createSession("任务表烟雾测试");

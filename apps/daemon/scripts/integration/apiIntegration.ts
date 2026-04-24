@@ -18,11 +18,12 @@ async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-task-api-"));
   const workspaceRoot = join(tempDataDir, "workspaces", "default");
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
+  process.env.ALICELOOP_PROVIDER_KEYCHAIN_SERVICE = `Aliceloop API Integration ${Date.now()}`;
   process.env.ALICELOOP_SCHEDULER_POLL_MS = "100";
 
   const [{ createServer }, { listTaskRuns }] = await Promise.all([
-    import("../src/server.ts"),
-    import("../src/repositories/taskRunRepository.ts"),
+    import("../../src/server.ts"),
+    import("../../src/repositories/taskRunRepository.ts"),
   ]);
 
   const server = await createServer();
@@ -716,6 +717,7 @@ async function main() {
       ),
     );
   } finally {
+    delete process.env.ALICELOOP_PROVIDER_KEYCHAIN_SERVICE;
     delete process.env.ALICELOOP_SCHEDULER_POLL_MS;
     await new Promise((resolve, reject) => imageBackend.close((error) => (error ? reject(error) : resolve(undefined))));
     await server.close();

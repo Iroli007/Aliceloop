@@ -549,9 +549,15 @@ button {
   text-align: left;
   background: transparent;
   border: none;
+  cursor: pointer;
   transition:
     background 120ms ease,
     border-color 120ms ease;
+}
+
+.sidebar__thread-item:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.3);
+  outline-offset: -2px;
 }
 
 .sidebar__thread-item + .sidebar__thread-item {
@@ -604,6 +610,49 @@ button {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--gray-400);
+}
+
+.sidebar__thread-meta {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sidebar__thread-delete {
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #94a3b8;
+  background: transparent;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.sidebar__thread-item:hover .sidebar__thread-delete,
+.sidebar__thread-item:focus-within .sidebar__thread-delete {
+  opacity: 1;
+}
+
+.sidebar__thread-delete:hover {
+  color: #c85055;
+  background: rgba(200, 80, 85, 0.1);
+}
+
+.sidebar__thread-delete svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .sidebar__thread-preview {
@@ -3340,6 +3389,73 @@ button {
   background: rgba(244, 246, 248, 0.34);
   backdrop-filter: blur(18px);
   z-index: 40;
+}
+
+.thread-delete-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.thread-delete-modal {
+  width: min(390px, calc(100vw - 32px));
+  display: grid;
+  gap: 16px;
+  padding: 24px 26px 22px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.14);
+}
+
+.thread-delete-modal h2 {
+  margin: 0;
+  color: #171717;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.thread-delete-modal p {
+  margin: 0;
+  color: #64748b;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.thread-delete-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.thread-delete-modal__button {
+  min-height: 40px;
+  padding: 0 20px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: #ffffff;
+  color: #171717;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 6px 12px rgba(15, 23, 42, 0.06);
+}
+
+.thread-delete-modal__button--danger {
+  border-color: #d85b60;
+  color: #c85055;
+  box-shadow: none;
+}
+
+.thread-delete-modal__button:disabled {
+  cursor: default;
+  opacity: 0.58;
 }
 
 .image-preview-overlay {

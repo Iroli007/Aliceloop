@@ -8,7 +8,12 @@
     "build": "npm run build --workspace @aliceloop/runtime-core && npm run build --workspace @aliceloop/pdf-ingest && npm run build --workspace @aliceloop/daemon && npm run build --workspace @aliceloop/desktop",
     "dev:daemon": "npm run dev --workspace @aliceloop/daemon",
     "dev:desktop": "npm run dev --workspace @aliceloop/desktop",
-    "smoke:daemon": "npm run smoke:all --workspace @aliceloop/daemon",
+    "smoke": "npm run smoke:daemon",
+    "smoke:daemon": "npm run smoke --workspace @aliceloop/daemon",
+    "smoke:desktop-ui": "npm run smoke:ui --workspace @aliceloop/desktop",
+    "test": "npm run typecheck && npm run test:integration && npm run smoke",
+    "test:e2e": "npm run test:e2e --workspace @aliceloop/desktop",
+    "test:integration": "npm run test:integration --workspace @aliceloop/daemon",
     "typecheck": "npm run typecheck --workspace @aliceloop/runtime-core && npm run typecheck --workspace @aliceloop/pdf-ingest && npm run typecheck --workspace @aliceloop/daemon && npm run typecheck --workspace @aliceloop/desktop"
   },
   "workspaces": [

@@ -45,21 +45,21 @@ function createSpeechDemoWav(outputDir: string) {
 }
 
 async function main() {
-  const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-desktop-relay-smoke-"));
+  const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-desktop-relay-integration-"));
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
   const speechFixture = createSpeechDemoWav(tempDataDir);
 
   const relayUserData = mkdtempSync(join(tmpdir(), "aliceloop-relay-user-"));
   const [{ ChromeRelayService, createDefaultChromeRelayServiceOptions }, { ChromeRelayHttpServer }] = await Promise.all([
-    import("../../desktop/src/main/chromeRelayService.ts"),
-    import("../../desktop/src/main/chromeRelayHttpServer.ts"),
+    import("../../../desktop/src/main/chromeRelayService.ts"),
+    import("../../../desktop/src/main/chromeRelayHttpServer.ts"),
   ]);
 
   const pageServer = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/form") {
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.end(`<!doctype html><html><body><h1>Relay Smoke</h1><form action="/done" method="GET"><label>Name <input name="name" /></label><button type="submit">Submit</button></form></body></html>`);
+      response.end(`<!doctype html><html><body><h1>Relay Integration</h1><form action="/done" method="GET"><label>Name <input name="name" /></label><button type="submit">Submit</button></form></body></html>`);
       return;
     }
 
@@ -143,23 +143,23 @@ async function main() {
 
   const [
     { createSession, heartbeatDevice, getSessionSnapshot },
-    { setBrowserSessionPreference },
+    { getBrowserSession, setBrowserSessionPreference },
     { createBrowserTools },
     { createWebFetchTool },
     { createWebSearchTool },
   ] = await Promise.all([
-    import("../src/repositories/sessionRepository.ts"),
-    import("../src/context/tools/browserSessionRegistry.ts"),
-    import("../src/context/tools/browserTool.ts"),
-    import("../src/context/tools/webFetchTool.ts"),
-    import("../src/context/tools/webSearchTool.ts"),
+    import("../../src/repositories/sessionRepository.ts"),
+    import("../../src/context/tools/browserSessionRegistry.ts"),
+    import("../../src/context/tools/browserTool.ts"),
+    import("../../src/context/tools/webFetchTool.ts"),
+    import("../../src/context/tools/webSearchTool.ts"),
   ]);
 
-  const session = createSession("desktop relay smoke");
+  const session = createSession("desktop relay integration");
   heartbeatDevice({
-    deviceId: "desktop-relay-smoke",
+    deviceId: "desktop-relay-integration",
     deviceType: "desktop",
-    label: "Aliceloop Desktop Smoke",
+    label: "Aliceloop Desktop Integration",
     sessionId: session.id,
     capabilities: relayMeta,
   });
@@ -168,6 +168,21 @@ async function main() {
   assert.equal(snapshot.devices[0]?.capabilities?.browserRelay?.backend, "desktop_chrome");
 
   setBrowserSessionPreference(session.id, "desktop_chrome");
+  const browserSession = getBrowserSession(session.id);
+  browserSession.backend = "desktop_chrome";
+  browserSession.relayBaseUrl = relayMeta.browserRelay.baseUrl;
+  const seedTabResponse = await fetch(`${relayBaseUrl}/tabs/open`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: "{}",
+  });
+  const seedTabBody = await seedTabResponse.text();
+  assert.equal(seedTabResponse.ok, true, `desktop relay integration should seed a relay tab: ${seedTabBody}`);
+  const seedTab = JSON.parse(seedTabBody) as { tabId?: string };
+  assert.ok(seedTab.tabId, "desktop relay integration should receive a seeded tab id");
+  browserSession.tabId = seedTab.tabId;
   const browserTools = createBrowserTools(session.id);
   const formUrl = `http://127.0.0.1:${address.port}/form`;
   const navigatePayload = JSON.parse(await browserTools.browser_navigate.execute({ url: formUrl }));
@@ -272,5 +287,5 @@ async function main() {
 
 void main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

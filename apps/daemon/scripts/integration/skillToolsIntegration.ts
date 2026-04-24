@@ -1,19 +1,8 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-interface BrowserSnapshotPayload {
-  url: string;
-  title: string;
-  pageText: string;
-  elements: Array<{
-    ref: string;
-    tag: string;
-    value: string;
-  }>;
-}
 
 async function listen(server: ReturnType<typeof createServer>) {
   await new Promise<void>((resolve, reject) => {
@@ -28,6 +17,7 @@ async function listen(server: ReturnType<typeof createServer>) {
 async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-skill-tools-"));
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
+  process.env.ALICELOOP_PROVIDER_KEYCHAIN_SERVICE = `Aliceloop Skill Tools Integration ${Date.now()}`;
 
   const [
     { createPermissionSandboxExecutor },
@@ -47,15 +37,15 @@ async function main() {
     },
     { routeToolNamesForTurn },
   ] = await Promise.all([
-    import("../src/services/sandboxExecutor.ts"),
-    import("../src/context/tools/toolRegistry.ts"),
-    import("../src/context/tools/skillToolFactories.ts"),
-    import("../src/context/index.ts"),
-    import("../src/repositories/sessionRepository.ts"),
-    import("../src/context/session/sessionContext.ts"),
-    import("../src/context/tools/viewImageTool.ts"),
-    import("../src/context/skills/skillLoader.ts"),
-    import("../src/context/tools/toolRouter.ts"),
+    import("../../src/services/sandboxExecutor.ts"),
+    import("../../src/context/tools/toolRegistry.ts"),
+    import("../../src/context/tools/skillToolFactories.ts"),
+    import("../../src/context/index.ts"),
+    import("../../src/repositories/sessionRepository.ts"),
+    import("../../src/context/session/sessionContext.ts"),
+    import("../../src/context/tools/viewImageTool.ts"),
+    import("../../src/context/skills/skillLoader.ts"),
+    import("../../src/context/tools/toolRouter.ts"),
   ]);
 
   resetSkillToolCache();
@@ -479,7 +469,7 @@ async function main() {
   );
   assert.equal(typeof researchToolSet.web_search, "object", "research turns should inject web_search");
   assert.equal("bash" in researchToolSet, true, "research turns should inject bash when the routed web-search skill explicitly asks for it");
-  assert.equal("web_fetch" in researchToolSet, true, "research turns should inject web_fetch when the routed web-search skill declares it");
+  assert.equal("web_fetch" in researchToolSet, false, "initial research turns should keep web_fetch out until page content is needed");
   assert.equal("browser_navigate" in researchToolSet, false, "research turns should not inject browser tools by default");
 
   const imageToolSet = buildToolSet(
@@ -920,7 +910,7 @@ async function main() {
     "plain complaint follow-ups should not inherit research web_search routing",
   );
   assert.equal(
-    researchCarryoverGuardContext.routedSkillIds.includes("web-search"),
+    researchCarryoverGuardContext.displaySkillIds.includes("web-search"),
     false,
     "plain complaint follow-ups should not carry the research skill into the next turn",
   );
@@ -995,7 +985,7 @@ async function main() {
     "deepening a research follow-up after search evidence should also attach web_fetch",
   );
   assert(
-    researchDeepeningContext.routedSkillIds.includes("web-fetch"),
+    researchDeepeningContext.displaySkillIds.includes("web-fetch"),
     "deepening a research follow-up after search evidence should route the web-fetch skill",
   );
   assert.deepEqual(
@@ -1069,7 +1059,7 @@ async function main() {
     "status-update follow-ups after evidence should also attach web_fetch",
   );
   assert(
-    researchStatusUpdateContext.routedSkillIds.includes("web-fetch"),
+    researchStatusUpdateContext.displaySkillIds.includes("web-fetch"),
     "status-update follow-ups after evidence should route the web-fetch skill",
   );
   assert(
@@ -1251,7 +1241,7 @@ async function main() {
   });
   const weatherContext = await loadContext(weatherSession.id, controller.signal);
   assert.equal(typeof weatherContext.tools.web_search, "object", "weather questions should inject web_search");
-  assert.equal("web_fetch" in weatherContext.tools, true, "weather questions should inject web_fetch when the routed research skill declares it");
+  assert.equal("web_fetch" in weatherContext.tools, false, "weather questions should start with web_search and keep web_fetch lazy");
   assert.equal("time_now" in weatherContext.tools, false, "weather questions should not inject time tools");
   const weatherSystemPrompt = Array.isArray(weatherContext.systemPrompt)
     ? weatherContext.systemPrompt.map((message) => message.content).join("\n\n")
@@ -1273,7 +1263,7 @@ async function main() {
   });
   const creatorMetricContext = await loadContext(creatorMetricSession.id, controller.signal);
   assert.equal(typeof creatorMetricContext.tools.web_search, "object", "creator metric turns should inject web_search");
-  assert.equal("web_fetch" in creatorMetricContext.tools, true, "creator metric turns should inject web_fetch when the routed research skill declares it");
+  assert.equal("web_fetch" in creatorMetricContext.tools, false, "creator metric turns should start with web_search and keep web_fetch lazy");
   const creatorMetricPrompt = Array.isArray(creatorMetricContext.systemPrompt)
     ? creatorMetricContext.systemPrompt.map((message) => message.content).join("\n\n")
     : creatorMetricContext.systemPrompt;
@@ -1399,7 +1389,6 @@ async function main() {
 
   await listen(server);
 
-  let disposeBrowser: (() => Promise<void>) | undefined;
   try {
     const address = server.address();
     if (!address || typeof address === "string") {
@@ -1582,74 +1571,9 @@ async function main() {
       "web_search should prioritize primary platform pages for generic creator metric queries",
     );
 
-    const browserNavigateTool = browserToolSet.browser_navigate as any;
-    const browserSnapshotTool = browserToolSet.browser_snapshot as any;
-    const browserTypeTool = browserToolSet.browser_type as any;
-    const browserClickTool = browserToolSet.browser_click as any;
-    const browserScreenshotTool = browserToolSet.browser_screenshot as any;
-    disposeBrowser = browserNavigateTool.__dispose;
-
-    const browserLanding = JSON.parse(
-      String(
-        await browserNavigateTool.execute({
-          url: `${baseUrl}/browser`,
-          waitUntil: "domcontentloaded",
-        }),
-      ),
-    ) as BrowserSnapshotPayload;
-    assert.equal(browserLanding.title, "Browser Smoke", "browser_navigate should load the browser smoke page");
-    const nameInputRef = browserLanding.elements.find((element) => element.tag === "input")?.ref;
-    const submitButtonRef = browserLanding.elements.find((element) => element.tag === "button")?.ref;
-    assert(nameInputRef, "browser snapshot should include an input ref");
-    assert(submitButtonRef, "browser snapshot should include a submit button ref");
-
-    const browserTyped = JSON.parse(
-      String(
-        await browserTypeTool.execute({
-          ref: nameInputRef,
-          text: "Skill Smoke",
-        }),
-      ),
-    ) as BrowserSnapshotPayload;
-    assert(
-      browserTyped.elements.some((element) => element.ref === nameInputRef && element.value === "Skill Smoke"),
-      "browser_type should update the input value",
-    );
-
-    const browserResult = JSON.parse(
-      String(
-        await browserClickTool.execute({
-          ref: submitButtonRef,
-          waitUntil: "load",
-        }),
-      ),
-    ) as BrowserSnapshotPayload;
-    assert(browserResult.url.includes("/browser/result?name=Skill+Smoke"), "browser_click should submit the form");
-    assert(browserResult.pageText.includes("Hello Skill Smoke"), "browser_click should return the destination snapshot");
-
-    const browserRefreshed = JSON.parse(
-      String(
-        await browserSnapshotTool.execute({
-          maxTextLength: 500,
-          maxElements: 10,
-        }),
-      ),
-    ) as BrowserSnapshotPayload;
-    assert.equal(browserRefreshed.title, "Browser Result", "browser_snapshot should read the current page");
-
-    const screenshotPath = join(tempDataDir, "browser-skill-smoke.png");
-    const browserScreenshot = JSON.parse(
-      String(
-        await browserScreenshotTool.execute({
-          outputPath: screenshotPath,
-        }),
-      ),
-    ) as { path: string; url: string };
-    assert.equal(browserScreenshot.path, screenshotPath, "browser_screenshot should return the saved path");
-    assert.equal(existsSync(screenshotPath), true, "browser_screenshot should write the PNG file");
   } finally {
+    delete process.env.ALICELOOP_PROVIDER_KEYCHAIN_SERVICE;
     delete process.env.ALICELOOP_WEB_SEARCH_ENDPOINT;
-    await disposeBrowser?.();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error) {

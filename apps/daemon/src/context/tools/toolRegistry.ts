@@ -123,6 +123,46 @@ function addTool(tools: ToolSet, toolName: string, source: ToolSet) {
   tools[toolName] = source[toolName];
 }
 
+function getToolSearchGroup(toolName: string): Pick<ToolSearchCatalogEntry, "groupId" | "groupLabel"> {
+  if (toolName === "tool_search" || toolName === "tool_search_tool_bm25" || toolName === "agent" || toolName === "task" || toolName === "skill") {
+    return { groupId: "agentic", groupLabel: "Agent & Skills" };
+  }
+
+  if (toolName === "document_ingest" || toolName === "review_coach") {
+    return { groupId: "workflow", groupLabel: "Workflow" };
+  }
+
+  if (toolName.startsWith("runtime_script_")) {
+    return { groupId: "runtime", groupLabel: "Runtime Scripts" };
+  }
+
+  if (toolName.startsWith("browser_")) {
+    return { groupId: "browser", groupLabel: "Browser" };
+  }
+
+  if (toolName.startsWith("chrome_relay_")) {
+    return { groupId: "chrome_relay", groupLabel: "Chrome Relay" };
+  }
+
+  if (toolName === "web_search" || toolName === "web_fetch") {
+    return { groupId: "web", groupLabel: "Web" };
+  }
+
+  if (toolName === "audio_understand" || toolName === "view_image") {
+    return { groupId: "media", groupLabel: "Media" };
+  }
+
+  if (toolName === "bash") {
+    return { groupId: "shell", groupLabel: "Shell" };
+  }
+
+  if (["grep", "glob", "read", "write", "edit"].includes(toolName)) {
+    return { groupId: "filesystem", groupLabel: "File Ops" };
+  }
+
+  return { groupId: "other", groupLabel: "Other" };
+}
+
 function buildToolSearchCatalog(
   sandboxTools: ToolSet,
   orderedTools: ToolSet,
@@ -133,6 +173,7 @@ function buildToolSearchCatalog(
     description: sandboxTools[toolName]?.description ?? "",
     attached: toolName in orderedTools,
     lifecycle: "base",
+    ...getToolSearchGroup(toolName),
   }));
 
   const discoverableToolNames = listAvailableToolAdapterNames().filter((toolName) => {
@@ -146,14 +187,24 @@ function buildToolSearchCatalog(
       description: toolDefinition.description ?? "",
       attached: toolName in orderedTools,
       lifecycle: getToolSchemaLifecycle(toolName),
+      ...getToolSearchGroup(toolName),
     });
   }
 
   catalog.push({
+    name: "tool_search",
+    description: "Agent-side tool discovery utility for searching Aliceloop's available tools by capability, name, and description.",
+    attached: true,
+    lifecycle: "dynamic",
+    ...getToolSearchGroup("tool_search"),
+  });
+
+  catalog.push({
     name: "tool_search_tool_bm25",
-    description: "Anthropic BM25 server-side tool search for deferred tools when the current provider supports it.",
+    description: "Anthropic BM25 server-side tool discovery utility for deferred tools when the current provider supports it.",
     attached: "tool_search_tool_bm25" in orderedTools,
     lifecycle: "external",
+    ...getToolSearchGroup("tool_search_tool_bm25"),
   });
 
   return catalog;

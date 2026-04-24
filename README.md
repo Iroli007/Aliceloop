@@ -48,9 +48,28 @@ npm run typecheck
 npm run build
 ```
 
-Useful daemon smoke checks:
+## Test Commands
 
 ```bash
-npm run smoke:tasks --workspace @aliceloop/daemon
-npm run smoke:tasks:api --workspace @aliceloop/daemon
+npm run smoke
+npm run test:integration
+npm run test:e2e
+npm test
+```
+
+Daemon smoke is the fast main-path check: health, session creation, message persistence, local fallback assistant reply, and runtime catalog projection. Domain coverage lives under integration scripts:
+
+```bash
+npm run integration:skills --workspace @aliceloop/daemon
+npm run integration:api --workspace @aliceloop/daemon
+npm run integration:sandbox --workspace @aliceloop/daemon
+npm run smoke:desktop-ui
+```
+
+Local browser backend checks are kept as opt-in integration scripts because they depend on a working desktop browser/relay environment:
+
+```bash
+npm run integration:chrome-relay --workspace @aliceloop/daemon
+npm run integration:desktop-relay --workspace @aliceloop/daemon
+npm run integration:pinchtab-browser --workspace @aliceloop/daemon
 ```

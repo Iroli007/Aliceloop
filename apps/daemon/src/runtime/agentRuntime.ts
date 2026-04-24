@@ -7,11 +7,9 @@ import { getLatestUserMessage } from "../context/session/sessionContext";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
 import { hasHealthyDesktopRelay } from "../context/tools/desktopRelayResearch";
 import { createProviderModel } from "../providers/providerModelFactory";
+import { getToolModelConfig } from "../providers/toolModelResolver";
 import { publishSessionEvent } from "../realtime/sessionStreams";
-import {
-  type StoredProviderConfig,
-  getActiveProviderConfig,
-} from "../repositories/providerRepository";
+import { type StoredProviderConfig } from "../repositories/providerRepository";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
 import {
   appendSessionEvent,
@@ -68,7 +66,7 @@ function publishRuntimeNotice(sessionId: string, content: string) {
   void syncSessionProjectHistory(sessionId).catch(() => {});
 }
 
-function publishAssistantReply(sessionId: string, content: string) {
+function publishAssistantReply(sessionId: string, content: string, eventPayload?: Record<string, unknown>) {
   const result = createSessionMessage({
     sessionId,
     clientMessageId: `assistant-reply-${randomUUID()}`,
@@ -76,6 +74,7 @@ function publishAssistantReply(sessionId: string, content: string) {
     role: "assistant",
     content,
     attachmentIds: [],
+    eventPayload,
   });
 
   for (const event of result.events) {
@@ -406,7 +405,7 @@ interface AgentRun {
 }
 
 async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: string): Promise<AgentRun | null> {
-  const activeProvider = getActiveProviderConfig();
+  const activeProvider = getToolModelConfig();
 
   if (!activeProvider || !activeProvider.apiKey) {
     publishAssistantReply(sessionId, buildLocalFallbackReply(getLatestUserMessage(sessionId)));

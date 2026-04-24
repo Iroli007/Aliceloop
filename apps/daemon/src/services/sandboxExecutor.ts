@@ -34,6 +34,7 @@ export function createPermissionSandboxExecutor(options: SandboxExecutorOptions)
   const seatbeltEnabled = isSeatbeltAvailable() && (hasFilesystemBoundary || !toolPolicy.fullAccess);
   const context = {
     label: options.label,
+    sessionId: options.sessionId ?? null,
     toolPolicy,
     runtimePolicy,
     autoApproveToolRequests: options.autoApproveToolRequests ?? false,

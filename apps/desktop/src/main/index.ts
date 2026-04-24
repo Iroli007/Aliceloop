@@ -1,18 +1,23 @@
 import { app, BrowserWindow, dialog, ipcMain, screen, shell } from "electron";
 import { focusOrCreateSettingsWindow } from "./settingsWindow";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, relative } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const daemonBaseUrl = process.env.ALICELOOP_DAEMON_URL ?? "http://127.0.0.1:3030";
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const userDataOverride = process.env.ALICELOOP_DESKTOP_USER_DATA_DIR?.trim();
 
 const devServerUrl = process.env.ELECTRON_RENDERER_URL;
 const debugCaptureEnabled = process.env.ALICELOOP_DEBUG_CAPTURE === "1";
 const HEARTBEAT_INTERVAL_MS = 10_000;
 let desktopHeartbeatTimer: NodeJS.Timeout | null = null;
+
+if (userDataOverride) {
+  app.setPath("userData", resolve(userDataOverride));
+}
 
 async function getStableDesktopDeviceId() {
   const filePath = join(app.getPath("userData"), "desktop-device-id");

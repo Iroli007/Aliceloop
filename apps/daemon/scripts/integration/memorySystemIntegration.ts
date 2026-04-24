@@ -50,7 +50,7 @@ async function waitForCondition(
 }
 
 async function startBuiltDaemon(env: NodeJS.ProcessEnv): Promise<StartedDaemon> {
-  const child = spawn("node", ["dist/index.js"], {
+  const child = spawn("npx", ["tsx", "src/index.ts"], {
     cwd: resolve(process.cwd()),
     env: {
       ...process.env,
@@ -142,11 +142,6 @@ async function main() {
   let daemon: StartedDaemon | null = null;
 
   try {
-    execFileSync("npm", ["run", "build", "--workspace", "@aliceloop/daemon"], {
-      cwd: resolve(process.cwd(), "../.."),
-      stdio: "ignore",
-    });
-
     const commonEnv = {
       ALICELOOP_DAEMON_PORT: String(basePort),
       ALICELOOP_DAEMON_HOST: "127.0.0.1",

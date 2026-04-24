@@ -23,13 +23,14 @@ async function listen(server: ReturnType<typeof createHttpServer>) {
 async function main() {
   const tempDataDir = mkdtempSync(join(tmpdir(), "aliceloop-cli-smoke-"));
   process.env.ALICELOOP_DATA_DIR = tempDataDir;
+  process.env.ALICELOOP_PROVIDER_KEYCHAIN_SERVICE = `Aliceloop CLI Integration ${Date.now()}`;
   process.env.ALICELOOP_SCHEDULER_POLL_MS = "100";
   process.env.ALICELOOP_TELEGRAM_BOT_TOKEN = "cli-smoke-bot-token";
 
   const [{ createServer }, { runCli }, { createSession, createSessionMessage, getSessionProjectBinding }] = await Promise.all([
-    import("../src/server.ts"),
-    import("../src/cli/index.ts"),
-    import("../src/repositories/sessionRepository.ts"),
+    import("../../src/server.ts"),
+    import("../../src/cli/index.ts"),
+    import("../../src/repositories/sessionRepository.ts"),
   ]);
 
   const session = createSession("CLI Smoke Session");
@@ -515,6 +516,7 @@ async function main() {
     );
   } finally {
     delete process.env.ALICELOOP_DAEMON_URL;
+    delete process.env.ALICELOOP_PROVIDER_KEYCHAIN_SERVICE;
     delete process.env.ALICELOOP_SCHEDULER_POLL_MS;
     await new Promise((resolve, reject) => imageBackend.close((error) => (error ? reject(error) : resolve(undefined))));
     await server.close();

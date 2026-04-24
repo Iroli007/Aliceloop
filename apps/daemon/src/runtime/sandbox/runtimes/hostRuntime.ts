@@ -46,7 +46,7 @@ type HostRuntimeRunInput = {
 
 type DeleteTargetKind = "file" | "directory";
 
-function pickEnvironment() {
+function pickEnvironment(context?: Pick<SandboxRuntimeContext, "sessionId">) {
   const env: Record<string, string> = {};
   for (const key of [
     "ALICELOOP_DAEMON_HOST",
@@ -72,6 +72,10 @@ function pickEnvironment() {
   if (shimDir) {
     const currentPath = env.PATH?.trim();
     env.PATH = currentPath ? `${shimDir}:${currentPath}` : shimDir;
+  }
+
+  if (context?.sessionId) {
+    env.ALICELOOP_SESSION_ID = context.sessionId;
   }
 
   return env;
@@ -412,6 +416,7 @@ async function deletePathResult(
 }
 
 async function executeBashResult(
+  context: SandboxRuntimeContext,
   command: string,
   args: string[],
   cwd: string,
@@ -426,7 +431,7 @@ async function executeBashResult(
   const { stdout, stderr } = await execFileAsync(execution.executable, execution.args, {
     cwd,
     timeout: timeoutMs,
-    env: pickEnvironment(),
+    env: pickEnvironment(context),
     maxBuffer: maxBufferBytes,
   });
   return {
@@ -439,6 +444,7 @@ async function executeBashResult(
 }
 
 async function executeBashScriptResult(
+  context: SandboxRuntimeContext,
   script: string,
   cwd: string,
   timeoutMs: number,
@@ -455,7 +461,7 @@ async function executeBashScriptResult(
   const { stdout, stderr } = await execFileAsync(execution.executable, execution.args, {
     cwd,
     timeout: timeoutMs,
-    env: pickEnvironment(),
+    env: pickEnvironment(context),
     maxBuffer: maxBufferBytes,
   });
   return {
@@ -941,8 +947,8 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
         ? (shouldBypassSeatbeltForScript(context, scriptCommands) ? null : buildSeatbeltProfileForContext(context))
         : (shouldBypassSeatbeltForCommand(context, command) ? null : buildSeatbeltProfileForContext(context));
       return script
-        ? executeBashScriptResult(script, cwd, timeoutMs, context.maxBufferBytes, profile)
-        : executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes, profile);
+        ? executeBashScriptResult(context, script, cwd, timeoutMs, context.maxBufferBytes, profile)
+        : executeBashResult(context, command, args, cwd, timeoutMs, context.maxBufferBytes, profile);
     },
     async executeElevated() {
       if (deleteLikeBashApproval) {
@@ -952,8 +958,8 @@ async function runBash(context: SandboxRuntimeContext, input: RunBashInput) {
         await requestDeleteApproval(context, deleteLikeScriptApproval);
       }
       return script
-        ? executeBashScriptResult(script, cwd, timeoutMs, context.maxBufferBytes)
-        : executeBashResult(command, args, cwd, timeoutMs, context.maxBufferBytes);
+        ? executeBashScriptResult(context, script, cwd, timeoutMs, context.maxBufferBytes)
+        : executeBashResult(context, command, args, cwd, timeoutMs, context.maxBufferBytes);
     },
   });
 }

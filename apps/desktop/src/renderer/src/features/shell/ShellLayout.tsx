@@ -904,7 +904,9 @@ function buildTimeline(
     if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
       const payload = event.payload as { message?: { id?: unknown } };
       if (typeof payload.message?.id === "string") {
-        messageSeqById.set(payload.message.id, event.seq);
+        if (!messageSeqById.has(payload.message.id)) {
+          messageSeqById.set(payload.message.id, event.seq);
+        }
       }
     }
 
@@ -1124,6 +1126,28 @@ function buildTimeline(
   return blocks;
 }
 
+function buildMessageDisplayModeById(sessionEvents: SessionEvent[]) {
+  const next = new Map<string, string>();
+
+  for (const event of sessionEvents) {
+    if (event.type !== "message.created" && event.type !== "message.acked" && event.type !== "message.updated") {
+      continue;
+    }
+
+    const payload = event.payload as {
+      message?: { id?: unknown };
+      displayMode?: unknown;
+    };
+    if (typeof payload.message?.id !== "string" || typeof payload.displayMode !== "string") {
+      continue;
+    }
+
+    next.set(payload.message.id, payload.displayMode);
+  }
+
+  return next;
+}
+
 function getAssistantTurnRenderKey(
   sessionId: string,
   entry: Extract<TimelineBlock, { kind: "assistant-turn" }>,
@@ -1204,8 +1228,12 @@ function getAttachmentContentUrl(baseUrl: string | null, sessionId: string, atta
 function groupThreadsByDate(threads: ReturnType<typeof useShellConversation>["threads"]): ThreadGroup[] {
   const groups: ThreadGroup[] = [];
 
-  for (const thread of threads) {
-    const sourceDate = thread.latestMessageAt ?? thread.updatedAt ?? thread.createdAt;
+  const sortedThreads = [...threads].sort((left, right) =>
+    getThreadGroupSourceDate(right).localeCompare(getThreadGroupSourceDate(left))
+  );
+
+  for (const thread of sortedThreads) {
+    const sourceDate = getThreadGroupSourceDate(thread);
     const parts = getThreadDateParts(sourceDate) ?? {
       key: "unknown",
       label: "更早",
@@ -1227,6 +1255,10 @@ function groupThreadsByDate(threads: ReturnType<typeof useShellConversation>["th
   return groups;
 }
 
+function getThreadGroupSourceDate(thread: ReturnType<typeof useShellConversation>["threads"][number]) {
+  return thread.latestMessageAt ?? thread.updatedAt ?? thread.createdAt;
+}
+
 export function ShellLayout({ state }: ShellLayoutProps) {
   const { data } = state;
   const providerState = useProviderConfigs();
@@ -1234,7 +1266,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const runtimeSettings = useRuntimeSettings();
   const conversation = useShellConversation();
   const desktopBridge = getDesktopBridge();
-  const threadGroups = groupThreadsByDate(conversation.threads);
+  const threadGroups = groupThreadsByDate(conversation.threads.filter((thread) => thread.messageCount > 0));
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [sidebarMotion, setSidebarMotion] = useState<"opening" | "closing" | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -1274,6 +1306,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [reasoningDropdownOpen, setReasoningDropdownOpen] = useState(false);
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
+  const [threadDeleteTarget, setThreadDeleteTarget] = useState<ThreadGroup["threads"][number] | null>(null);
+  const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [selectedQuestionOptions, setSelectedQuestionOptions] = useState<string[]>([]);
@@ -1286,6 +1320,8 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const composerRef = useRef<HTMLFormElement | null>(null);
   const composerAddFileButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerFileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerDraftBySessionIdRef = useRef<Map<string, string>>(new Map());
+  const composerDraftSessionIdRef = useRef(conversation.sessionId);
   const shouldStickToBottomRef = useRef(true);
   const previousSessionIdRef = useRef<string | null>(null);
   const previousViewportHeightRef = useRef<number | null>(null);
@@ -1295,7 +1331,11 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const providers = providerState.providers;
   const configuredProviders = providers.filter((provider) => provider.hasApiKey);
   const activeProvider = providers.find((item) => item.id === activeProviderId) ?? providers[0] ?? null;
-  const enabledProvider = configuredProviders.find((item) => item.enabled)
+  const selectedRuntimeProvider = runtimeSettings.settings.toolProviderId
+    ? providers.find((item) => item.id === runtimeSettings.settings.toolProviderId)
+    : null;
+  const enabledProvider = selectedRuntimeProvider
+    ?? configuredProviders.find((item) => item.enabled)
     ?? providers.find((item) => item.enabled) ?? null;
   const currentModeLabel = conversation.planMode.active
     ? (conversation.exitingPlanMode ? "计划中…" : "计划模式")
@@ -1398,9 +1438,13 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       return new Map<string, PlanMessageMeta>();
     }
 
+    const messageDisplayModeById = buildMessageDisplayModeById(conversation.sessionEvents);
     const next = new Map<string, PlanMessageMeta>();
     for (const message of conversation.messages) {
       if (message.role !== "assistant") {
+        continue;
+      }
+      if (messageDisplayModeById.get(message.id) === "tool_inventory") {
         continue;
       }
       const planMeta = extractPlanMessageMeta(message.content);
@@ -1409,7 +1453,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       }
     }
     return next;
-  }, [conversation.messages, activePlanMeta]);
+  }, [conversation.messages, conversation.sessionEvents, activePlanMeta]);
   const activeQuestionApproval = useMemo(() => {
     if (!conversation.planMode.active) {
       return null;
@@ -1471,6 +1515,11 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     "--composer-reserve-space": `${composerReserveSpace}px`,
   } as CSSProperties;
 
+  function setComposerDraftForCurrentSession(nextDraft: string) {
+    composerDraftBySessionIdRef.current.set(conversation.sessionId, nextDraft);
+    setComposerDraft(nextDraft);
+  }
+
   useEffect(() => {
     return () => {
       if (motionTimerRef.current) {
@@ -1505,6 +1554,19 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   useEffect(() => {
     setSelectedQuestionOptions([]);
   }, [activeQuestionApproval?.id]);
+
+  useEffect(() => {
+    const previousSessionId = composerDraftSessionIdRef.current;
+    if (previousSessionId === conversation.sessionId) {
+      return;
+    }
+
+    composerDraftBySessionIdRef.current.set(previousSessionId, composerDraft);
+    composerDraftSessionIdRef.current = conversation.sessionId;
+    setComposerDraft(composerDraftBySessionIdRef.current.get(conversation.sessionId) ?? "");
+    setComposerNotice(null);
+    setQueuedAttachments([]);
+  }, [conversation.sessionId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1832,6 +1894,16 @@ export function ShellLayout({ state }: ShellLayoutProps) {
         setProviderNotice(`${result.config?.label ?? activeProvider.label} 已保存，但其他已启用模型没有全部关闭。`);
         return;
       }
+
+      const runtimeResult = await runtimeSettings.save({
+        toolProviderId: activeProvider.id,
+        toolModel: providerModelInput.trim() || activeProvider.model,
+      });
+      if (!runtimeResult.ok) {
+        setProviderApiKeyInput("");
+        setProviderNotice(runtimeResult.error ?? "模型已保存，但固定运行模型失败。");
+        return;
+      }
     }
 
     setProviderApiKeyInput("");
@@ -1873,7 +1945,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           return;
         }
 
-        setComposerDraft("");
+        setComposerDraftForCurrentSession("");
         setQueuedAttachments([]);
         setApprovalAttachments([]);
         return;
@@ -1888,7 +1960,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       return;
     }
 
-    setComposerDraft("");
+    setComposerDraftForCurrentSession("");
     setQueuedAttachments([]);
     setSelectedQuestionOptions([]);
   }
@@ -1901,7 +1973,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     setComposerNotice(null);
     const result = await conversation.sendMessage(option);
     if (!result.ok) {
-      setComposerDraft(option);
+      setComposerDraftForCurrentSession(option);
       setComposerNotice(result.error ?? "发送失败");
     }
   }
@@ -1923,7 +1995,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     setComposerNotice(null);
     const result = await conversation.sendMessage(option);
     if (!result.ok) {
-      setComposerDraft(option);
+      setComposerDraftForCurrentSession(option);
       setComposerNotice(result.error ?? "发送失败");
       return;
     }
@@ -1986,6 +2058,23 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     if (!result.ok) {
       setThreadNotice(result.error ?? "新建线程失败");
     }
+  }
+
+  async function confirmDeleteThread() {
+    if (!threadDeleteTarget) {
+      return;
+    }
+
+    setThreadNotice(null);
+    setDeletingThreadId(threadDeleteTarget.id);
+    const result = await conversation.deleteSession(threadDeleteTarget.id);
+    setDeletingThreadId(null);
+    if (!result.ok) {
+      setThreadNotice(result.error ?? "删除线程失败");
+      return;
+    }
+
+    setThreadDeleteTarget(null);
   }
 
   async function installMcpServer(serverId: string) {
@@ -2328,9 +2417,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     <div className="sidebar__thread-section-label">{group.label}</div>
                     <div className="sidebar__thread-list">
                       {group.threads.map((thread) => (
-                        <button
+                        <div
                           key={thread.id}
-                          type="button"
+                          role="button"
+                          tabIndex={0}
                           className={`sidebar__thread-item${
                             thread.id === conversation.sessionId ? " sidebar__thread-item--active" : ""
                           }`}
@@ -2339,18 +2429,52 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             setQueuedAttachments([]);
                             conversation.selectSession(thread.id);
                           }}
-                          >
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" && event.key !== " ") {
+                              return;
+                            }
+
+                            event.preventDefault();
+                            setThreadNotice(null);
+                            setQueuedAttachments([]);
+                            conversation.selectSession(thread.id);
+                          }}
+                        >
                           <div className="sidebar__thread-row">
                             <span className="sidebar__thread-title">
                               {thread.title}
                               {thread.planMode?.active ? <span className="sidebar__thread-plan-marker">计划中</span> : null}
                             </span>
-                            <span className="sidebar__thread-id">{formatThreadId(thread.id)}</span>
+                            <span className="sidebar__thread-meta">
+                              <span className="sidebar__thread-id">{formatThreadId(thread.id)}</span>
+                              <button
+                                type="button"
+                                className="sidebar__thread-delete"
+                                aria-label={`Delete thread ${thread.title}`}
+                                title="Delete thread"
+                                onKeyDown={(event) => {
+                                  event.stopPropagation();
+                                }}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setThreadNotice(null);
+                                  setThreadDeleteTarget(thread);
+                                }}
+                              >
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                  <path d="M4 7h16" />
+                                  <path d="M10 11v6" />
+                                  <path d="M14 11v6" />
+                                  <path d="M6.5 7l.7 13h9.6l.7-13" />
+                                  <path d="M9 7V4.8h6V7" />
+                                </svg>
+                              </button>
+                            </span>
                           </div>
                           <div className="sidebar__thread-preview">
                             {thread.latestMessagePreview ?? "还没有消息，先开始一段新对话。"}
                           </div>
-                        </button>
+                        </div>
                       ))}
                     </div>
                   </section>
@@ -2963,7 +3087,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
             <textarea
               className="composer__input composer__input--field"
               value={composerDraft}
-              onChange={(event) => setComposerDraft(event.target.value)}
+              onChange={(event) => setComposerDraftForCurrentSession(event.target.value)}
               onPaste={(event) => { void handleComposerPaste(event); }}
               onKeyDown={handleComposerKeyDown}
               placeholder="输入消息，或直接粘贴图片..."
@@ -3012,11 +3136,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                           key={provider.id}
                           type="button"
                           className={`composer__dropdown-item${provider.enabled ? " composer__dropdown-item--active" : ""}`}
-                          onClick={() => {
-                            void providerState.save({ providerId: provider.id, baseUrl: provider.baseUrl, model: provider.model, enabled: true });
-                            providers.filter((p) => p.id !== provider.id && p.enabled).forEach((p) => {
-                              void providerState.save({ providerId: p.id, baseUrl: p.baseUrl, model: p.model, enabled: false });
-                            });
+                          onClick={async () => {
+                            const enableResult = await providerState.save({ providerId: provider.id, baseUrl: provider.baseUrl, model: provider.model, enabled: true });
+                            if (!enableResult.ok) {
+                              return;
+                            }
+                            await Promise.all(providers.filter((p) => p.id !== provider.id && p.enabled).map((p) =>
+                              providerState.save({ providerId: p.id, baseUrl: p.baseUrl, model: p.model, enabled: false })
+                            ));
+                            await runtimeSettings.save({ toolProviderId: provider.id, toolModel: provider.model });
                             setModelDropdownOpen(false);
                           }}
                         >
@@ -3175,6 +3303,33 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           ) : null}
         </main>
       </div>
+
+      {threadDeleteTarget ? (
+        <div className="thread-delete-overlay" onClick={() => setThreadDeleteTarget(null)}>
+          <section className="thread-delete-modal" onClick={(event) => event.stopPropagation()}>
+            <h2>Delete Thread</h2>
+            <p>Are you sure you want to delete this thread? This action cannot be undone.</p>
+            <footer className="thread-delete-modal__actions">
+              <button
+                type="button"
+                className="thread-delete-modal__button"
+                onClick={() => setThreadDeleteTarget(null)}
+                disabled={deletingThreadId === threadDeleteTarget.id}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="thread-delete-modal__button thread-delete-modal__button--danger"
+                onClick={() => void confirmDeleteThread()}
+                disabled={deletingThreadId === threadDeleteTarget.id}
+              >
+                {deletingThreadId === threadDeleteTarget.id ? "Deleting..." : "Delete"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
 
       {isSettingsOpen ? (
         <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>

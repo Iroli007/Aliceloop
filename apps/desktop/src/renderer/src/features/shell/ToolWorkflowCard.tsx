@@ -78,6 +78,10 @@ function formatToolLabel(toolName: string) {
     .join(" ");
 }
 
+function isToolSearchTool(toolName: string) {
+  return toolName === "tool_search" || toolName === "tool_search_tool_bm25";
+}
+
 function pickFirstString(value: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const candidate = value[key];
@@ -741,6 +745,18 @@ function isBashLikeCommand(entry: ToolWorkflowEntry) {
 export function buildSummaryTitle(entry: ToolWorkflowEntry) {
   const resolvedInput = resolveEntryInput(entry);
 
+  if (isToolSearchTool(entry.toolName)) {
+    const query = isRecord(resolvedInput)
+      ? pickFirstString(resolvedInput, ["query", "q"])
+      : typeof resolvedInput === "string"
+        ? resolvedInput
+        : entry.inputPreview;
+    if (query) {
+      return `ToolSearch · ${compactInline(query, 26)}`;
+    }
+    return "ToolSearch";
+  }
+
   if (entry.toolName === "web_search") {
     const query = isRecord(resolvedInput)
       ? pickFirstString(resolvedInput, ["query", "q"])
@@ -1113,6 +1129,7 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
   const summaryTitle = buildSummaryTitle(entry);
   const argumentsBlock = formatArgumentsBlock(entry);
   const resultBlock = formatResultBlock(entry);
+  const isToolDiscoveryCard = isToolSearchTool(entry.toolName);
   const planDraft = entry.toolName === "write" && typeof resultBlock === "string"
     ? extractStructuredPlanDraft(resultBlock)
     : null;
@@ -1120,7 +1137,7 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
   const durationLabel = formatDurationLabel(entry);
   const primaryDetailLabel = getPrimaryDetailLabel(entry.toolName);
   const bashDisplay = entry.toolName === "bash" ? buildBashDisplay(resolveEntryInput(entry)) : null;
-  const hasDetails = Boolean(argumentsBlock || resultBlock || entry.error || entry.backend || sourceLinks.length > 0);
+  const hasDetails = !isToolDiscoveryCard && Boolean(argumentsBlock || resultBlock || entry.error || entry.backend || sourceLinks.length > 0);
   const isNetworkTool = entry.toolName === "web_search" || entry.toolName === "web_fetch";
   const resultDetailLabel = "结果";
   const commandDetailLabel = isBashLikeCommand(entry) ? (bashDisplay?.label ?? "命令") : primaryDetailLabel;

@@ -14,10 +14,10 @@ async function main() {
     { createSession },
     { isAliceloopGeneratedFile, markGeneratedFileDeleted, markSessionGeneratedFile },
   ] = await Promise.all([
-    import("../src/services/sandboxExecutor.ts"),
-    import("../src/repositories/sandboxRunRepository.ts"),
-    import("../src/repositories/sessionRepository.ts"),
-    import("../src/repositories/sessionGeneratedFileRepository.ts"),
+    import("../../src/services/sandboxExecutor.ts"),
+    import("../../src/repositories/sandboxRunRepository.ts"),
+    import("../../src/repositories/sessionRepository.ts"),
+    import("../../src/repositories/sessionGeneratedFileRepository.ts"),
   ]);
 
   const sourcePath = join(externalDir, "source.txt");
@@ -473,7 +473,7 @@ async function main() {
   assert(logs.some((run) => run.detail.includes("[elevated]") && run.status === "done"), "elevated runs should be logged");
 
   // ─── Seatbelt (macOS sandbox-exec) tests ───
-  const { isSeatbeltAvailable } = await import("../src/runtime/sandbox/seatbelt.ts");
+  const { isSeatbeltAvailable } = await import("../../src/runtime/sandbox/seatbelt.ts");
   const seatbeltAvailable = isSeatbeltAvailable();
   console.log(`seatbelt available: ${seatbeltAvailable}`);
 

@@ -36,4 +36,6 @@ aliceloop thread search <query>
 - Use `aliceloop thread search <query>` before `aliceloop thread info <id>`
 - When creating threads for the user, give them short descriptive titles
 - Always confirm before deleting threads
+- Never delete the current active thread that is executing this request
+- If the user asks to delete all threads, leave the current thread undeleted and only delete the others
 - Aliceloop does not currently expose a dedicated `thread switch` command; if the user wants a different thread, identify it first and then operate on that thread explicitly

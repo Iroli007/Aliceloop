@@ -8,7 +8,7 @@ function sleep(ms: number) {
 
 async function main() {
   const [{ enqueueSessionRun, getQueuedSessionCount }] = await Promise.all([
-    import("../src/services/sessionRunQueue.ts"),
+    import("../../src/services/sessionRunQueue.ts"),
   ]);
 
   const events: string[] = [];

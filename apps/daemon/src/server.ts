@@ -220,6 +220,7 @@ interface HeartbeatBody {
 interface CreateSessionBody {
   title?: string;
   projectId?: string | null;
+  reuseDraft?: boolean;
 }
 
 interface CreateProjectBody {
@@ -1238,6 +1239,7 @@ export async function createServer() {
       return createSession({
         title: request.body?.title,
         projectId: request.body?.projectId,
+        reuseDraft: request.body?.reuseDraft,
       });
     } catch (error) {
       if (error instanceof ProjectDirectoryNotFoundError) {

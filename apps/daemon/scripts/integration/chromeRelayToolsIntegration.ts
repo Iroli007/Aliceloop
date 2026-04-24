@@ -51,8 +51,8 @@ async function main() {
   }
 
   const [{ ChromeRelayService, createDefaultChromeRelayServiceOptions }, { ChromeRelayHttpServer }] = await Promise.all([
-    import("../../desktop/src/main/chromeRelayService.ts"),
-    import("../../desktop/src/main/chromeRelayHttpServer.ts"),
+    import("../../../desktop/src/main/chromeRelayService.ts"),
+    import("../../../desktop/src/main/chromeRelayHttpServer.ts"),
   ]);
 
   const relayService = new ChromeRelayService(createDefaultChromeRelayServiceOptions(relayUserData));
@@ -65,8 +65,8 @@ async function main() {
     { createSession, heartbeatDevice },
     { createChromeRelayTools },
   ] = await Promise.all([
-    import("../src/repositories/sessionRepository.ts"),
-    import("../src/context/tools/chromeRelayTool.ts"),
+    import("../../src/repositories/sessionRepository.ts"),
+    import("../../src/context/tools/chromeRelayTool.ts"),
   ]);
 
   const session = createSession("chrome relay tool smoke");

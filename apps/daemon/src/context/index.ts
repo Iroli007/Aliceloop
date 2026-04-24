@@ -178,6 +178,7 @@ export async function loadContext(
   const sandboxStartedAt = nowMs();
   const sandbox = createPermissionSandboxExecutor({
     label: `agent:${sessionId}`,
+    sessionId,
     permissionProfile: "full-access",
     autoApproveToolRequests,
     workspaceRoot: workspaceProject.path,
@@ -291,10 +292,16 @@ export async function loadContext(
   } = buildSystemPromptFromSections(persona, [
     cachedSystemPromptSection(
       "tool_search_guidance",
-      "tool_search_tool_bm25" in tools
+      "tool_search" in tools || "tool_search_tool_bm25" in tools
         ? [
-            "## Deferred Tool Discovery",
-            "- A BM25 tool search tool is available for this turn: use `tool_search_tool_bm25` when you need a more specialized tool that is not currently visible in the loaded tool set.",
+            "## Tool Discovery",
+            "- `tool_search` is a discovery/orchestration utility. When you explain the tool stack to the user, group it with agent/skill/task-style capabilities rather than the core file-editing base tools.",
+            "- For broad inventory requests such as \"what tools do you have\", run tool search across multiple capability areas and then summarize the combined coverage by category.",
+            ...("tool_search_tool_bm25" in tools
+              ? [
+                  "- A BM25 tool search tool is also available for this turn: use `tool_search_tool_bm25` when you need a more specialized tool that is not currently visible in the loaded tool set.",
+                ]
+              : []),
             "- Many less-common tools are intentionally deferred to preserve context and prompt caching. Search with natural language, then use the discovered tool references instead of assuming the capability is missing.",
             "- Keep using already loaded core tools directly for common work: file editing, bash, web search/fetch, image viewing, and the basic browser entry tools.",
           ].join("\n")

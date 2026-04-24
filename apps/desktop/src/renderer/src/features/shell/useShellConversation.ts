@@ -170,6 +170,7 @@ export interface ShellConversationState {
     originalPath?: string;
   }): Promise<UploadResult>;
   uploadPreparedFolder(input: FolderUploadPayload): Promise<UploadResult>;
+  deleteSession(sessionId: string): Promise<SendResult>;
   stopResponse(): Promise<SendResult>;
   enterPlanMode(): Promise<SendResult>;
   exitPlanMode(): Promise<SendResult>;
@@ -305,8 +306,12 @@ function isQuestionApproval(approval: ToolApproval) {
 function upsertThread(threads: SessionThreadSummary[], thread: SessionThreadSummary) {
   const next = threads.filter((item) => item.id !== thread.id);
   next.unshift(thread);
-  next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  next.sort((left, right) => getThreadActivityTime(right).localeCompare(getThreadActivityTime(left)));
   return next;
+}
+
+function getThreadActivityTime(thread: SessionThreadSummary) {
+  return thread.latestMessageAt ?? thread.updatedAt ?? thread.createdAt;
 }
 
 function buildThreadFromSnapshot(snapshot: SessionSnapshot): SessionThreadSummary {
@@ -409,7 +414,7 @@ function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
     ...current,
     session: {
       id: localDraftSessionId,
-      title: "新对话",
+      title: "New Chat",
       createdAt: now,
       updatedAt: now,
     },
@@ -578,7 +583,7 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
 async function fetchSessionThreads(baseUrl: string) {
   const response = await fetch(`${baseUrl}/api/sessions`);
   if (!response.ok) {
-    throw new Error(`Failed to load session threads (${response.status})`);
+    throw new RequestStatusError(`Failed to load session threads (${response.status})`, response.status);
   }
 
   return ((await response.json()) as SessionThreadSummary[]).map(normalizeThread);
@@ -587,7 +592,7 @@ async function fetchSessionThreads(baseUrl: string) {
 async function fetchSessionSnapshot(baseUrl: string, sessionId: string) {
   const response = await fetch(`${baseUrl}/api/session/${sessionId}/snapshot`);
   if (!response.ok) {
-    throw new Error(`Failed to load session snapshot (${response.status})`);
+    throw new RequestStatusError(`Failed to load session snapshot (${response.status})`, response.status);
   }
 
   return normalizeSnapshot((await response.json()) as SessionSnapshot);
@@ -596,7 +601,7 @@ async function fetchSessionSnapshot(baseUrl: string, sessionId: string) {
 async function fetchPlan(baseUrl: string, planId: string) {
   const response = await fetch(`${baseUrl}/api/plans/${planId}`);
   if (!response.ok) {
-    throw new Error(`Failed to load plan (${response.status})`);
+    throw new RequestStatusError(`Failed to load plan (${response.status})`, response.status);
   }
 
   return (await response.json()) as ShellPlanRecord;
@@ -611,10 +616,20 @@ async function fetchSessionEvents(baseUrl: string, sessionId: string, since = 0)
   const suffix = params.size > 0 ? `?${params.toString()}` : "";
   const response = await fetch(`${baseUrl}/api/session/${sessionId}/events${suffix}`);
   if (!response.ok) {
-    throw new Error(`Failed to load session events (${response.status})`);
+    throw new RequestStatusError(`Failed to load session events (${response.status})`, response.status);
   }
 
   return (await response.json()) as SessionEvent[];
+}
+
+class RequestStatusError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "RequestStatusError";
+    this.status = status;
+  }
 }
 
 export function useShellConversation(): ShellConversationState {
@@ -639,13 +654,54 @@ export function useShellConversation(): ShellConversationState {
   const [error, setError] = useState<string>();
   const planModeAvailable = Boolean(daemonBaseUrl);
 
-  useEffect(() => {
-    activeSessionIdRef.current = activeSessionId;
-    rememberActiveSessionId(activeSessionId);
-  }, [activeSessionId]);
+  function setActiveSession(sessionId: string) {
+    activeSessionIdRef.current = sessionId;
+    rememberActiveSessionId(sessionId);
+    setActiveSessionId(sessionId);
+  }
+
+  function recoverDeletedActiveSession(nextThreads: SessionThreadSummary[], deletedSessionId: string) {
+    if (activeSessionIdRef.current !== deletedSessionId) {
+      setThreads(nextThreads);
+      return;
+    }
+
+    const fallbackThread = nextThreads[0] ?? null;
+    const fallbackSessionId = fallbackThread?.id ?? localDraftSessionId;
+    setThreads(nextThreads);
+    setActivePlan(null);
+    setSessionEvents([]);
+    setPending(false);
+    setPendingUpload(false);
+    setStoppingResponse(false);
+    setEnteringPlanMode(false);
+    setExitingPlanMode(false);
+    setResolvingToolApprovalId(null);
+    lastEventSeqRef.current = 0;
+    setError(undefined);
+    setStatus("ready");
+    setSnapshot((current) =>
+      fallbackThread ? createEmptySnapshotFromThread(fallbackThread, current) : createLocalDraftSnapshot(current),
+    );
+    setActiveSession(fallbackSessionId);
+  }
+
+  function preserveActiveThreadList(nextThreads: SessionThreadSummary[]) {
+    const currentSessionId = activeSessionIdRef.current;
+    if (currentSessionId === localDraftSessionId || nextThreads.some((thread) => thread.id === currentSessionId)) {
+      setThreads(nextThreads);
+      return;
+    }
+
+    setThreads((current) => {
+      const activeThread = current.find((thread) => thread.id === currentSessionId);
+      return activeThread ? upsertThread(nextThreads, activeThread) : nextThreads;
+    });
+  }
 
   useEffect(() => {
     let cancelled = false;
+    const loadStartedSessionId = activeSessionIdRef.current;
 
     async function load() {
       try {
@@ -656,8 +712,12 @@ export function useShellConversation(): ShellConversationState {
 
         if (!cancelled) {
           setDaemonBaseUrl(baseUrl);
+          if (activeSessionIdRef.current !== loadStartedSessionId) {
+            return;
+          }
+
           setThreads(nextThreads);
-          setActiveSessionId(preferredSessionId ?? fallbackSessionId);
+          setActiveSession(preferredSessionId ?? fallbackSessionId);
           if (nextThreads.length === 0) {
             setSnapshot((current) => createLocalDraftSnapshot(current));
             setActivePlan(null);
@@ -712,6 +772,18 @@ export function useShellConversation(): ShellConversationState {
           setError(undefined);
         }
       } catch (loadError) {
+        if (loadError instanceof RequestStatusError && loadError.status === 404) {
+          try {
+            const nextThreads = await fetchSessionThreads(currentBaseUrl);
+            if (!cancelled) {
+              recoverDeletedActiveSession(nextThreads, currentSessionId);
+            }
+            return;
+          } catch {
+            // Fall through to the generic error state when thread recovery also fails.
+          }
+        }
+
         if (!cancelled) {
           setStatus("error");
           setError(loadError instanceof Error ? loadError.message : "Failed to load shell session");
@@ -781,8 +853,8 @@ export function useShellConversation(): ShellConversationState {
     const refreshThreads = async () => {
       try {
         const nextThreads = await fetchSessionThreads(currentBaseUrl);
-        if (!disposed && nextThreads.length > 0) {
-          setThreads(nextThreads);
+        if (!disposed) {
+          preserveActiveThreadList(nextThreads);
         }
       } catch {
         // Keep the current thread list when a background refresh fails.
@@ -808,7 +880,19 @@ export function useShellConversation(): ShellConversationState {
             setStatus("ready");
             setError(undefined);
           }
-        } catch {
+        } catch (reconcileError) {
+          if (reconcileError instanceof RequestStatusError && reconcileError.status === 404) {
+            try {
+              const nextThreads = await fetchSessionThreads(currentBaseUrl);
+              if (!disposed) {
+                recoverDeletedActiveSession(nextThreads, currentSessionId);
+              }
+              continue;
+            } catch {
+              // Keep the live stream state when a recovery refresh fails.
+            }
+          }
+
           // Keep the live stream state when a background reconciliation fails.
         }
       } while (!disposed && reconcileQueued);
@@ -856,7 +940,11 @@ export function useShellConversation(): ShellConversationState {
         source = null;
 
         if (!disposed) {
-          retryTimer = window.setTimeout(connect, streamRetryMs);
+          void refreshThreads().finally(() => {
+            if (!disposed && activeSessionIdRef.current === currentSessionId) {
+              retryTimer = window.setTimeout(connect, streamRetryMs);
+            }
+          });
         }
       };
     };
@@ -892,8 +980,6 @@ export function useShellConversation(): ShellConversationState {
     }
 
     console.log('[selectSession] Switching to:', sessionId, 'Clearing state');
-    activeSessionIdRef.current = sessionId;
-    rememberActiveSessionId(sessionId);
     setStatus("loading");
     setActivePlan(null);
     setSnapshot((current) => {
@@ -904,27 +990,24 @@ export function useShellConversation(): ShellConversationState {
     });
     setSessionEvents([]);
     lastEventSeqRef.current = 0;
-    setActiveSessionId(sessionId);
+    setActiveSession(sessionId);
   }
 
   function activateCreatedThread(createdThread: SessionThreadSummary) {
-    activeSessionIdRef.current = createdThread.id;
-    rememberActiveSessionId(createdThread.id);
+    setThreads((current) => upsertThread(current, normalizeThread(createdThread)));
     setSnapshot((current) => createEmptySnapshotFromThread(createdThread, current));
     setActivePlan(null);
     setSessionEvents([]);
     lastEventSeqRef.current = 0;
     setStatus("ready");
     setError(undefined);
-    setActiveSessionId(createdThread.id);
+    setActiveSession(createdThread.id);
   }
 
   async function refreshThreadsSafely(baseUrl: string) {
     try {
       const nextThreads = await fetchSessionThreads(baseUrl);
-      if (nextThreads.length > 0) {
-        setThreads(nextThreads);
-      }
+      preserveActiveThreadList(nextThreads);
     } catch {
       // Keep the locally updated thread list if the background refresh fails.
     }
@@ -934,10 +1017,11 @@ export function useShellConversation(): ShellConversationState {
     | { ok: true; sessionId: string }
     | { ok: false; error: string }
   > {
-    if (activeSessionId !== localDraftSessionId) {
+    const currentSessionId = activeSessionIdRef.current;
+    if (currentSessionId !== localDraftSessionId) {
       return {
         ok: true,
-        sessionId: activeSessionId,
+        sessionId: currentSessionId,
       };
     }
 
@@ -967,19 +1051,79 @@ export function useShellConversation(): ShellConversationState {
   }
 
   async function createSession(): Promise<CreateSessionResult> {
-    activeSessionIdRef.current = localDraftSessionId;
-    rememberActiveSessionId(localDraftSessionId);
-    setSnapshot((current) => createLocalDraftSnapshot(current));
-    setActivePlan(null);
-    setSessionEvents([]);
-    lastEventSeqRef.current = 0;
-    setStatus("ready");
-    setError(undefined);
-    setActiveSessionId(localDraftSessionId);
-    return {
-      ok: true,
-      sessionId: localDraftSessionId,
-    };
+    if (!daemonBaseUrl) {
+      return {
+        ok: false,
+        error: "本地 daemon 还没连上。",
+      };
+    }
+
+    try {
+      const createResponse = await fetch(`${daemonBaseUrl}/api/sessions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+
+      const createdPayload = (await createResponse.json()) as SessionThreadSummary & { error?: string };
+      if (!createResponse.ok) {
+        return {
+          ok: false,
+          error: createdPayload.error ?? "新建线程失败",
+        };
+      }
+
+      activateCreatedThread(createdPayload);
+      void refreshThreadsSafely(daemonBaseUrl);
+
+      return {
+        ok: true,
+        sessionId: createdPayload.id,
+      };
+    } catch (createError) {
+      return {
+        ok: false,
+        error: createError instanceof Error ? createError.message : "新建线程失败",
+      };
+    }
+  }
+
+  async function deleteSession(sessionId: string): Promise<SendResult> {
+    if (!daemonBaseUrl) {
+      return {
+        ok: false,
+        error: "本地 daemon 还没连上。",
+      };
+    }
+
+    try {
+      const response = await fetch(`${daemonBaseUrl}/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: payload.error ?? "删除线程失败",
+        };
+      }
+
+      const nextThreads = await fetchSessionThreads(daemonBaseUrl);
+      if (activeSessionIdRef.current === sessionId) {
+        recoverDeletedActiveSession(nextThreads, sessionId);
+      } else {
+        preserveActiveThreadList(nextThreads);
+      }
+
+      return { ok: true };
+    } catch (deleteError) {
+      return {
+        ok: false,
+        error: deleteError instanceof Error ? deleteError.message : "删除线程失败",
+      };
+    }
   }
 
   async function sendMessage(content: string, attachmentIds: string[] = []): Promise<SendResult> {
@@ -1038,16 +1182,22 @@ export function useShellConversation(): ShellConversationState {
       }
 
       if (payload.message) {
-        setSnapshot((current) => ({
-          ...current,
-          session: {
-            ...current.session,
-            id: targetSessionId,
-            updatedAt: payload.message?.createdAt ?? current.session.updatedAt,
-          },
-          messages: upsertMessage(current.messages, payload.message as SessionMessage),
-          runtimePresence: payload.runtimePresence ?? current.runtimePresence,
-        }));
+        setSnapshot((current) => {
+          if (activeSessionIdRef.current !== targetSessionId) {
+            return current;
+          }
+
+          return {
+            ...current,
+            session: {
+              ...current.session,
+              id: targetSessionId,
+              updatedAt: payload.message?.createdAt ?? current.session.updatedAt,
+            },
+            messages: upsertMessage(current.messages, payload.message as SessionMessage),
+            runtimePresence: payload.runtimePresence ?? current.runtimePresence,
+          };
+        });
       }
 
       await refreshThreadsSafely(daemonBaseUrl);
@@ -1537,6 +1687,7 @@ export function useShellConversation(): ShellConversationState {
     uploadFolder,
     uploadPreparedAttachment,
     uploadPreparedFolder,
+    deleteSession,
     stopResponse,
     enterPlanMode,
     exitPlanMode,

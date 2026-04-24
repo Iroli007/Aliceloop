@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { pinchTabBrowserBackend } from "../src/context/tools/pinchTabBrowserBackend";
+import { pinchTabBrowserBackend } from "../../src/context/tools/pinchTabBrowserBackend";
 
 async function main() {
   const session = {
-    sessionId: "pinchtab-smoke",
+    sessionId: "pinchtab-integration",
     backend: "pinchtab" as const,
     preferredBackend: "pinchtab" as const,
     tabId: null,

@@ -39,6 +39,7 @@ import {
 } from "../services/threadTranscriptPaths";
 
 const runtimeHeartbeatWindowMs = 25_000;
+const defaultDraftSessionTitle = "New Chat";
 
 interface SessionRow {
   id: string;
@@ -209,10 +210,14 @@ function summarizeMessagePreview(content: string | null) {
 function summarizeSessionTitle(content: string) {
   const normalized = content.replace(/\s+/g, " ").trim();
   if (!normalized) {
-    return "新对话";
+    return defaultDraftSessionTitle;
   }
 
   return normalized.length > 24 ? `${normalized.slice(0, 24).trimEnd()}…` : normalized;
+}
+
+function isGeneratedDraftTitle(title: string) {
+  return title === defaultDraftSessionTitle || title === "新对话" || /^新对话 \d+$/u.test(title);
 }
 
 function createInactivePlanModeState(sessionId: string): SessionPlanModeState {
@@ -901,7 +906,24 @@ function findReusableDraftSession(projectId: string | null): SessionThreadSummar
     )
     .get(projectId, projectId) as SessionThreadSummaryRow | undefined;
 
-  return row ? toSessionThreadSummary(row) : null;
+  if (!row) {
+    return null;
+  }
+
+  const draft = toSessionThreadSummary(row);
+  if (draft.title !== defaultDraftSessionTitle && isGeneratedDraftTitle(draft.title)) {
+    db.prepare("UPDATE sessions SET title = ? WHERE id = ?").run(defaultDraftSessionTitle, draft.id);
+    return {
+      ...draft,
+      title: defaultDraftSessionTitle,
+    };
+  }
+
+  return draft;
+}
+
+function findVisibleDraftSession(): SessionThreadSummary | null {
+  return findReusableDraftSession(getDefaultProjectDirectory().id);
 }
 
 export function listSessionThreads(): SessionThreadSummary[] {
@@ -948,7 +970,18 @@ export function listSessionThreads(): SessionThreadSummary[] {
     )
     .all() as SessionThreadSummaryRow[];
 
-  return rows.map(toSessionThreadSummary);
+  const threads = rows.map(toSessionThreadSummary);
+  const draft = findVisibleDraftSession();
+  if (draft && !threads.some((thread) => thread.id === draft.id)) {
+    threads.push(draft);
+    threads.sort((left, right) => getThreadActivityTime(right).localeCompare(getThreadActivityTime(left)));
+  }
+
+  return threads;
+}
+
+function getThreadActivityTime(thread: SessionThreadSummary) {
+  return thread.latestMessageAt ?? thread.updatedAt ?? thread.createdAt;
 }
 
 export function listHistoricalSessionCandidates(
@@ -1154,7 +1187,7 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
 }
 
 export function createSession(
-  input: string | { title?: string; projectId?: string | null } = {},
+  input: string | { title?: string; projectId?: string | null; reuseDraft?: boolean } = {},
 ): SessionThreadSummary {
   const normalizedInput = typeof input === "string" ? { title: input } : input;
   const projectId = normalizedInput.projectId === undefined
@@ -1165,22 +1198,24 @@ export function createSession(
     getProjectDirectory(projectId);
   }
 
-  if (!normalizedInput.title?.trim()) {
+  if (normalizedInput.reuseDraft !== false && !normalizedInput.title?.trim()) {
     const reusableDraft = findReusableDraftSession(projectId ?? null);
     if (reusableDraft) {
-      return reusableDraft;
+      const reusedAt = new Date().toISOString();
+      getDatabase().prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(reusedAt, reusableDraft.id);
+      return {
+        ...reusableDraft,
+        updatedAt: reusedAt,
+      };
     }
   }
 
   const db = getDatabase();
   const now = new Date().toISOString();
   const id = randomUUID();
-  const countRow = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
   const nextTitle = normalizedInput.title?.trim()
     ? normalizedInput.title.trim()
-    : countRow.count === 0
-      ? "新对话"
-      : `新对话 ${countRow.count + 1}`;
+    : defaultDraftSessionTitle;
 
   db.prepare(
     `
@@ -1821,7 +1856,7 @@ export function createSessionMessage(input: CreateMessageInput): {
     const shouldRetitleSession =
       input.role === "user" &&
       Boolean(input.content.trim()) &&
-      Boolean(session?.title.startsWith("新对话")) &&
+      Boolean(session && isGeneratedDraftTitle(session.title)) &&
       countMessagesForSession(input.sessionId) === 0;
 
     db.prepare(

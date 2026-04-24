@@ -19,6 +19,7 @@ export type SandboxRuntimeKind = "host";
 
 export interface SandboxExecutorOptions {
   label: string;
+  sessionId?: string | null;
   permissionProfile?: SandboxPermissionProfile;
   autoApproveToolRequests?: boolean;
   workspaceRoot?: string;
@@ -126,6 +127,7 @@ export interface SandboxAuditLogger {
 
 export interface SandboxRuntimeContext {
   label: string;
+  sessionId: string | null;
   toolPolicy: SandboxToolPolicy;
   runtimePolicy: SandboxRuntimePolicy;
   autoApproveToolRequests: boolean;
