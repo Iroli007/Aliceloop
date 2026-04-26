@@ -33,7 +33,7 @@ import { nowMs, roundMs } from "../../runtime/perfTrace";
 
 const MAX_HISTORY_MESSAGES = SESSION_HOT_TAIL_MESSAGE_COUNT + SESSION_COMPACTION_TRIGGER_MESSAGE_COUNT;
 const MAX_FOCUS_MESSAGES = 6;
-const MAX_TOOL_ACTIVITY_EVENTS = 20;
+const MAX_TOOL_ACTIVITY_EVENTS = 120;
 const MAX_TOOL_ACTIVITY_ITEMS = 4;
 const MAX_INLINE_ATTACHMENT_BYTES = 48 * 1024;
 const MAX_TOTAL_INLINE_ATTACHMENT_BYTES = 96 * 1024;
@@ -241,6 +241,7 @@ function splitLatestMessageAnchorLines(content: string) {
 function isTrackedRecentToolName(toolName: string) {
   return toolName === "web_search"
     || toolName === "web_fetch"
+    || toolName === "bash"
     || toolName.startsWith("browser_");
 }
 
@@ -251,6 +252,55 @@ function isContinuationLikeMessage(content: string) {
   }
 
   return /^(?:你呢|你那边呢|你查|你搜|继续|接着|按这个|按它|照这个|这个呢|那这个呢|然后呢|查一下|搜一下|再查|再搜|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗|按这个平台|按这个时间|按这个口径)/u.test(trimmed);
+}
+
+function isFileManagementFollowupMessage(content: string) {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.length > 40) {
+    return false;
+  }
+
+  return /^(?:好|可以|行|嗯|对|确认|直接|那|把|你|删|删除|移除|清掉)/u.test(trimmed)
+    && /(?:好|可以|行|嗯|对|确认|删|删除|移除|清掉)/u.test(trimmed);
+}
+
+function stringifyContextValue(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function hasFileManagementContext(text: string) {
+  return /(?:\/Users\/|workspace|workspaces|\.data|路径|删|删除|移除|清理|rm\b|rmdir\b|find\b|ls\b|deskpet)/iu.test(text);
+}
+
+function hasRecentFileManagementContext(recentToolTraces: RecentToolTrace[], recentExchangeText: string) {
+  if (hasFileManagementContext(recentExchangeText)) {
+    return true;
+  }
+
+  return recentToolTraces.some((trace) => {
+    if (trace.toolName !== "bash") {
+      return false;
+    }
+
+    return hasFileManagementContext([
+      trace.inputPreview,
+      trace.resultPreview,
+      stringifyContextValue(trace.stateInput),
+      stringifyContextValue(trace.stateOutput),
+    ].filter(Boolean).join("\n"));
+  });
 }
 
 function needsResearchContinuation(messageText: string) {
@@ -283,7 +333,7 @@ function listSubstantialUserAnchors(messages: SessionMessage[]) {
   const anchors: string[] = [];
   for (const message of candidates) {
     const content = serializeMessageContent(message).trim();
-    if (!content || isContinuationLikeMessage(content)) {
+    if (!content || isContinuationLikeMessage(content) || isFileManagementFollowupMessage(content)) {
       continue;
     }
 
@@ -391,6 +441,7 @@ export interface RecentConversationFocus {
   latestOpeningLines: string[];
   latestClosingLines: string[];
   continuationLike: boolean;
+  fileManagementContinuation: boolean;
   researchContinuation: boolean;
   originalTopicAnchor: string | null;
   latestExplicitAnchor: string | null;
@@ -684,6 +735,7 @@ function buildRecentConversationFocusFromSnapshot(
       latestOpeningLines: latestMessageAnchorLines.openingLines,
       latestClosingLines: latestMessageAnchorLines.closingLines,
       continuationLike: false,
+      fileManagementContinuation: false,
       researchContinuation: false,
       originalTopicAnchor: null,
       latestExplicitAnchor: null,
@@ -698,7 +750,12 @@ function buildRecentConversationFocusFromSnapshot(
     };
   }
 
-  const continuationLike = isContinuationLikeMessage(latestContent);
+  const recentExchangeText = recentMessages
+    .map((message) => serializeMessageContent(message))
+    .join("\n");
+  const fileManagementContinuation = isFileManagementFollowupMessage(latestContent)
+    && hasRecentFileManagementContext(recentToolTraces, recentExchangeText);
+  const continuationLike = isContinuationLikeMessage(latestContent) || fileManagementContinuation;
   const anchors = listSubstantialUserAnchors(recentMessages);
   const latestExplicitAnchor = anchors.at(-1) ?? null;
   const originalTopicAnchor = anchors[0] && anchors[0] !== latestExplicitAnchor ? anchors[0] : null;
@@ -732,6 +789,7 @@ function buildRecentConversationFocusFromSnapshot(
     continuationLike,
     researchContinuation,
     recentToolNames,
+    fileManagementContinuation,
     loginOrQrContinuation: looksLikeLoginOrQrContinuationContext(carryForwardFacts)
       || looksLikeLoginOrQrContinuationContext(carryForwardConstraints),
   }).routeHints;
@@ -763,6 +821,10 @@ function buildRecentConversationFocusFromSnapshot(
       lines.push("- Do not stop at a verbal promise. After the tool round finishes, check whether the task is actually complete before replying or asking for the next step.");
       lines.push("- The research memory block below is the running evidence ledger for this investigation. Do not restart from scratch when the user only asks to continue; reuse the searched sources, fetched pages, and remaining evidence gaps to decide the next step.");
       lines.push("- Before drafting a report, identify the strongest unfetched candidate URL in the ledger. If one exists, fetch that page before starting a fresh broad search.");
+    }
+    if (fileManagementContinuation) {
+      lines.push("- Required action for this turn: continue the recent file-management request with `bash` instead of replying with a command as plain text.");
+      lines.push("- If the action is destructive, use the existing delete confirmation flow and then continue after the user resolves it.");
     }
     if (needsDeepResearchFollowup) {
       lines.push("- The latest follow-up is asking for a deeper read, not another shallow search.");
@@ -801,6 +863,7 @@ function buildRecentConversationFocusFromSnapshot(
     latestOpeningLines: latestMessageAnchorLines.openingLines,
     latestClosingLines: latestMessageAnchorLines.closingLines,
     continuationLike,
+    fileManagementContinuation,
     researchContinuation: Boolean(researchContinuation),
     originalTopicAnchor,
     latestExplicitAnchor,

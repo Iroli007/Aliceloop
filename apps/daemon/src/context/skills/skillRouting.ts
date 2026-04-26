@@ -33,6 +33,7 @@ interface TurnIntentDecisionOptions {
   continuationLike?: boolean;
   researchContinuation?: boolean;
   loginOrQrContinuation?: boolean;
+  fileManagementContinuation?: boolean;
 }
 
 export function mergeSkillRouteHints(...hintSets: Array<SkillRouteHints | null | undefined>): SkillRouteHints {
@@ -264,13 +265,18 @@ export function buildTurnIntentDecision(
     reasons.add("carry forward recent browser context");
   }
 
+  if (options?.fileManagementContinuation) {
+    stickySkillIds.add("file-manager");
+    reasons.add("carry forward recent file-management context");
+  }
+
   const routeHints = {
     stickySkillIds: [...stickySkillIds],
     reasons: [...reasons],
   };
   const toolNames = new Set<string>();
 
-  if (needs.fileManagement || needs.cameraCapture || needs.systemInfo) {
+  if (needs.fileManagement || options?.fileManagementContinuation || needs.cameraCapture || needs.systemInfo) {
     toolNames.add("bash");
   }
 

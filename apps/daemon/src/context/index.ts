@@ -109,6 +109,7 @@ export async function loadContext(
     hasImageAttachment: latestUserHasImageAttachment,
     researchContinuation: recentConversationFocus.researchContinuation,
     continuationLike: recentConversationFocus.continuationLike,
+    fileManagementContinuation: recentConversationFocus.fileManagementContinuation,
   });
   const turnRouteHints = intentDecision.routeHints;
   timings.cachedSkillCount = 0;
