@@ -140,6 +140,7 @@ interface SessionThreadSummaryRow {
   messageCount: number;
   latestMessagePreview: string | null;
   latestMessageAt: string | null;
+  isChildAgent?: number;
   matchedPreview: string | null;
   matchedMessageCreatedAt: string | null;
   projectId: string | null;
@@ -888,6 +889,7 @@ function toSessionThreadSummary(row: SessionThreadSummaryRow): SessionThreadSumm
     messageCount: row.messageCount,
     latestMessagePreview: summarizeMessagePreview(row.latestMessagePreview),
     latestMessageAt: row.latestMessageAt,
+    isChildAgent: Boolean(row.isChildAgent),
     matchedPreview: summarizeMessagePreview(row.matchedPreview),
     matchedMessageCreatedAt: row.matchedMessageCreatedAt,
     projectId: row.projectId,
@@ -911,6 +913,7 @@ function findReusableDraftSession(projectId: string | null): SessionThreadSummar
           0 AS messageCount,
           NULL AS latestMessagePreview,
           NULL AS latestMessageAt,
+          0 AS isChildAgent,
           NULL AS matchedPreview,
           NULL AS matchedMessageCreatedAt,
           projects.id AS projectId,
@@ -978,6 +981,11 @@ export function listSessionThreads(): SessionThreadSummary[] {
           COALESCE(message_counts.messageCount, 0) AS messageCount,
           latest_message.content AS latestMessagePreview,
           latest_message.created_at AS latestMessageAt,
+          EXISTS (
+            SELECT 1
+            FROM child_agents
+            WHERE child_agents.child_session_id = sessions.id
+          ) AS isChildAgent,
           NULL AS matchedPreview,
           NULL AS matchedMessageCreatedAt,
           projects.id AS projectId,

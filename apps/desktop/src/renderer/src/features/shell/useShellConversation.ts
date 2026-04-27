@@ -335,6 +335,10 @@ function normalizeThread(thread: SessionThreadSummary): SessionThreadSummary {
   };
 }
 
+function isVisibleThread(thread: SessionThreadSummary) {
+  return !thread.isChildAgent;
+}
+
 function normalizeSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
   return {
     ...snapshot,
@@ -586,7 +590,7 @@ async function fetchSessionThreads(baseUrl: string) {
     throw new RequestStatusError(`Failed to load session threads (${response.status})`, response.status);
   }
 
-  return ((await response.json()) as SessionThreadSummary[]).map(normalizeThread);
+  return ((await response.json()) as SessionThreadSummary[]).map(normalizeThread).filter(isVisibleThread);
 }
 
 async function fetchSessionSnapshot(baseUrl: string, sessionId: string) {
