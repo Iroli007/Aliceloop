@@ -20,6 +20,7 @@ import {
   type TaskRun,
 } from "@aliceloop/runtime-core";
 import { schemaStatements } from "./schema";
+import { buildFtsQuery, tokenizeForSqlSearch } from "./jiebaTokenizer";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const DAEMON_PACKAGE_NAME = "@aliceloop/daemon";
@@ -62,6 +63,11 @@ const dataDir = process.env.ALICELOOP_DATA_DIR?.trim()
   : join(appsRoot, ".data");
 const uploadsDir = join(dataDir, "uploads");
 const databasePath = join(dataDir, "aliceloop.db");
+
+function registerSqlFunctions(db: Database.Database) {
+  db.function("jieba_tokenize", { deterministic: true }, tokenizeForSqlSearch);
+  db.function("jieba_fts_query", { deterministic: true }, buildFtsQuery);
+}
 
 type SeedContentBlock = {
   id: string;
@@ -739,6 +745,27 @@ function runMigrations(db: Database.Database) {
       FROM memory_notes
     `,
   ).run();
+  db.prepare("DELETE FROM session_messages_fts").run();
+  db.prepare(
+    `
+      INSERT INTO session_messages_fts (
+        rowid,
+        message_id,
+        session_id,
+        role,
+        content
+      )
+      SELECT
+        rowid,
+        id,
+        session_id,
+        role,
+        jieba_tokenize(content)
+      FROM session_messages
+      WHERE role IN ('user', 'assistant')
+        AND TRIM(content) <> ''
+    `,
+  ).run();
 }
 
 function bootstrap(db: Database.Database) {
@@ -786,6 +813,7 @@ export function getDatabase(): Database.Database {
   database = new Database(databasePath);
   database.pragma("journal_mode = WAL");
   database.pragma("foreign_keys = ON");
+  registerSqlFunctions(database);
   bootstrap(database);
   return database;
 }

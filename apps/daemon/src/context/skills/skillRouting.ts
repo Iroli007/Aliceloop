@@ -21,6 +21,7 @@ export interface TurnIntentDecision {
     reviewCoach: boolean;
     deepResearchFetch: boolean;
     toolDiscovery: boolean;
+    agentDelegation: boolean;
   };
   routeHints: SkillRouteHints;
   toolNames: string[];
@@ -74,6 +75,9 @@ const TOOL_DISCOVERY_QUERY_PATTERN =
   /(?:能不能|可以|可不可以)?(?:帮我|帮忙|给我)?(?:看|查|列|说)(?:一下)?(?:你|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop)?.{0,16}(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能)|(?:你|我|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop).{0,24}(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能)|(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能).{0,16}(?:你|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop)|(?:怎么|如何).{0,12}(?:测试|验证).{0,24}(?:你|当前|本轮|这里|aliceloop)?.{0,24}(?:tools?|skills?|能力|工具|技能)|(?:可用|支持).{0,12}(?:tools?|skills?|能力|工具|技能)|(?:tools?|skills?|能力|工具|技能).{0,12}(?:列表|清单|目录|catalog|list)|(?:what|which).{0,16}(?:tools?|skills?|capabilit(?:y|ies)).{0,16}(?:do you have|are available|can you use)|\b(?:available tools?|tool list|skill list|available skills?|runtime tools?|tool catalog|skill catalog)\b/iu;
 const DEEP_RESEARCH_FETCH_PATTERN =
   /深度研究|深入研究|深挖|深扒|别偷懒|别只看摘要|别看摘要|去读|读一下|看原文|看正文|看全文|看来源|看帖子|看词条|看页面|补完|补全|继续深挖|继续深查|继续研究|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗/u;
+const AGENT_ROLE_PATTERN = /(?:developer|designer|researcher|product-?manager|operator|planner|evaluator|general-purpose|coder|Plan|Explore|alma-guide|alma-operator|statusline-setup|开发者|设计师|研究员|产品经理|操作员|规划师|计划员|评估员|代码代理|研究代理)/iu;
+const AGENT_ROLE_INVOCATION_PATTERN =
+  /(?:让|叫|请|找|派|派发|分派|委托|交给|交由|用|启动|开|拉)(?:一个|一下|下|个)?\s*(?:developer|designer|researcher|product-?manager|operator|planner|evaluator|general-purpose|coder|Plan|Explore|alma-guide|alma-operator|statusline-setup|开发者|设计师|研究员|产品经理|操作员|规划师|计划员|评估员|代码代理|研究代理)|(?:developer|designer|researcher|product-?manager|operator|planner|evaluator|general-purpose|coder|Plan|Explore|alma-guide|alma-operator|statusline-setup|开发者|设计师|研究员|产品经理|操作员|规划师|计划员|评估员|代码代理|研究代理)\s*(?:来|去|帮|看|查|研究|设计|规划|拆|评估|review|检查|实现|处理|跑|执行|分析|给|输出|返回)/iu;
 
 export function needsMemoryFactRecall(query: string) {
   return matches(query, MEMORY_FACT_QUERY_PATTERN);
@@ -159,6 +163,25 @@ export function needsToolDiscovery(query: string) {
   return matches(query, TOOL_DISCOVERY_QUERY_PATTERN);
 }
 
+export function needsAgentDelegation(query: string) {
+  return matches(query, /子\s*agent|sub-?agent|agent\s*tool|spawn\s+(?:an?\s+)?agent|delegate\s+(?:to\s+)?(?:an?\s+)?agent|background\s+agent|任务代理|分派|派发|委托|开(?:一?个)?\s*agent|生成(?:一?个)?\s*agent/iu)
+    || matches(query, AGENT_ROLE_INVOCATION_PATTERN);
+}
+
+export function shouldStartAgentForTurn(query: string | null | undefined) {
+  const normalizedQuery = query?.trim() ?? "";
+  if (!normalizedQuery) {
+    return false;
+  }
+
+  if (matches(normalizedQuery, /(?:怎么|如何|为什么|what|why|how).{0,16}(?:子\s*agent|sub-?agent|agent\s*tool)|(?:子\s*agent|sub-?agent).{0,16}(?:是什么|怎么做|怎么用|机制|原理|区别|是不是|有吗|支持吗)/iu)) {
+    return false;
+  }
+
+  return matches(normalizedQuery, /spawn\s+(?:an?\s+)?agent|delegate\s+(?:to\s+)?(?:an?\s+)?agent|background\s+agent|分派|派发|委托|交给|交由|开(?:一?个)?\s*agent|生成(?:一?个)?\s*agent/iu)
+    || (matches(normalizedQuery, AGENT_ROLE_PATTERN) && matches(normalizedQuery, AGENT_ROLE_INVOCATION_PATTERN));
+}
+
 function buildBaseStickySkillIds(query: string) {
   const stickySkillIds = new Set<string>();
 
@@ -225,6 +248,7 @@ export function buildTurnIntentDecision(
     reviewCoach: needsReviewCoach(normalizedQuery),
     deepResearchFetch: prefersDeepResearchFetch(normalizedQuery),
     toolDiscovery: needsToolDiscovery(normalizedQuery),
+    agentDelegation: needsAgentDelegation(normalizedQuery),
   };
   const recentToolNames = options?.recentToolNames ?? [];
   const sawRecentWebTool = recentToolNames.some((toolName) => toolName === "web_search" || toolName === "web_fetch");
@@ -282,6 +306,10 @@ export function buildTurnIntentDecision(
 
   if (needs.toolDiscovery || hasStickySkill(routeHints, "skill-hub") || hasStickySkill(routeHints, "skill-search")) {
     toolNames.add("tool_search");
+  }
+
+  if (needs.agentDelegation) {
+    toolNames.add("agent");
   }
 
   if (needs.webResearch || hasStickySkill(routeHints, "web-search")) {

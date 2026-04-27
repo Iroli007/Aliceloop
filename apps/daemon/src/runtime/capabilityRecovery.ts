@@ -25,6 +25,7 @@ function buildCapabilityRecoveryRequest(
 
 function isRecoverableToolName(toolName: string) {
   return toolName === "tool_search"
+    || toolName === "agent"
     || toolName === "bash"
     || toolName === "web_search"
     || toolName === "web_fetch"
@@ -34,6 +35,10 @@ function isRecoverableToolName(toolName: string) {
 
 function inferStickySkillsForToolName(toolName: string) {
   if (toolName === "tool_search") {
+    return ["skill-hub", "skill-search"];
+  }
+
+  if (toolName === "agent") {
     return ["skill-hub", "skill-search"];
   }
 
@@ -53,7 +58,7 @@ function inferStickySkillsForToolName(toolName: string) {
 }
 
 function extractReferencedToolNameFromAssistantText(text: string) {
-  const toolMatch = text.match(/\b(tool_search|bash|web_search|web_fetch|browser_[a-z_]+|chrome_relay_[a-z_]+)\b/u);
+  const toolMatch = text.match(/\b(agent|tool_search|bash|web_search|web_fetch|browser_[a-z_]+|chrome_relay_[a-z_]+)\b/u);
   return toolMatch?.[1] ?? null;
 }
 
@@ -72,6 +77,13 @@ function inferIntentDrivenRecoveryRequest(
     return buildCapabilityRecoveryRequest("user_intent:tool_discovery", {
       skillIds: ["skill-hub", "skill-search"],
       toolNames: ["tool_search"],
+    });
+  }
+
+  if (intentDecision.needs.agentDelegation && !attached.has("agent")) {
+    return buildCapabilityRecoveryRequest("user_intent:agent_delegation", {
+      skillIds: ["skill-hub", "skill-search"],
+      toolNames: ["agent"],
     });
   }
 

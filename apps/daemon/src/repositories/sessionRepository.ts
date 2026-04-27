@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   buildToolWorkflowEntries,
@@ -45,6 +45,17 @@ interface SessionRow {
   id: string;
   title: string;
   projectId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChildAgentRecord {
+  parentSessionId: string;
+  agentKey: string;
+  childSessionId: string;
+  agentKind: string;
+  agentRole: string;
+  displayName: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -403,66 +414,6 @@ function escapeSqlLikePattern(value: string) {
   return value.replace(/[\\%_]/g, "\\$&");
 }
 
-function findTranscriptArchiveMatch(
-  transcriptPath: string,
-  queryText: string,
-) {
-  if (!existsSync(transcriptPath)) {
-    return null;
-  }
-
-  let content = "";
-  try {
-    content = readFileSync(transcriptPath, "utf8");
-  } catch {
-    return null;
-  }
-
-  const normalizedQuery = queryText.trim().toLowerCase();
-  if (!normalizedQuery) {
-    return null;
-  }
-
-  const normalizedContent = content.toLowerCase();
-  if (!normalizedContent.includes(normalizedQuery)) {
-    return null;
-  }
-
-  const lines = content.split(/\r?\n/);
-  let currentTimestamp: string | null = null;
-
-  for (const line of lines) {
-    const headingMatch = line.match(/^## [^(]+ \(([^)]+)\)$/);
-    if (headingMatch) {
-      currentTimestamp = headingMatch[1] ?? null;
-      continue;
-    }
-
-    if (line.toLowerCase().includes(normalizedQuery)) {
-      const preview = line.trim();
-      return {
-        matchedPreview: preview.length > 0 ? summarizeMessagePreview(preview) : null,
-        matchedMessageCreatedAt: currentTimestamp,
-      };
-    }
-  }
-
-  const matchIndex = normalizedContent.indexOf(normalizedQuery);
-  if (matchIndex < 0) {
-    return null;
-  }
-
-  const preview = content
-    .slice(Math.max(0, matchIndex - 80), Math.min(content.length, matchIndex + normalizedQuery.length + 80))
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return {
-    matchedPreview: preview.length > 0 ? summarizeMessagePreview(preview) : null,
-    matchedMessageCreatedAt: null,
-  };
-}
-
 function toMessage(row: SessionMessageRow, attachments: Attachment[]): SessionMessage {
   const attachmentMap = new Map(attachments.map((attachment) => [attachment.id, attachment]));
 
@@ -802,6 +753,94 @@ export function hasSession(sessionId: string) {
   return Boolean(getSessionRow(sessionId));
 }
 
+export function getChildAgentSession(parentSessionId: string, agentKey: string): ChildAgentRecord | null {
+  const row = getDatabase().prepare(
+    `
+      SELECT
+        parent_session_id AS parentSessionId,
+        agent_key AS agentKey,
+        child_session_id AS childSessionId,
+        agent_kind AS agentKind,
+        agent_role AS agentRole,
+        display_name AS displayName,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM child_agents
+      WHERE parent_session_id = ?
+        AND agent_key = ?
+      LIMIT 1
+    `,
+  ).get(parentSessionId, agentKey) as ChildAgentRecord | undefined;
+
+  return row ?? null;
+}
+
+export function getChildAgentSessionByChildId(parentSessionId: string, childSessionId: string): ChildAgentRecord | null {
+  const row = getDatabase().prepare(
+    `
+      SELECT
+        parent_session_id AS parentSessionId,
+        agent_key AS agentKey,
+        child_session_id AS childSessionId,
+        agent_kind AS agentKind,
+        agent_role AS agentRole,
+        display_name AS displayName,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM child_agents
+      WHERE parent_session_id = ?
+        AND child_session_id = ?
+      LIMIT 1
+    `,
+  ).get(parentSessionId, childSessionId) as ChildAgentRecord | undefined;
+
+  return row ?? null;
+}
+
+export function upsertChildAgentSession(input: {
+  parentSessionId: string;
+  agentKey: string;
+  childSessionId: string;
+  agentKind: string;
+  agentRole: string;
+  displayName: string;
+}) {
+  const now = new Date().toISOString();
+  getDatabase().prepare(
+    `
+      INSERT INTO child_agents (
+        parent_session_id,
+        agent_key,
+        child_session_id,
+        agent_kind,
+        agent_role,
+        display_name,
+        created_at,
+        updated_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?
+      )
+      ON CONFLICT(parent_session_id, agent_key) DO UPDATE SET
+        child_session_id = excluded.child_session_id,
+        agent_kind = excluded.agent_kind,
+        agent_role = excluded.agent_role,
+        display_name = excluded.display_name,
+        updated_at = excluded.updated_at
+    `,
+  ).run(
+    input.parentSessionId,
+    input.agentKey,
+    input.childSessionId,
+    input.agentKind,
+    input.agentRole,
+    input.displayName,
+    now,
+    now,
+  );
+
+  return getChildAgentSession(input.parentSessionId, input.agentKey);
+}
+
 export function getSessionProjectBinding(sessionId: string): SessionProjectBinding | null {
   const db = getDatabase();
   const row = db.prepare(
@@ -1087,41 +1126,90 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
   }
 
   const normalizedLimit = Math.max(1, Math.min(limit, 100));
-  const archiveResults: SessionThreadSummary[] = [];
-  const seenSessionIds = new Set<string>();
-
-  for (const thread of listSessionThreads()) {
-    if (archiveResults.length >= normalizedLimit) {
-      break;
-    }
-
-    if (!thread.projectPath) {
-      continue;
-    }
-
-    const transcriptPath = buildThreadTranscriptExportPaths(thread.projectPath, {
-      sessionId: thread.id,
-      sessionTitle: thread.title,
-      sessionCreatedAt: thread.createdAt,
-    }).markdownPath;
-    const archiveMatch = findTranscriptArchiveMatch(transcriptPath, trimmedQuery);
-    if (!archiveMatch) {
-      continue;
-    }
-
-    archiveResults.push({
-      ...thread,
-      matchedPreview: archiveMatch.matchedPreview,
-      matchedMessageCreatedAt: archiveMatch.matchedMessageCreatedAt,
-    });
-    seenSessionIds.add(thread.id);
-  }
-
-  if (archiveResults.length >= normalizedLimit) {
-    return archiveResults;
-  }
-
   const db = getDatabase();
+  const ftsQuery = (db
+    .prepare("SELECT jieba_fts_query(?) AS query")
+    .get(trimmedQuery) as { query: string }).query;
+  const ftsRows = ftsQuery
+    ? db
+      .prepare(
+        `
+          WITH matched_messages AS (
+            SELECT
+              indexed_message.id AS id,
+              indexed_message.session_id AS sessionId,
+              indexed_message.content AS content,
+              indexed_message.created_at AS createdAt,
+              bm25(session_messages_fts) AS rank
+            FROM session_messages_fts
+            JOIN session_messages AS indexed_message
+              ON indexed_message.id = session_messages_fts.message_id
+            WHERE session_messages_fts MATCH jieba_fts_query(?)
+          ),
+          ranked_matches AS (
+            SELECT
+              id,
+              sessionId,
+              content,
+              createdAt,
+              rank,
+              ROW_NUMBER() OVER (
+                PARTITION BY sessionId
+                ORDER BY rank ASC, createdAt DESC, id DESC
+              ) AS matchRank
+            FROM matched_messages
+          )
+          SELECT
+            sessions.id AS id,
+            sessions.title AS title,
+            sessions.created_at AS createdAt,
+            sessions.updated_at AS updatedAt,
+            COALESCE(message_counts.messageCount, 0) AS messageCount,
+            latest_message.content AS latestMessagePreview,
+            latest_message.created_at AS latestMessageAt,
+            matched_message.content AS matchedPreview,
+            matched_message.createdAt AS matchedMessageCreatedAt,
+            projects.id AS projectId,
+            projects.name AS projectName,
+            projects.path AS projectPath,
+            projects.kind AS projectKind
+          FROM ranked_matches AS matched_message
+          JOIN sessions
+            ON sessions.id = matched_message.sessionId
+          LEFT JOIN projects
+            ON projects.id = sessions.project_id
+          LEFT JOIN (
+            SELECT
+              session_id,
+              COUNT(*) AS messageCount
+            FROM session_messages
+            WHERE role IN ('user', 'assistant')
+            GROUP BY session_id
+          ) AS message_counts
+            ON message_counts.session_id = sessions.id
+          LEFT JOIN session_messages AS latest_message
+            ON latest_message.id = (
+              SELECT id
+              FROM session_messages
+              WHERE session_id = sessions.id
+                AND role IN ('user', 'assistant')
+              ORDER BY created_at DESC, id DESC
+              LIMIT 1
+            )
+          WHERE matched_message.matchRank = 1
+          ORDER BY matched_message.rank ASC, matched_message.createdAt DESC, sessions.updated_at DESC
+          LIMIT ?
+        `,
+      )
+      .all(trimmedQuery, normalizedLimit) as SessionThreadSummaryRow[]
+    : [];
+  const ftsResults = ftsRows.map(toSessionThreadSummary);
+  const seenSessionIds = new Set(ftsResults.map((thread) => thread.id));
+
+  if (ftsResults.length >= normalizedLimit) {
+    return ftsResults;
+  }
+
   const likePattern = `%${escapeSqlLikePattern(trimmedQuery)}%`;
   const rows = db
     .prepare(
@@ -1177,13 +1265,13 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
         LIMIT ?
       `,
     )
-    .all(likePattern, normalizedLimit) as SessionThreadSummaryRow[];
+    .all(likePattern, Math.min(normalizedLimit * 2, 200)) as SessionThreadSummaryRow[];
 
   const fallbackResults = rows
     .map(toSessionThreadSummary)
     .filter((thread) => !seenSessionIds.has(thread.id));
 
-  return [...archiveResults, ...fallbackResults].slice(0, normalizedLimit);
+  return [...ftsResults, ...fallbackResults].slice(0, normalizedLimit);
 }
 
 export function createSession(

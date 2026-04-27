@@ -29,6 +29,21 @@ export const schemaStatements = [
     ON sessions (project_id, updated_at DESC)
   `,
   `
+    CREATE TABLE IF NOT EXISTS child_agents (
+      parent_session_id TEXT NOT NULL,
+      agent_key TEXT NOT NULL,
+      child_session_id TEXT NOT NULL UNIQUE,
+      agent_kind TEXT NOT NULL,
+      agent_role TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (parent_session_id, agent_key),
+      FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS attachments (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -55,6 +70,62 @@ export const schemaStatements = [
       updated_at TEXT NOT NULL,
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     )
+  `,
+  `
+    CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+      message_id UNINDEXED,
+      session_id UNINDEXED,
+      role UNINDEXED,
+      content
+    )
+  `,
+  `
+    CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
+    AFTER INSERT ON session_messages
+    WHEN NEW.role IN ('user', 'assistant') AND TRIM(NEW.content) <> ''
+    BEGIN
+      INSERT INTO session_messages_fts (
+        rowid,
+        message_id,
+        session_id,
+        role,
+        content
+      ) VALUES (
+        NEW.rowid,
+        NEW.id,
+        NEW.session_id,
+        NEW.role,
+        jieba_tokenize(NEW.content)
+      );
+    END
+  `,
+  `
+    CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
+    AFTER UPDATE OF content, role ON session_messages
+    BEGIN
+      DELETE FROM session_messages_fts WHERE message_id = OLD.id;
+      INSERT INTO session_messages_fts (
+        rowid,
+        message_id,
+        session_id,
+        role,
+        content
+      )
+      SELECT
+        NEW.rowid,
+        NEW.id,
+        NEW.session_id,
+        NEW.role,
+        jieba_tokenize(NEW.content)
+      WHERE NEW.role IN ('user', 'assistant') AND TRIM(NEW.content) <> '';
+    END
+  `,
+  `
+    CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
+    AFTER DELETE ON session_messages
+    BEGIN
+      DELETE FROM session_messages_fts WHERE message_id = OLD.id;
+    END
   `,
   `
     CREATE UNIQUE INDEX IF NOT EXISTS session_messages_session_client_message_id_idx

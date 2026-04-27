@@ -2672,10 +2672,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   }
 
                   if (entry.kind === "tool-group") {
+                    const isAgentToolGroup = entry.tools.some((tool) => tool.toolName === "agent" || tool.toolName === "task_output");
+
                     return (
                       <section
                         key={`tool-group-${entry.groupKey}-${entry.tools[0]?.toolCallId ?? "empty"}`}
-                        className="workspace__tool-group"
+                        className={`workspace__tool-group${isAgentToolGroup ? " workspace__tool-group--agent" : ""}`}
                         aria-label={entry.groupLabel}
                       >
                         <div className="workspace__tool-group-header">

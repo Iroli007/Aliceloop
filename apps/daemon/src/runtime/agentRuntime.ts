@@ -404,8 +404,30 @@ interface AgentRun {
   dispose(): void;
 }
 
-async function createAgentRun(sessionId: string, queueWaitMs: number, jobId: string): Promise<AgentRun | null> {
-  const activeProvider = getToolModelConfig();
+interface RunAgentOptions {
+  model?: string;
+}
+
+function applyRunOptions(provider: StoredProviderConfig, options?: RunAgentOptions): StoredProviderConfig {
+  const model = options?.model?.trim();
+  if (!model) {
+    return provider;
+  }
+
+  return {
+    ...provider,
+    model,
+  };
+}
+
+async function createAgentRun(
+  sessionId: string,
+  queueWaitMs: number,
+  jobId: string,
+  options?: RunAgentOptions,
+): Promise<AgentRun | null> {
+  const baseProvider = getToolModelConfig();
+  const activeProvider = baseProvider ? applyRunOptions(baseProvider, options) : null;
 
   if (!activeProvider || !activeProvider.apiKey) {
     publishAssistantReply(sessionId, buildLocalFallbackReply(getLatestUserMessage(sessionId)));
@@ -725,7 +747,7 @@ async function executeStream(run: AgentRun): Promise<StreamResult> {
 // Public API (unchanged exports)
 // ---------------------------------------------------------------------------
 
-export async function runAgent(sessionId: string) {
+export async function runAgent(sessionId: string, options?: RunAgentOptions) {
   const enqueuedAt = nowMs();
   const queuedJobId = randomUUID();
   publishJob({
@@ -738,7 +760,7 @@ export async function runAgent(sessionId: string) {
   });
   return enqueueSessionRun(sessionId, async () => {
     const queueWaitMs = roundMs(nowMs() - enqueuedAt);
-    const run = await createAgentRun(sessionId, queueWaitMs, queuedJobId);
+    const run = await createAgentRun(sessionId, queueWaitMs, queuedJobId, options);
     if (!run) return;
 
     try {

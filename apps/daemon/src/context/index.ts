@@ -12,7 +12,7 @@ import {
 } from "./session/sessionContext";
 import { buildHistoricalContextBlock } from "./session/historyContext";
 import { buildSkillContextSections, selectRelevantSkillDefinitions } from "./skills/skillLoader";
-import { buildTurnIntentDecision, mergeSkillRouteHints, needsEpisodicHistoryRecall } from "./skills/skillRouting";
+import { buildTurnIntentDecision, mergeSkillRouteHints, needsEpisodicHistoryRecall, shouldStartAgentForTurn } from "./skills/skillRouting";
 import { buildToolSet, getToolSchemaLifecycle } from "./tools/toolRegistry";
 import { hasHealthyDesktopRelay } from "./tools/desktopRelayResearch";
 import { getRuntimeSettings } from "../repositories/runtimeSettingsRepository";
@@ -243,6 +243,10 @@ export async function loadContext(
       }
     }
 
+    if (toolNames.has("agent") && shouldStartAgentForTurn(userQuery)) {
+      return { type: "tool", toolName: "agent" } as const;
+    }
+
     if (toolNames.has("web_fetch") && (intentDecision.needs.webFetch || intentDecision.needs.deepResearchFetch)) {
       return { type: "tool", toolName: "web_fetch" } as const;
     }
@@ -291,6 +295,19 @@ export async function loadContext(
     cachedSectionIds,
     uncachedSectionIds,
   } = buildSystemPromptFromSections(persona, [
+    cachedSystemPromptSection(
+      "agent_delegation_guidance",
+      "agent" in tools
+        ? [
+            "## Child Agents",
+            "- The `agent` tool is available this turn for delegated work.",
+            "- Use `subagent_type` to select the AgentDefinition: developer, designer, researcher, product-manager, operator, planner, evaluator, general-purpose, coder, Plan, Explore, alma-guide, alma-operator, statusline-setup.",
+            "- `agent_id` is not an input selector; it appears in the tool result as the runtime id of the spawned child agent.",
+            "- When the user asks a named expert such as designer/planner/evaluator to inspect, plan, review, or execute something, call `agent` with that `subagent_type` instead of answering as that expert yourself.",
+            "- To check a background child agent, call `agent` with the same `subagent_type` and `read_output: true`.",
+          ].join("\n")
+        : "",
+    ),
     cachedSystemPromptSection(
       "tool_search_guidance",
       "tool_search" in tools || "tool_search_tool_bm25" in tools

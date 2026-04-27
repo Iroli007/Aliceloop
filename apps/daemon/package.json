@@ -37,6 +37,7 @@
     "@aliceloop/pdf-ingest": "file:../../packages/pdf-ingest",
     "@aliceloop/runtime-core": "file:../../packages/runtime-core",
     "@fastify/cors": "^11.1.0",
+    "@node-rs/jieba": "^2.0.1",
     "ai": "^6.0.116",
     "better-sqlite3": "^12.2.0",
     "fastify": "^5.4.0",

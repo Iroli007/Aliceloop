@@ -82,6 +82,10 @@ function isToolSearchTool(toolName: string) {
   return toolName === "tool_search" || toolName === "tool_search_tool_bm25";
 }
 
+function isAgentWorkflowTool(toolName: string) {
+  return toolName === "agent" || toolName === "task_output";
+}
+
 function pickFirstString(value: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const candidate = value[key];
@@ -738,6 +742,192 @@ function formatResultBlock(entry: ToolWorkflowEntry) {
   return formatStructuredBlock(resolveEntryOutput(entry)) ?? entry.resultPreview;
 }
 
+function stringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+}
+
+function getAgentStatusLabel(status: string | null, entry: ToolWorkflowEntry) {
+  switch (status) {
+    case "async_launched":
+      return "后台运行";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "running":
+    case "queued":
+      return "运行中";
+    default:
+      if (entry.status === "output-error" || entry.status === "permission-denied" || entry.error) {
+        return "失败";
+      }
+      if (entry.status === "done" || entry.status === "output-available") {
+        return "已完成";
+      }
+      return "运行中";
+  }
+}
+
+function getAgentStatusTone(status: string | null, entry: ToolWorkflowEntry) {
+  if (status === "failed" || entry.status === "output-error" || entry.status === "permission-denied" || entry.error) {
+    return "error";
+  }
+
+  if (status === "async_launched" || status === "running" || status === "queued") {
+    return "waiting";
+  }
+
+  if (status === "completed" || entry.status === "done" || entry.status === "output-available") {
+    return "success";
+  }
+
+  return "running";
+}
+
+function pickAgentOutputText(value: unknown) {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return pickFirstString(value, ["response", "result", "summary", "content", "output"]);
+}
+
+function compactAgentId(value: string) {
+  const normalized = value.trim();
+  if (/^[a-f0-9-]{24,}$/iu.test(normalized)) {
+    return `#${normalized.slice(0, 8)}`;
+  }
+
+  return compactInline(normalized, 18);
+}
+
+function buildAgentMeta(input: Record<string, unknown> | null, output: Record<string, unknown> | null) {
+  const handoff = input && isRecord(input.handoff) ? input.handoff : null;
+  const mode = input?.run_in_background === true || output?.status === "async_launched" ? "后台" : "同步";
+  const identity = output ? pickFirstString(output, ["subagent_type", "subagentType", "agentKey", "agentRole"]) : null;
+  const inputIdentity = typeof input?.subagent_type === "string" ? input.subagent_type : null;
+  const model = typeof input?.model === "string" && input.model.trim() ? input.model.trim() : null;
+  const writeBack = typeof handoff?.writeBack === "string" ? handoff.writeBack : null;
+  const childAgentId = output ? pickFirstString(output, ["agent_id", "childAgentId", "agentInstanceId", "agentId", "childSessionId", "sessionId"]) : null;
+  const parentSessionId = output ? pickFirstString(output, ["parentSessionId"]) : null;
+  const memoryScope = output ? pickFirstString(output, ["memoryScope"]) : null;
+
+  return [
+    identity || inputIdentity ? { label: "身份", value: identity ?? inputIdentity ?? "" } : null,
+    childAgentId ? { label: "实例", value: compactAgentId(childAgentId) } : null,
+    { label: "模式", value: mode },
+    model ? { label: "模型", value: model } : null,
+    writeBack ? { label: "写回", value: writeBack } : null,
+    memoryScope ? { label: "记忆", value: memoryScope } : null,
+    parentSessionId ? { label: "父会话", value: compactAgentId(parentSessionId) } : null,
+  ].filter((item): item is { label: string; value: string } => Boolean(item));
+}
+
+function AgentWorkflowDetails({ entry }: { entry: ToolWorkflowEntry }) {
+  const inputValue = resolveEntryInput(entry);
+  const outputValue = resolveEntryOutput(entry);
+  const input = isRecord(inputValue) ? inputValue : null;
+  const output = isRecord(outputValue) ? outputValue : null;
+  const handoff = input && isRecord(input.handoff) ? input.handoff : null;
+  const outputStatus = typeof output?.status === "string" ? output.status : null;
+  const statusLabel = getAgentStatusLabel(outputStatus, entry);
+  const statusTone = getAgentStatusTone(outputStatus, entry);
+  const description = input ? pickFirstString(input, ["description"]) : null;
+  const displayName = output ? pickFirstString(output, ["displayName"]) : null;
+  const title = output ? pickFirstString(output, ["title"]) : null;
+  const prompt = input ? pickFirstString(input, ["prompt"]) : null;
+  const goal = typeof handoff?.goal === "string" && handoff.goal.trim() ? handoff.goal.trim() : null;
+  const deliverable = typeof handoff?.deliverable === "string" && handoff.deliverable.trim() ? handoff.deliverable.trim() : null;
+  const criteria = stringArray(handoff?.acceptanceCriteria);
+  const outputText = pickAgentOutputText(outputValue);
+  const outputPath = output ? pickFirstString(output, ["outputFile", "transcriptMarkdownPath"]) : null;
+  const outputError = output ? pickFirstString(output, ["error"]) : null;
+  const meta = buildAgentMeta(input, output);
+  const fallbackResult = !outputText && outputValue !== null && outputValue !== undefined
+    ? formatStructuredBlock(outputValue)
+    : null;
+
+  return (
+    <div className="tool-workflow-card__agent">
+      <div className="tool-workflow-card__agent-head">
+        <span className={`tool-workflow-card__agent-state tool-workflow-card__agent-state--${statusTone}`}>
+          <span className="tool-workflow-card__agent-state-dot" aria-hidden="true" />
+          {statusLabel}
+        </span>
+        <strong className="tool-workflow-card__agent-title">{displayName ?? description ?? title ?? "子代理任务"}</strong>
+      </div>
+
+      {meta.length > 0 ? (
+        <div className="tool-workflow-card__agent-meta">
+          {meta.map((item) => (
+            <span key={`${item.label}:${item.value}`} className="tool-workflow-card__agent-chip">
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {goal || deliverable ? (
+        <div className="tool-workflow-card__agent-brief">
+          {goal ? (
+            <p>
+              <span>目标</span>
+              {goal}
+            </p>
+          ) : null}
+          {deliverable ? (
+            <p>
+              <span>交付</span>
+              {deliverable}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {criteria.length > 0 ? (
+        <div className="tool-workflow-card__agent-criteria">
+          {criteria.slice(0, 3).map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+      ) : null}
+
+      {outputText ? (
+        <div className="tool-workflow-card__agent-response">
+          <MessageContent content={outputText} renderMarkdown />
+        </div>
+      ) : outputStatus === "async_launched" ? (
+        <p className="tool-workflow-card__agent-note">后台子代理已启动，结果会写入子会话记录。</p>
+      ) : fallbackResult ? (
+        <pre className="tool-workflow-card__agent-raw">{fallbackResult}</pre>
+      ) : null}
+
+      {outputError || entry.error ? (
+        <p className="tool-workflow-card__agent-error">{outputError ?? entry.error}</p>
+      ) : null}
+
+      {prompt ? (
+        <details className="tool-workflow-card__agent-prompt">
+          <summary>任务说明</summary>
+          <p>{prompt}</p>
+        </details>
+      ) : null}
+
+      {outputPath ? (
+        <div className="tool-workflow-card__agent-file">
+          <span>会话文件</span>
+          <code title={outputPath}>{compactPathLike(outputPath)}</code>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function isBashLikeCommand(entry: ToolWorkflowEntry) {
   return entry.toolName === "bash";
 }
@@ -839,14 +1029,24 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
   }
 
   if (entry.toolName === "agent") {
+    const description = isRecord(resolvedInput)
+      ? pickFirstString(resolvedInput, ["description"])
+      : null;
     const prompt = isRecord(resolvedInput)
       ? pickFirstString(resolvedInput, ["prompt"])
       : typeof resolvedInput === "string"
         ? resolvedInput
         : null;
     const runInBackground = isRecord(resolvedInput) && resolvedInput.run_in_background === true;
+    const role = isRecord(resolvedInput) ? pickFirstString(resolvedInput, ["subagent_type"]) : null;
+    const prefix = role
+      ? `${runInBackground ? "后台子代理" : "子代理"} ${role}`
+      : runInBackground ? "后台子代理" : "子代理";
+    if (description) {
+      return `${prefix}: ${compactInline(description, 28)}`;
+    }
     if (prompt) {
-      return `${runInBackground ? "后台子代理" : "子代理"}: ${compactInline(prompt, 28)}`;
+      return `${prefix}: ${compactInline(prompt, 28)}`;
     }
     return runInBackground ? "启动后台子代理" : "运行子代理";
   }
@@ -955,6 +1155,32 @@ function getPrimaryDetailLabel(toolName: string) {
 }
 
 function getStatusMeta(entry: ToolWorkflowEntry) {
+  if (isAgentWorkflowTool(entry.toolName)) {
+    const output = resolveEntryOutput(entry);
+    const outputStatus = isRecord(output) && typeof output.status === "string" ? output.status : null;
+
+    if (outputStatus === "failed") {
+      return {
+        tone: "error" as const,
+        label: "失败",
+      };
+    }
+
+    if (outputStatus === "async_launched" || outputStatus === "running" || outputStatus === "queued") {
+      return {
+        tone: "waiting" as const,
+        label: "后台运行",
+      };
+    }
+
+    if (outputStatus === "completed") {
+      return {
+        tone: "success" as const,
+        label: null,
+      };
+    }
+  }
+
   if (entry.status === "output-error" || entry.status === "permission-denied" || entry.error) {
     return {
       tone: "error" as const,
@@ -1129,6 +1355,7 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
   const summaryTitle = buildSummaryTitle(entry);
   const argumentsBlock = formatArgumentsBlock(entry);
   const resultBlock = formatResultBlock(entry);
+  const isAgentTool = isAgentWorkflowTool(entry.toolName);
   const isToolDiscoveryCard = isToolSearchTool(entry.toolName);
   const planDraft = entry.toolName === "write" && typeof resultBlock === "string"
     ? extractStructuredPlanDraft(resultBlock)
@@ -1137,14 +1364,14 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
   const durationLabel = formatDurationLabel(entry);
   const primaryDetailLabel = getPrimaryDetailLabel(entry.toolName);
   const bashDisplay = entry.toolName === "bash" ? buildBashDisplay(resolveEntryInput(entry)) : null;
-  const hasDetails = !isToolDiscoveryCard && Boolean(argumentsBlock || resultBlock || entry.error || entry.backend || sourceLinks.length > 0);
+  const hasDetails = !isToolDiscoveryCard && Boolean(isAgentTool || argumentsBlock || resultBlock || entry.error || entry.backend || sourceLinks.length > 0);
   const isNetworkTool = entry.toolName === "web_search" || entry.toolName === "web_fetch";
   const resultDetailLabel = "结果";
   const commandDetailLabel = isBashLikeCommand(entry) ? (bashDisplay?.label ?? "命令") : primaryDetailLabel;
 
   return (
     <details
-      className={`tool-workflow-card tool-workflow-card--${status.tone}${isNetworkTool ? " tool-workflow-card--network" : ""}${isBashLikeCommand(entry) ? " tool-workflow-card--bash" : ""}`}
+      className={`tool-workflow-card tool-workflow-card--${status.tone}${isNetworkTool ? " tool-workflow-card--network" : ""}${isAgentTool ? " tool-workflow-card--agent" : ""}${isBashLikeCommand(entry) ? " tool-workflow-card--bash" : ""}`}
     >
       <summary className="tool-workflow-card__summary">
         <span className="tool-workflow-card__main">
@@ -1169,13 +1396,14 @@ export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
       </summary>
       {hasDetails ? (
         <div className="tool-workflow-card__details">
-          {argumentsBlock ? (
+          {isAgentTool ? <AgentWorkflowDetails entry={entry} /> : null}
+          {!isAgentTool && argumentsBlock ? (
             <div className="tool-workflow-card__detail">
               <span className="tool-workflow-card__detail-label">{commandDetailLabel}</span>
               <pre className="tool-workflow-card__detail-value">{argumentsBlock}</pre>
             </div>
           ) : null}
-          {resultBlock ? (
+          {!isAgentTool && resultBlock ? (
             <div className="tool-workflow-card__detail">
               <span className="tool-workflow-card__detail-label">{resultDetailLabel}</span>
               {planDraft ? (

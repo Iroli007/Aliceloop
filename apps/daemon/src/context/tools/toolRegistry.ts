@@ -40,6 +40,7 @@ const TOOL_SEARCH_ALWAYS_LOADED = new Set([
 ]);
 const MIN_TOOL_COUNT_FOR_TOOL_SEARCH = 10;
 const SESSION_STABLE_TOOL_ORDER = [
+  "agent",
   "audio_understand",
   "web_search",
   "web_fetch",

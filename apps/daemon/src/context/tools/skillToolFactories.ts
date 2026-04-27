@@ -1,4 +1,5 @@
 import { anthropic } from "@ai-sdk/anthropic";
+import { createAgentTool } from "./agentTool";
 import { createAudioUnderstandTool } from "./audioUnderstandTool";
 import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
@@ -25,6 +26,7 @@ const cachedWebFetchTools = new Map<string, ToolSet>();
 const cachedWebSearchTools = new Map<string, ToolSet>();
 const cachedAudioUnderstandTools = new Map<string, ToolSet>();
 const cachedViewImageTools = new Map<string, ToolSet>();
+const cachedAgentTools = new Map<string, ToolSet>();
 let cachedAnthropicToolSearchTools: ToolSet | null = null;
 
 interface SkillToolFactoryOptions {
@@ -107,6 +109,18 @@ function getViewImageToolSet(sessionId?: string) {
   return tools;
 }
 
+function getAgentToolSet(sessionId?: string) {
+  const cacheKey = getSessionCacheKey(sessionId);
+  const existing = cachedAgentTools.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const tools = createAgentTool(sessionId);
+  cachedAgentTools.set(cacheKey, tools);
+  return tools;
+}
+
 export function getAnthropicToolSearchToolSet() {
   if (cachedAnthropicToolSearchTools) {
     return cachedAnthropicToolSearchTools;
@@ -152,6 +166,7 @@ const CHROME_RELAY_TOOL_NAMES = new Set([
 
 // Tool name -> factory, each factory returns { [toolName]: tool({...}) }
 const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) => ToolSet>([
+  ["agent", (options) => getAgentToolSet(options?.sessionId)],
   ["audio_understand", (options) => getAudioUnderstandToolSet(options?.sessionId)],
   ["browser_find", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_navigate", (options) => getBrowserToolSet(options?.sessionId)],
@@ -250,5 +265,6 @@ export function resetSkillToolCache() {
   cachedWebSearchTools.clear();
   cachedAudioUnderstandTools.clear();
   cachedViewImageTools.clear();
+  cachedAgentTools.clear();
   cachedAnthropicToolSearchTools = null;
 }
