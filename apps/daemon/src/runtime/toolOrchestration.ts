@@ -1,5 +1,9 @@
 import { logPerfTrace, roundMs } from "./perfTrace";
 import type { ToolCallState, ToolStateMachine } from "./toolStateMachine";
+import {
+  recordToolCallCompleted,
+  recordToolCallStarted,
+} from "../repositories/sessionOpenTaskRepository";
 
 type RuntimeEventType =
   | "tool.call.started"
@@ -77,6 +81,7 @@ export function createToolOrchestration(input: CreateToolOrchestrationInput) {
     experimental_onToolCallStart({ toolCall }: ToolCallStartEvent) {
       input.checkActive();
       toolCallInputs.set(toolCall.toolCallId, toolCall.input);
+      recordToolCallStarted(input.sessionId, toolCall.toolName, toolCall.toolCallId, toolCall.input);
 
       input.stateMachine.start(toolCall.toolCallId, toolCall.toolName, toolCall.input);
       input.stateMachine.markInputAvailable(toolCall.toolCallId);
@@ -116,6 +121,14 @@ export function createToolOrchestration(input: CreateToolOrchestrationInput) {
         input.stateMachine.markError(event.toolCall.toolCallId, event.error);
       }
       input.stateMachine.complete(event.toolCall.toolCallId);
+      recordToolCallCompleted({
+        sessionId: input.sessionId,
+        toolName: event.toolCall.toolName,
+        toolCallId: event.toolCall.toolCallId,
+        success: event.success,
+        output: event.output,
+        error: event.error,
+      });
 
       input.publishRuntimeEvent(input.sessionId, "tool.call.completed", {
         toolCallId: event.toolCall.toolCallId,

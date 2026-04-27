@@ -6,6 +6,7 @@ import type { ToolWorkflowEntry } from "./useShellConversation";
 
 interface ToolWorkflowCardProps {
   entry: ToolWorkflowEntry;
+  planModeActive?: boolean;
 }
 
 const toolLabelMap: Record<string, string> = {
@@ -808,8 +809,10 @@ function compactAgentId(value: string) {
 function buildAgentMeta(input: Record<string, unknown> | null, output: Record<string, unknown> | null) {
   const handoff = input && isRecord(input.handoff) ? input.handoff : null;
   const mode = input?.run_in_background === true || output?.status === "async_launched" ? "后台" : "同步";
-  const identity = output ? pickFirstString(output, ["subagent_type", "subagentType", "agentKey", "agentRole"]) : null;
-  const inputIdentity = typeof input?.subagent_type === "string" ? input.subagent_type : null;
+  const template = output ? pickFirstString(output, ["subagent_type", "subagentType"]) : null;
+  const inputTemplate = typeof input?.subagent_type === "string" ? input.subagent_type : null;
+  const persona = output ? pickFirstString(output, ["persona", "agentRole"]) : null;
+  const inputPersona = typeof input?.persona === "string" ? input.persona : null;
   const model = typeof input?.model === "string" && input.model.trim() ? input.model.trim() : null;
   const writeBack = typeof handoff?.writeBack === "string" ? handoff.writeBack : null;
   const childAgentId = output ? pickFirstString(output, ["agent_id", "childAgentId", "agentInstanceId", "agentId", "childSessionId", "sessionId"]) : null;
@@ -817,7 +820,8 @@ function buildAgentMeta(input: Record<string, unknown> | null, output: Record<st
   const memoryScope = output ? pickFirstString(output, ["memoryScope"]) : null;
 
   return [
-    identity || inputIdentity ? { label: "身份", value: identity ?? inputIdentity ?? "" } : null,
+    template || inputTemplate ? { label: "模板", value: template ?? inputTemplate ?? "" } : null,
+    persona || inputPersona ? { label: "视角", value: persona ?? inputPersona ?? "" } : null,
     childAgentId ? { label: "实例", value: compactAgentId(childAgentId) } : null,
     { label: "模式", value: mode },
     model ? { label: "模型", value: model } : null,
@@ -834,6 +838,7 @@ function AgentWorkflowDetails({ entry }: { entry: ToolWorkflowEntry }) {
   const output = isRecord(outputValue) ? outputValue : null;
   const handoff = input && isRecord(input.handoff) ? input.handoff : null;
   const outputStatus = typeof output?.status === "string" ? output.status : null;
+  const outputReason = output ? pickFirstString(output, ["reason"]) : null;
   const statusLabel = getAgentStatusLabel(outputStatus, entry);
   const statusTone = getAgentStatusTone(outputStatus, entry);
   const description = input ? pickFirstString(input, ["description"]) : null;
@@ -902,7 +907,9 @@ function AgentWorkflowDetails({ entry }: { entry: ToolWorkflowEntry }) {
           <MessageContent content={outputText} renderMarkdown />
         </div>
       ) : outputStatus === "async_launched" ? (
-        <p className="tool-workflow-card__agent-note">后台子代理已启动，结果会写入子会话记录。</p>
+        <p className="tool-workflow-card__agent-note">
+          {outputReason === "sync_timeout" ? "同步等待超时，子代理已转入后台继续运行。" : "后台子代理已启动，结果会写入子会话记录。"}
+        </p>
       ) : fallbackResult ? (
         <pre className="tool-workflow-card__agent-raw">{fallbackResult}</pre>
       ) : null}
@@ -1038,7 +1045,9 @@ export function buildSummaryTitle(entry: ToolWorkflowEntry) {
         ? resolvedInput
         : null;
     const runInBackground = isRecord(resolvedInput) && resolvedInput.run_in_background === true;
-    const role = isRecord(resolvedInput) ? pickFirstString(resolvedInput, ["subagent_type"]) : null;
+    const template = isRecord(resolvedInput) ? pickFirstString(resolvedInput, ["subagent_type"]) : null;
+    const persona = isRecord(resolvedInput) ? pickFirstString(resolvedInput, ["persona"]) : null;
+    const role = [template, persona].filter(Boolean).join(":") || null;
     const prefix = role
       ? `${runInBackground ? "后台子代理" : "子代理"} ${role}`
       : runInBackground ? "后台子代理" : "子代理";
@@ -1350,14 +1359,14 @@ function ToolWorkflowDurationGlyph() {
   );
 }
 
-export function ToolWorkflowCard({ entry }: ToolWorkflowCardProps) {
+export function ToolWorkflowCard({ entry, planModeActive = false }: ToolWorkflowCardProps) {
   const status = getStatusMeta(entry);
   const summaryTitle = buildSummaryTitle(entry);
   const argumentsBlock = formatArgumentsBlock(entry);
   const resultBlock = formatResultBlock(entry);
   const isAgentTool = isAgentWorkflowTool(entry.toolName);
   const isToolDiscoveryCard = isToolSearchTool(entry.toolName);
-  const planDraft = entry.toolName === "write" && typeof resultBlock === "string"
+  const planDraft = planModeActive && entry.toolName === "write" && typeof resultBlock === "string"
     ? extractStructuredPlanDraft(resultBlock)
     : null;
   const sourceLinks = buildToolSourceLinks(entry);

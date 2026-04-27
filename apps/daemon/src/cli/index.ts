@@ -27,6 +27,7 @@ interface SemanticMemoryPayload {
   content: string;
   source: string;
   durability: string;
+  memoryType: string;
   factKind: string | null;
   factKey: string | null;
   factState: string;

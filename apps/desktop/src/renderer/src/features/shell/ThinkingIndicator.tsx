@@ -4,6 +4,7 @@ import "./ThinkingIndicator.css";
 interface ThinkingIndicatorProps {
   thinkingSteps?: string[];
   currentToolName?: string | null;
+  contextActivity?: string | null;
 }
 
 const toolActivityLabelMap: Record<string, string> = {
@@ -61,14 +62,22 @@ function toThinkingActivity(step: string) {
   return backendLabel ? `${activity} via ${backendLabel}` : activity;
 }
 
-export function ThinkingIndicator({ thinkingSteps = [], currentToolName = null }: ThinkingIndicatorProps) {
+function formatActivityFrame(activity: string, withBullet: boolean) {
+  const text = activity.endsWith("...") ? activity : `${activity}...`;
+  return withBullet ? `* ${text}` : text;
+}
+
+export function ThinkingIndicator({ thinkingSteps = [], currentToolName = null, contextActivity = null }: ThinkingIndicatorProps) {
   const activities = useMemo(() => {
     const next = Array.from(new Set(thinkingSteps.map((step) => toThinkingActivity(step))));
     if (next.length === 0 && currentToolName) {
       next.push(toolActivityLabelMap[currentToolName] ?? `Using ${humanizeIdentifier(currentToolName)}`);
     }
+    if (next.length === 0 && contextActivity) {
+      next.push(contextActivity);
+    }
     return next;
-  }, [currentToolName, thinkingSteps]);
+  }, [contextActivity, currentToolName, thinkingSteps]);
   const [stickyActivities, setStickyActivities] = useState<string[]>(activities);
 
   useEffect(() => {
@@ -95,11 +104,15 @@ export function ThinkingIndicator({ thinkingSteps = [], currentToolName = null }
       return ["* Thinking..."];
     }
 
+    if (contextActivity && stickyActivities.length === 1 && stickyActivities[0] === contextActivity) {
+      return [formatActivityFrame(contextActivity, false)];
+    }
+
     return [
-      ...stickyActivities.map((activity) => `* ${activity}...`),
+      ...stickyActivities.map((activity) => formatActivityFrame(activity, true)),
       "* Thinking...",
     ];
-  }, [stickyActivities]);
+  }, [contextActivity, stickyActivities]);
   const rotationKey = rotationFrames.join("||");
   const [frameIndex, setFrameIndex] = useState(0);
 

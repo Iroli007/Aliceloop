@@ -31,6 +31,10 @@ interface TextFallbackResult {
   toolCallCount: number;
 }
 
+interface ToolResultSummaryResult {
+  replacementText: string;
+}
+
 interface ConsumeTextStreamInput {
   sessionId: string;
   providerId: string;
@@ -47,6 +51,12 @@ interface ConsumeTextStreamInput {
     stateMachine: ToolStateMachine;
     reasoningEffort: ReasoningEffort;
   }): Promise<TextFallbackResult | null>;
+  resolveToolResultSummary(input: {
+    assistantText: string;
+    resolvedToolCalls: unknown[];
+    stateMachine: ToolStateMachine;
+    reasoningEffort: ReasoningEffort;
+  }): Promise<ToolResultSummaryResult | null>;
 }
 
 export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<{
@@ -67,8 +77,11 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
   let firstTokenMs: number | null = null;
   let resolvedToolCalls: unknown[] = [];
   let fallbackToolCallCount = 0;
-  const assistantEventPayload = input.context.displaySkillIds.length > 0
-    ? { skills: input.context.displaySkillIds }
+  const assistantEventPayload = input.context.displayMemories.length > 0 || input.context.displaySkillIds.length > 0
+    ? {
+        memories: input.context.displayMemories,
+        skills: input.context.displaySkillIds,
+      }
     : undefined;
 
   function getChatContent(final = false) {
@@ -153,7 +166,13 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
   }
 
   if (!text.trim() && resolvedToolCalls.length > 0) {
-    text = `已完成 ${resolvedToolCalls.length} 次工具调用。`;
+    const summary = await input.resolveToolResultSummary({
+      assistantText: text,
+      resolvedToolCalls,
+      stateMachine: input.stateMachine,
+      reasoningEffort: input.reasoningEffort,
+    });
+    text = summary?.replacementText.trim() || `已完成 ${resolvedToolCalls.length} 次工具调用。`;
   }
 
   const finalContent = getChatContent(true);

@@ -14,6 +14,7 @@ import {
   type MemoryKind,
   type MemoryFactKind,
   type MemoryFactState,
+  type MemoryType,
   type ProviderKind,
   type ReasoningEffort,
   type SandboxPermissionProfile,
@@ -349,6 +350,7 @@ interface SemanticMemoryEntriesQuery {
   offset?: string;
   source?: string;
   durability?: string;
+  memoryType?: string;
   orderBy?: string;
   order?: string;
 }
@@ -374,6 +376,7 @@ interface CreateSemanticMemoryBody {
   content?: string;
   source?: string;
   durability?: string;
+  memoryType?: string;
   factKind?: string;
   factKey?: string;
   factState?: string;
@@ -383,6 +386,7 @@ interface CreateSemanticMemoryBody {
 interface UpdateSemanticMemoryBody {
   content?: string;
   durability?: string;
+  memoryType?: string;
   factKind?: string;
   factKey?: string;
   factState?: string;
@@ -511,6 +515,24 @@ function normalizeSemanticMemoryDurability(
   }
 
   throw new Error("invalid_memory_durability");
+}
+
+function normalizeSemanticMemoryType(value: string | undefined): MemoryType | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "user"
+    || normalized === "feedback"
+    || normalized === "project"
+    || normalized === "reference"
+  ) {
+    return normalized;
+  }
+
+  throw new Error("invalid_memory_type");
 }
 
 function normalizeSemanticMemoryFactKind(value: string | undefined): MemoryFactKind | undefined {
@@ -803,6 +825,9 @@ export async function createServer() {
         durability: request.query.durability
           ? normalizeSemanticMemoryDurability(request.query.durability)
           : undefined,
+        memoryType: request.query.memoryType
+          ? normalizeSemanticMemoryType(request.query.memoryType)
+          : undefined,
         orderBy: normalizeSemanticMemoryOrderBy(request.query.orderBy),
         order: normalizeSortOrder(request.query.order),
       });
@@ -830,6 +855,7 @@ export async function createServer() {
         content,
         source: normalizeSemanticMemorySource(body.source, "manual"),
         durability: normalizeSemanticMemoryDurability(body.durability, "permanent") ?? "permanent",
+        memoryType: normalizeSemanticMemoryType(body.memoryType) ?? null,
         factKind: normalizeSemanticMemoryFactKind(body.factKind) ?? null,
         factKey: normalizeSemanticMemoryFactKey(body.factKey) ?? null,
         factState: normalizeSemanticMemoryFactState(body.factState) ?? "active",
@@ -875,6 +901,7 @@ export async function createServer() {
       const memory = await updateMemory(request.params.id, {
         content: request.body?.content,
         durability: normalizeSemanticMemoryDurability(request.body?.durability),
+        memoryType: normalizeSemanticMemoryType(request.body?.memoryType),
         factKind: normalizeSemanticMemoryFactKind(request.body?.factKind),
         factKey: normalizeSemanticMemoryFactKey(request.body?.factKey),
         factState: normalizeSemanticMemoryFactState(request.body?.factState),

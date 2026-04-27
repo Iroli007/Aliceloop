@@ -5,7 +5,7 @@ import {
   type PromptCacheRequestTrace,
 } from "../runtime/promptCacheTelemetry";
 import { buildPersonaPrompt } from "./prompts/identityPrompt";
-import { buildProfileFactMemoryBlock } from "./memory/memoryContext";
+import { buildProfileFactMemoryBlock, type MemoryBlockResult } from "./memory/memoryContext";
 import {
   buildActiveTurnPromptSectionsFromFocus,
   buildSessionContextFragments,
@@ -47,6 +47,7 @@ export interface AgentContext {
   firstStepToolChoice?: ToolChoice<ToolSet>;
   safetyConfig: SafetyConfig;
   timings: Record<string, number | string | null>;
+  displayMemories: string[];
   displaySkillIds: string[];
 }
 
@@ -54,11 +55,50 @@ const DEFAULT_SAFETY: Omit<SafetyConfig, "abortSignal"> = {
   maxIterations: 150,
   maxDurationMs: 20 * 60 * 1000, // 20 minutes
 };
+const RETRIEVED_MEMORY_LIMIT = 5;
+const RETRIEVED_MEMORY_TIMEOUT_MS = 900;
 
 interface LoadContextOptions {
   additionalStickySkillIds?: string[];
   additionalToolNames?: string[];
   enableAnthropicToolSearch?: boolean;
+}
+
+function skippedMemoryBlock(skipReason: string, startedAt: number): MemoryBlockResult {
+  return {
+    content: "",
+    displayMemories: [],
+    timings: {
+      skipReason,
+      totalMs: roundMs(nowMs() - startedAt),
+    },
+  };
+}
+
+function prefetchProfileFactMemory(queryText: string | null | undefined, abortSignal: AbortSignal) {
+  const startedAt = nowMs();
+  const trimmedQuery = queryText?.trim();
+  if (!trimmedQuery) {
+    return Promise.resolve(skippedMemoryBlock("no_query", startedAt));
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<MemoryBlockResult>((resolve) => {
+    timeout = setTimeout(() => {
+      resolve(skippedMemoryBlock("memory_prefetch_timeout", startedAt));
+    }, RETRIEVED_MEMORY_TIMEOUT_MS);
+  });
+
+  const memoryPromise = buildProfileFactMemoryBlock(trimmedQuery, {
+    limit: RETRIEVED_MEMORY_LIMIT,
+    abortSignal,
+  }).catch(() => skippedMemoryBlock("memory_prefetch_failed", startedAt));
+
+  return Promise.race([memoryPromise, timeoutPromise]).finally(() => {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  });
 }
 
 export async function loadContext(
@@ -95,6 +135,7 @@ export async function loadContext(
 
   const userQuery = recentConversationFocus.effectiveUserQuery ?? latestUserQuery;
   timings.effectiveUserQueryChars = typeof userQuery === "string" ? userQuery.length : 0;
+  const profileFactMemoryPromise = prefetchProfileFactMemory(userQuery, abortSignal);
   const routeHints = mergeSkillRouteHints(
     recentConversationFocus.routeHints,
     (options?.additionalStickySkillIds?.length ?? 0) > 0
@@ -138,17 +179,6 @@ export async function loadContext(
   timings.browserRelayAvailable = browserRelayAvailable ? 1 : 0;
 
   const routedSkillIds = new Set(routedSkills.map((skill) => skill.id));
-
-  const profileFactMemoryStartedAt = nowMs();
-  const profileFactMemory = routedSkillIds.has("memory-management") && userQuery
-    ? await buildProfileFactMemoryBlock(userQuery)
-    : { content: "", timings: { skipReason: "skill_not_routed" } };
-  timings.profileFactMemoryMs = roundMs(nowMs() - profileFactMemoryStartedAt);
-  timings.profileFactMemoryChars = profileFactMemory.content.length;
-  timings.profileFactMemoryCount = profileFactMemory.timings.memoryCount ?? null;
-  timings.profileFactMemorySkipReason = typeof profileFactMemory.timings.skipReason === "string"
-    ? profileFactMemory.timings.skipReason
-    : null;
 
   const historicalContextStartedAt = nowMs();
   const historicalContext = routedSkillIds.has("memory-management") && userQuery && needsEpisodicHistoryRecall(userQuery)
@@ -205,6 +235,11 @@ export async function loadContext(
   const activeSkillsStartedAt = nowMs();
   timings.activeSkillsMs = roundMs(nowMs() - activeSkillsStartedAt);
 
+  const additionalToolNames = [
+    ...(options?.additionalToolNames ?? []),
+    ...(recentConversationFocus.agentContinuation ? ["agent"] : []),
+  ];
+
   const toolsStartedAt = nowMs();
   const tools = buildToolSet(sandbox, routedSkills, {
     sessionId,
@@ -212,7 +247,7 @@ export async function loadContext(
     routeHints: turnRouteHints,
     hasImageAttachment: latestUserHasImageAttachment,
     browserRelayAvailable,
-    additionalToolNames: options?.additionalToolNames ?? [],
+    additionalToolNames,
     enableAnthropicToolSearch: options?.enableAnthropicToolSearch === true,
   });
   timings.toolsMs = roundMs(nowMs() - toolsStartedAt);
@@ -225,6 +260,17 @@ export async function loadContext(
       : null;
     return Boolean(anthropic && typeof anthropic === "object" && "deferLoading" in anthropic);
   }).length;
+
+  const profileFactMemoryStartedAt = nowMs();
+  const profileFactMemory = await profileFactMemoryPromise;
+  timings.profileFactMemoryMs = typeof profileFactMemory.timings.totalMs === "number"
+    ? profileFactMemory.timings.totalMs
+    : roundMs(nowMs() - profileFactMemoryStartedAt);
+  timings.profileFactMemoryChars = profileFactMemory.content.length;
+  timings.profileFactMemoryCount = profileFactMemory.timings.memoryCount ?? null;
+  timings.profileFactMemorySkipReason = typeof profileFactMemory.timings.skipReason === "string"
+    ? profileFactMemory.timings.skipReason
+    : null;
 
   const initialToolChoice = (() => {
     const toolNames = new Set(Object.keys(tools));
@@ -243,7 +289,7 @@ export async function loadContext(
       }
     }
 
-    if (toolNames.has("agent") && shouldStartAgentForTurn(userQuery)) {
+    if (toolNames.has("agent") && (shouldStartAgentForTurn(userQuery) || recentConversationFocus.agentContinuation)) {
       return { type: "tool", toolName: "agent" } as const;
     }
 
@@ -268,7 +314,9 @@ export async function loadContext(
     if (
       toolNames.has("bash")
       && (
-        routedSkillIds.has("skill-hub")
+        intentDecision.needs.cameraCapture
+        || intentDecision.needs.fileManagement
+        || routedSkillIds.has("skill-hub")
         || routedSkillIds.has("skill-search")
         || routedSkillIds.has("memory-management")
         || routedSkillIds.has("thread-management")
@@ -277,8 +325,6 @@ export async function loadContext(
         || routedSkillIds.has("scheduler")
         || routedSkillIds.has("system-info")
         || routedSkillIds.has("file-manager")
-        || intentDecision.needs.cameraCapture
-        || intentDecision.needs.fileManagement
       )
     ) {
       return { type: "tool", toolName: "bash" } as const;
@@ -295,16 +341,21 @@ export async function loadContext(
     cachedSectionIds,
     uncachedSectionIds,
   } = buildSystemPromptFromSections(persona, [
+    uncachedSystemPromptSection("retrieved_memories", profileFactMemory.content),
     cachedSystemPromptSection(
       "agent_delegation_guidance",
       "agent" in tools
         ? [
             "## Child Agents",
             "- The `agent` tool is available this turn for delegated work.",
-            "- Use `subagent_type` to select the AgentDefinition: developer, designer, researcher, product-manager, operator, planner, evaluator, general-purpose, coder, Plan, Explore, alma-guide, alma-operator, statusline-setup.",
+            "- Use `subagent_type` to select the execution template: general-purpose, coder, Plan, Explore, alma-guide, alma-operator, statusline-setup.",
+            "- Use `persona` for the expert perspective: developer, designer, researcher, product-manager, operator, planner, evaluator.",
             "- `agent_id` is not an input selector; it appears in the tool result as the runtime id of the spawned child agent.",
-            "- When the user asks a named expert such as designer/planner/evaluator to inspect, plan, review, or execute something, call `agent` with that `subagent_type` instead of answering as that expert yourself.",
-            "- To check a background child agent, call `agent` with the same `subagent_type` and `read_output: true`.",
+            "- The stable child agent key is `subagent_type` plus optional `persona`; reuse the same pair when checking or continuing that expert.",
+            "- When the user asks a named expert such as designer/planner/evaluator to inspect, plan, review, or execute something, call `agent` instead of answering as that expert yourself.",
+            "- Useful defaults: UI/design review uses `Explore` + `designer`; implementation uses `coder` + `developer`; planning uses `Plan` + `planner`; evaluation/review uses `Explore` + `evaluator`.",
+            "- Prefer `run_in_background: true` for broad or slow child-agent work. If a synchronous child run exceeds its wait window, the tool returns `async_launched` and the child continues in the background.",
+            "- To check a background child agent, prefer `resume` with the returned `agent_id` plus `read_output: true`; otherwise use the same `subagent_type` and `persona`.",
           ].join("\n")
         : "",
     ),
@@ -333,7 +384,6 @@ export async function loadContext(
     uncachedSystemPromptSection("task_working_memory_tail", sessionContext.taskWorkingMemorySections.tail),
     uncachedSystemPromptSection("recent_tool_activity", sessionContext.recentToolActivity),
     uncachedSystemPromptSection("recent_research_memory", sessionContext.recentResearchMemory),
-    uncachedSystemPromptSection("profile_fact_memory", profileFactMemory.content),
     uncachedSystemPromptSection("historical_context", historicalContext.content),
     uncachedSystemPromptSection("skill_context_tail", skillContext.tail),
   ]);
@@ -351,12 +401,12 @@ export async function loadContext(
   timings.systemPromptUncachedSectionIds = uncachedSectionIds.join(",");
   timings.dynamicBlockCount = uncachedSectionIds.length;
   const uncachedSectionCharCount = [
+    profileFactMemory.content,
     recentConversationFocus.content,
     activeTurnSections.tail,
     sessionContext.taskWorkingMemorySections.tail,
     sessionContext.recentToolActivity,
     sessionContext.recentResearchMemory,
-    profileFactMemory.content,
     historicalContext.content,
     skillContext.tail,
   ].filter(Boolean).reduce((sum, block) => sum + block.length, 0);
@@ -405,6 +455,7 @@ export async function loadContext(
       abortSignal,
     },
     timings,
+    displayMemories: profileFactMemory.displayMemories,
     displaySkillIds: routedSkills.map((skill) => skill.id),
   };
 }

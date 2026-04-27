@@ -601,7 +601,7 @@ function shouldRenderActivePlanArtifact(
   }
 
   if (!isPlanning) {
-    return plan.status === "approved";
+    return false;
   }
 
   if (!enteredAt) {
@@ -704,10 +704,12 @@ function buildAssistantTurnMetadata(
     toolWorkflowEntries.map((entry) => [entry.toolCallId, buildToolSourceLinks(entry)] as const),
   );
   const turnMetadataByMessageId = new Map<string, {
+    memories: string[];
     tools: string[];
     skills: string[];
     sourceLinks: ToolSourceLink[];
   }>();
+  const currentTurnMemories = new Set<string>();
   const currentTurnTools = new Set<string>();
   const currentTurnSkills = new Set<string>();
   const currentTurnSourceLinks: ToolSourceLink[] = [];
@@ -716,12 +718,14 @@ function buildAssistantTurnMetadata(
 
   function finalizeTurn() {
     if (currentTurnAssistantMessageIds.length === 0) {
+      currentTurnMemories.clear();
       currentTurnTools.clear();
       currentTurnSkills.clear();
       currentTurnSourceLinks.length = 0;
       return;
     }
 
+    const turnMemories = [...currentTurnMemories];
     const turnTools = [...currentTurnTools];
     const turnSkills = [...currentTurnSkills];
     const turnSourceLinks = dedupeToolSourceLinks(currentTurnSourceLinks);
@@ -729,12 +733,14 @@ function buildAssistantTurnMetadata(
 
     for (const messageId of currentTurnAssistantMessageIds) {
       turnMetadataByMessageId.set(messageId, {
+        memories: turnMemories,
         tools: turnTools,
         skills: turnSkills,
         sourceLinks: messageId === lastAssistantMessageId ? turnSourceLinks : [],
       });
     }
 
+    currentTurnMemories.clear();
     currentTurnTools.clear();
     currentTurnSkills.clear();
     currentTurnSourceLinks.length = 0;
@@ -743,7 +749,7 @@ function buildAssistantTurnMetadata(
 
   for (const event of sessionEvents) {
     if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
-      const payload = event.payload as { message?: SessionMessage; skills?: unknown };
+      const payload = event.payload as { message?: SessionMessage; memories?: unknown; skills?: unknown };
       const message = payload.message;
       if (!message) {
         continue;
@@ -756,6 +762,14 @@ function buildAssistantTurnMetadata(
 
       if (!currentTurnAssistantMessageIds.includes(message.id)) {
         currentTurnAssistantMessageIds.push(message.id);
+      }
+
+      if (Array.isArray(payload.memories)) {
+        for (const memory of payload.memories) {
+          if (typeof memory === "string" && memory.trim()) {
+            currentTurnMemories.add(memory.trim());
+          }
+        }
       }
 
       if (Array.isArray(payload.skills)) {
@@ -801,6 +815,7 @@ type TimelineEntry =
       sortTime: string;
       sourceLinks: ToolSourceLink[];
       turnMeta: {
+        memories: string[];
         tools: string[];
         skills: string[];
       } | null;
@@ -843,6 +858,7 @@ type TimelineBlock =
       message: import("@aliceloop/runtime-core").SessionMessage;
       sourceLinks: ToolSourceLink[];
       turnMeta: {
+        memories: string[];
         tools: string[];
         skills: string[];
       } | null;
@@ -850,6 +866,7 @@ type TimelineBlock =
   | {
       kind: "assistant-turn";
       turnMeta: {
+        memories: string[];
         tools: string[];
         skills: string[];
       };
@@ -894,6 +911,7 @@ function buildTimeline(
   sessionEvents: SessionEvent[],
   activePlanMeta: PlanMessageMeta | null,
   activePlanUpdatedAt: string | null,
+  planModeActive: boolean,
 ): TimelineBlock[] {
   const messageSeqById = new Map<string, number>();
   const approvalSeqById = new Map<string, number>();
@@ -923,7 +941,8 @@ function buildTimeline(
         transition?: unknown;
       };
       if (
-        payload.planMode
+        planModeActive
+        && payload.planMode
         && (payload.transition === "entered" || payload.transition === "exited")
       ) {
         entries.push({
@@ -962,6 +981,7 @@ function buildTimeline(
       sourceLinks: assistantTurnMetadata?.sourceLinks ?? [],
       turnMeta: assistantTurnMetadata
         ? {
+            memories: assistantTurnMetadata.memories,
             tools: assistantTurnMetadata.tools,
             skills: assistantTurnMetadata.skills,
           }
@@ -1034,6 +1054,7 @@ function buildTimeline(
   const blocks: TimelineBlock[] = [];
   let pendingAssistantTurn: {
     turnMeta: {
+      memories: string[];
       tools: string[];
       skills: string[];
     } | null;
@@ -1058,7 +1079,7 @@ function buildTimeline(
     if (pendingAssistantTurn.items.length > 0) {
       blocks.push({
         kind: "assistant-turn",
-        turnMeta: pendingAssistantTurn.turnMeta ?? { tools: [], skills: [] },
+        turnMeta: pendingAssistantTurn.turnMeta ?? { memories: [], tools: [], skills: [] },
         items: pendingAssistantTurn.items,
       });
     }
@@ -1423,6 +1444,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       conversation.sessionEvents,
       activePlanMeta,
       conversation.activePlan?.updatedAt ?? null,
+      conversation.planMode.active,
     ),
     [
       conversation.messages,
@@ -1431,10 +1453,11 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       conversation.sessionEvents,
       activePlanMeta,
       conversation.activePlan?.updatedAt,
+      conversation.planMode.active,
     ],
   );
   const planMetaByMessageId = useMemo(() => {
-    if (activePlanMeta) {
+    if (!conversation.planMode.active || activePlanMeta) {
       return new Map<string, PlanMessageMeta>();
     }
 
@@ -1453,7 +1476,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       }
     }
     return next;
-  }, [conversation.messages, conversation.sessionEvents, activePlanMeta]);
+  }, [conversation.messages, conversation.sessionEvents, activePlanMeta, conversation.planMode.active]);
   const activeQuestionApproval = useMemo(() => {
     if (!conversation.planMode.active) {
       return null;
@@ -2538,10 +2561,10 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                         key={getAssistantTurnRenderKey(conversation.sessionId, entry)}
                         className="workspace__assistant-turn"
                       >
-                        <TurnMetaBadge tools={entry.turnMeta.tools} skills={entry.turnMeta.skills} />
+                        <TurnMetaBadge memories={entry.turnMeta.memories} tools={entry.turnMeta.tools} skills={entry.turnMeta.skills} />
                         {entry.items.map((item, itemIndex) => {
                           if (item.kind === "tool") {
-                            return <ToolWorkflowCard key={`tool-${item.tool.toolCallId}`} entry={item.tool} />;
+                            return <ToolWorkflowCard key={`tool-${item.tool.toolCallId}`} entry={item.tool} planModeActive={conversation.planMode.active} />;
                           }
 
                           const message = item.message;
@@ -2686,7 +2709,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                         </div>
                         <div className="workspace__tool-group-items">
                           {entry.tools.map((tool) => (
-                            <ToolWorkflowCard key={`tool-${tool.toolCallId}`} entry={tool} />
+                            <ToolWorkflowCard key={`tool-${tool.toolCallId}`} entry={tool} planModeActive={conversation.planMode.active} />
                           ))}
                         </div>
                       </section>
@@ -2733,7 +2756,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   }
 
                   if (entry.kind === "tool") {
-                    return <ToolWorkflowCard key={`tool-${entry.tool.toolCallId}`} entry={entry.tool} />;
+                    return <ToolWorkflowCard key={`tool-${entry.tool.toolCallId}`} entry={entry.tool} planModeActive={conversation.planMode.active} />;
                   }
 
                   if (entry.kind === "plan-transition") {
@@ -2956,6 +2979,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                   <ThinkingIndicator
                     thinkingSteps={conversation.thinkingSteps}
                     currentToolName={conversation.currentToolName}
+                    contextActivity={conversation.latestJob?.status === "queued" ? "Retrieving memories" : null}
                   />
                 )}
 

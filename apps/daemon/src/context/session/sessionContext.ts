@@ -241,6 +241,7 @@ function splitLatestMessageAnchorLines(content: string) {
 function isTrackedRecentToolName(toolName: string) {
   return toolName === "web_search"
     || toolName === "web_fetch"
+    || toolName === "agent"
     || toolName === "bash"
     || toolName.startsWith("browser_");
 }
@@ -251,7 +252,7 @@ function isContinuationLikeMessage(content: string) {
     return false;
   }
 
-  return /^(?:你呢|你那边呢|你查|你搜|继续|接着|按这个|按它|照这个|这个呢|那这个呢|然后呢|查一下|搜一下|再查|再搜|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗|按这个平台|按这个时间|按这个口径)/u.test(trimmed);
+  return /^(?:你呢|你那边呢|你查|你搜|继续|接着|按这个|按它|照这个|这个呢|那这个呢|然后呢|查一下|搜一下|再查|再搜|现在什么情况|现在咋样|现在怎么样|最新情况|有进展吗|进展如何|怎么样了|情况怎么样|还有进展吗|按这个平台|按这个时间|按这个口径|我的意思是|不是|不对|错了|换成|改成|应该是)/u.test(trimmed);
 }
 
 function isFileManagementFollowupMessage(content: string) {
@@ -449,6 +450,7 @@ export interface RecentConversationFocus {
   carryForwardConstraints: string | null;
   resolvedCurrentRequest: string | null;
   effectiveUserQuery: string | null;
+  agentContinuation: boolean;
   routeHints: SkillRouteHints;
 }
 
@@ -743,6 +745,7 @@ function buildRecentConversationFocusFromSnapshot(
       carryForwardConstraints: null,
       resolvedCurrentRequest: null,
       effectiveUserQuery: null,
+      agentContinuation: false,
       routeHints: {
         stickySkillIds: [],
         reasons: [],
@@ -765,10 +768,12 @@ function buildRecentConversationFocusFromSnapshot(
   );
   const carryForwardConstraints = summarizeCarryForwardConstraints(anchors);
   const recentToolNames = recentToolTraces.map((trace) => trace.toolName);
+  const sawRecentAgentTool = recentToolNames.includes("agent");
   const sawRecentWebTool = recentToolNames.some((toolName) => {
     return toolName === "web_search" || toolName === "web_fetch";
   });
   const needsDeepResearchFollowup = sawRecentWebTool && prefersDeepResearchFetch(latestContent);
+  const agentContinuation = continuationLike && sawRecentAgentTool;
   const resolvedCurrentRequest = buildResolvedCurrentRequest({
     latestContent,
     continuationLike,
@@ -793,6 +798,9 @@ function buildRecentConversationFocusFromSnapshot(
     loginOrQrContinuation: looksLikeLoginOrQrContinuationContext(carryForwardFacts)
       || looksLikeLoginOrQrContinuationContext(carryForwardConstraints),
   }).routeHints;
+  if (agentContinuation) {
+    routeHints.reasons.push("carry forward recent child-agent delegation");
+  }
 
   const lines = [
     "## Recent Conversation Focus",
@@ -825,6 +833,10 @@ function buildRecentConversationFocusFromSnapshot(
     if (fileManagementContinuation) {
       lines.push("- Required action for this turn: continue the recent file-management request with `bash` instead of replying with a command as plain text.");
       lines.push("- If the action is destructive, use the existing delete confirmation flow and then continue after the user resolves it.");
+    }
+    if (agentContinuation) {
+      lines.push("- Required action for this turn: continue the recent child-agent task with the `agent` tool instead of switching to `bash` or writing a tool call as plain text.");
+      lines.push("- If the user corrected the child-agent task target, send the corrected target back through `agent` as a new child-agent task. If only checking progress, use `read_output: true` with the returned `agent_id` when available.");
     }
     if (needsDeepResearchFollowup) {
       lines.push("- The latest follow-up is asking for a deeper read, not another shallow search.");
@@ -871,6 +883,7 @@ function buildRecentConversationFocusFromSnapshot(
     carryForwardConstraints,
     resolvedCurrentRequest,
     effectiveUserQuery,
+    agentContinuation,
     routeHints,
   };
 }

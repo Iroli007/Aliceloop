@@ -4,6 +4,10 @@ import { generateText } from "ai";
 import type { AgentContext } from "../context/index";
 import { createProviderModel } from "../providers/providerModelFactory";
 import type { StoredProviderConfig } from "../repositories/providerRepository";
+import {
+  recordToolCallCompleted,
+  recordToolCallStarted,
+} from "../repositories/sessionOpenTaskRepository";
 import { buildAgentProviderOptions } from "./providerRuntimeAdapter";
 import { repairTextToolCall } from "./toolCallRepair";
 import type { ToolStateMachine } from "./toolStateMachine";
@@ -84,6 +88,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
   }
 
   const toolCallId = `minimax-fallback-${randomUUID()}`;
+  recordToolCallStarted(input.sessionId, parsed.toolName, toolCallId, parsed.input);
   input.stateMachine.start(toolCallId, parsed.toolName, parsed.input);
   input.stateMachine.markInputAvailable(toolCallId);
 
@@ -95,7 +100,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
     backend: predictedRuntime.backend,
     tabId: predictedRuntime.tabId,
     state: "input-available",
-    fallbackSource: "minimax_text_tool_call",
+    fallbackSource: parsed.source,
   });
 
   const toolStartedAt = nowMs();
@@ -104,6 +109,13 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
     const output = await tool.execute(parsed.input);
     input.stateMachine.markOutputAvailable(toolCallId, output);
     input.stateMachine.complete(toolCallId);
+    recordToolCallCompleted({
+      sessionId: input.sessionId,
+      toolName: parsed.toolName,
+      toolCallId,
+      success: true,
+      output,
+    });
 
     const browserPayload = input.extractBrowserToolPayload(output);
     input.publishRuntimeEvent(input.sessionId, "tool.call.completed", {
@@ -115,7 +127,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
       backend: browserPayload.backend ?? predictedRuntime.backend,
       tabId: browserPayload.tabId ?? predictedRuntime.tabId,
       state: "output-available",
-      fallbackSource: "minimax_text_tool_call",
+      fallbackSource: parsed.source,
     });
 
     void input.maybePublishToolImageAttachment(
@@ -170,6 +182,13 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
   } catch (error) {
     input.stateMachine.markError(toolCallId, error);
     input.stateMachine.complete(toolCallId);
+    recordToolCallCompleted({
+      sessionId: input.sessionId,
+      toolName: parsed.toolName,
+      toolCallId,
+      success: false,
+      error,
+    });
 
     input.publishRuntimeEvent(input.sessionId, "tool.call.completed", {
       toolCallId,
@@ -180,7 +199,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
       backend: predictedRuntime.backend,
       tabId: predictedRuntime.tabId,
       state: "output-error",
-      fallbackSource: "minimax_text_tool_call",
+      fallbackSource: parsed.source,
     });
 
     return {

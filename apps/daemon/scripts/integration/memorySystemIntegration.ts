@@ -185,6 +185,7 @@ async function main() {
       content: "Prefer concise answers in Chinese.",
       source: "manual",
       durability: "permanent",
+      memoryType: "feedback",
       factKind: "preference",
       factKey: "reply-style",
       factState: "active",
@@ -193,11 +194,13 @@ async function main() {
     const factCreated = await sendJson<{
       id: string;
       content: string;
+      memoryType: string;
       factKind: string | null;
       factKey: string | null;
       factState: string;
     }>(`${baseUrl}/api/memory/entries`, "POST", typedFact);
     assert.equal(factCreated.status, 201, "typed fact creation should succeed");
+    assert.equal(factCreated.json?.memoryType, "feedback", "typed fact should preserve memory type");
     assert.equal(factCreated.json?.factState, "active", "new typed fact should start active");
 
     const factDuplicate = await sendJson<{

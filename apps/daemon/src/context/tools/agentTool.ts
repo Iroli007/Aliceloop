@@ -10,6 +10,7 @@ import {
   getSessionProjectBinding,
   getSessionSnapshot,
   hasSession,
+  listChildAgentSessions,
   upsertChildAgentSession,
   type ChildAgentRecord,
 } from "../../repositories/sessionRepository";
@@ -24,6 +25,8 @@ const subagentTypes = [
   "alma-guide",
   "alma-operator",
   "statusline-setup",
+] as const;
+const personaTypes = [
   "developer",
   "designer",
   "researcher",
@@ -34,8 +37,10 @@ const subagentTypes = [
 ] as const;
 const writeBackKinds = ["summary", "artifact", "decision", "patch"] as const;
 const outputPollIntervalMs = 300;
+const defaultSyncWaitTimeoutMs = 30_000;
 
 type SubagentType = typeof subagentTypes[number];
+type PersonaType = typeof personaTypes[number];
 
 const subagentTypeBriefs: Record<SubagentType, string> = {
   "general-purpose": "Handle a broad delegated task with balanced reasoning and concise reporting.",
@@ -45,6 +50,9 @@ const subagentTypeBriefs: Record<SubagentType, string> = {
   "alma-guide": "Act as an Alma guide. Explain the path forward clearly and keep the handoff easy to follow.",
   "alma-operator": "Act as an Alma operator. Execute the assigned workflow carefully and report operational status.",
   "statusline-setup": "Act as a statusline setup specialist. Focus on shell/editor statusline configuration details.",
+};
+
+const personaBriefs: Record<PersonaType, string> = {
   developer: "You are a senior developer focused on correctness, small patches, and practical verification.",
   designer: "You are a product designer focused on clear UX, visual hierarchy, and user flow.",
   researcher: "You are a researcher focused on evidence, source quality, and careful synthesis.",
@@ -56,6 +64,40 @@ const subagentTypeBriefs: Record<SubagentType, string> = {
 
 function isSubagentType(value: string): value is SubagentType {
   return (subagentTypes as readonly string[]).includes(value);
+}
+
+function isPersonaType(value: string): value is PersonaType {
+  return (personaTypes as readonly string[]).includes(value);
+}
+
+function defaultSubagentTypeForPersona(persona: PersonaType | undefined): SubagentType {
+  switch (persona) {
+    case "developer":
+      return "coder";
+    case "planner":
+    case "product-manager":
+      return "Plan";
+    case "designer":
+    case "researcher":
+    case "evaluator":
+      return "Explore";
+    default:
+      return "general-purpose";
+  }
+}
+
+function buildWriteBackInstruction(writeBack: typeof writeBackKinds[number] | undefined) {
+  switch (writeBack) {
+    case "artifact":
+      return "Output contract: return the complete artifact first, then a short note about assumptions or open questions.";
+    case "decision":
+      return "Output contract: start with the recommended decision, then give the tradeoffs and why alternatives lost.";
+    case "patch":
+      return "Output contract: start with what changed, then list touched files and verification results.";
+    case "summary":
+    default:
+      return "Output contract: start with the conclusion, then 3-5 key points, then only the details needed to support them.";
+  }
 }
 
 const handoffSchema = z.object({
@@ -70,19 +112,26 @@ const handoffSchema = z.object({
 
 function buildAgentProfile(input: {
   subagentType?: SubagentType;
+  persona?: PersonaType;
   childAgent?: ChildAgentRecord | null;
 }) {
-  const childAgentType = input.childAgent && isSubagentType(input.childAgent.agentRole)
+  const childSubagentType = input.childAgent && isSubagentType(input.childAgent.agentKind)
+    ? input.childAgent.agentKind
+    : undefined;
+  const childPersona = input.childAgent && isPersonaType(input.childAgent.agentRole)
     ? input.childAgent.agentRole
     : undefined;
-  const subagentType = input.subagentType ?? childAgentType ?? "general-purpose";
+  const persona = input.persona ?? childPersona;
+  const subagentType = input.subagentType ?? childSubagentType ?? defaultSubagentTypeForPersona(persona);
+  const agentKey = persona ? `${subagentType}:${persona}` : subagentType;
 
   return {
-    agentKind: "subagent-type",
-    agentRole: subagentType,
-    agentKey: subagentType,
+    agentKind: subagentType,
+    agentRole: persona ?? "",
+    agentKey,
     subagentType,
-    memoryScope: `subagent:${subagentType}`,
+    persona,
+    memoryScope: persona ? `subagent:${subagentType}:${persona}` : `subagent:${subagentType}`,
   };
 }
 
@@ -106,7 +155,7 @@ function buildAgentIdentity(input: {
     parentSessionId: input.parentSessionId,
     ...input.profile,
     subagent_type: input.profile.subagentType,
-    displayName: `${input.profile.agentRole} · ${input.description}`,
+    displayName: `${input.profile.persona ? `${input.profile.subagentType} · ${input.profile.persona}` : input.profile.subagentType} · ${input.description}`,
   };
 }
 
@@ -130,10 +179,12 @@ function buildSystemPrompt(input: {
   agentKey: string;
   memoryScope: string;
   subagentType: SubagentType;
+  persona?: PersonaType;
   handoff?: z.infer<typeof handoffSchema>;
   harness?: { enabled?: boolean };
 }) {
-  const roleBrief = subagentTypeBriefs[input.subagentType];
+  const executionBrief = subagentTypeBriefs[input.subagentType];
+  const personaBrief = input.persona ? personaBriefs[input.persona] : "";
   const handoff = input.handoff;
 
   return [
@@ -143,7 +194,9 @@ function buildSystemPrompt(input: {
     `Agent key: ${input.agentKey}`,
     `Memory scope: ${input.memoryScope}`,
     `Subagent type: ${input.subagentType}`,
-    roleBrief ? `Role brief:\n${roleBrief}` : "",
+    input.persona ? `Persona: ${input.persona}` : "",
+    executionBrief ? `Execution template:\n${executionBrief}` : "",
+    personaBrief ? `Expert perspective:\n${personaBrief}` : "",
     input.harness?.enabled ? "Harness: enabled. Break complex work into sprint-sized loops and report each loop's result." : "",
     handoff?.goal?.trim() ? `Goal:\n${handoff.goal.trim()}` : "",
     handoff?.deliverable?.trim() ? `Deliverable:\n${handoff.deliverable.trim()}` : "",
@@ -152,6 +205,7 @@ function buildSystemPrompt(input: {
     formatList("Acceptance criteria:", handoff?.acceptanceCriteria),
     formatList("Artifact references:", handoff?.artifactRefs),
     handoff?.writeBack ? `Write back as: ${handoff.writeBack}` : "",
+    buildWriteBackInstruction(handoff?.writeBack),
     "Work independently and return a concise result for the parent agent.",
   ].filter(Boolean).join("\n\n");
 }
@@ -186,7 +240,7 @@ function resolveChildSession(input: {
 
   const parentBinding = getSessionProjectBinding(input.parentSessionId);
   const childSessionId = createSession({
-    title: `Agent · ${input.profile.agentRole}`,
+    title: `Agent · ${input.profile.agentKey}`,
     projectId: parentBinding?.projectId ?? undefined,
     reuseDraft: false,
   }).id;
@@ -197,7 +251,7 @@ function resolveChildSession(input: {
     childSessionId,
     agentKind: input.profile.agentKind,
     agentRole: input.profile.agentRole,
-    displayName: `Agent · ${input.profile.agentRole}`,
+    displayName: `Agent · ${input.profile.agentKey}`,
   });
 
   return {
@@ -205,6 +259,38 @@ function resolveChildSession(input: {
     shouldWriteSystemPrompt: true,
     reusedAgent: false,
   };
+}
+
+function buildProfileFromChildAgent(childAgent: ChildAgentRecord) {
+  return buildAgentProfile({ childAgent });
+}
+
+function findFallbackChildAgent(input: {
+  parentSessionId: string;
+  profile: ReturnType<typeof buildAgentProfile>;
+}) {
+  const bySubagentKey = getChildAgentSession(input.parentSessionId, input.profile.subagentType);
+  if (bySubagentKey && hasSession(bySubagentKey.childSessionId)) {
+    return bySubagentKey;
+  }
+
+  const candidates = listChildAgentSessions(input.parentSessionId)
+    .filter((childAgent) => hasSession(childAgent.childSessionId));
+  const matchingSubagent = candidates.filter((childAgent) =>
+    childAgent.agentKind === input.profile.subagentType
+    || childAgent.agentKey === input.profile.subagentType
+    || childAgent.agentKey.startsWith(`${input.profile.subagentType}:`)
+  );
+
+  if (matchingSubagent.length === 1) {
+    return matchingSubagent[0];
+  }
+
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+
+  return null;
 }
 
 function resolveExistingChildSession(input: {
@@ -218,15 +304,32 @@ function resolveExistingChildSession(input: {
       throw new Error(`Cannot read unknown child agent session: ${resumeId}`);
     }
 
-    return resumeId;
+    return {
+      childSessionId: resumeId,
+      profile: input.profile,
+    };
   }
 
   const existing = getChildAgentSession(input.parentSessionId, input.profile.agentKey);
   if (!existing || !hasSession(existing.childSessionId)) {
-    throw new Error(`No child agent has been started for ${input.profile.agentKey}.`);
+    const fallback = findFallbackChildAgent(input);
+    if (fallback) {
+      return {
+        childSessionId: fallback.childSessionId,
+        profile: buildProfileFromChildAgent(fallback),
+      };
+    }
+
+    const available = listChildAgentSessions(input.parentSessionId)
+      .map((childAgent) => childAgent.agentKey)
+      .join(", ");
+    throw new Error(`No child agent has been started for ${input.profile.agentKey}.${available ? ` Available child agents: ${available}.` : ""}`);
   }
 
-  return existing.childSessionId;
+  return {
+    childSessionId: existing.childSessionId,
+    profile: input.profile,
+  };
 }
 
 function delay(ms: number) {
@@ -251,6 +354,22 @@ function mapJobStatus(job: ReturnType<typeof getLatestProviderJob>) {
 
 function isActiveOutputStatus(status: string) {
   return status === "queued" || status === "running";
+}
+
+async function waitForRunCompletion(runPromise: Promise<unknown>, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      runPromise.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function buildOutputSnapshot(input: {
@@ -318,7 +437,8 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
       inputSchema: z.object({
         description: z.string().min(1).optional().describe("Optional 3-5 word task summary; required when starting a new task"),
         prompt: z.string().min(1).optional().describe("Detailed task instructions for the child agent; required unless read_output is true"),
-        subagent_type: z.enum(subagentTypes).optional().describe("Optional AgentDefinition name to dispatch to; omitted defaults to general-purpose"),
+        subagent_type: z.enum(subagentTypes).optional().describe("Optional execution template: general-purpose, coder, Plan, Explore, alma-guide, alma-operator, or statusline-setup"),
+        persona: z.enum(personaTypes).optional().describe("Optional expert perspective: developer, designer, researcher, product-manager, operator, planner, or evaluator"),
         handoff: handoffSchema.optional().describe("Optional structured handoff package for goal, deliverable, constraints, context, acceptance criteria, artifact refs, and write-back style"),
         harness: z.object({
           enabled: z.boolean().optional().describe("Set true to ask the child agent to run multi-sprint orchestration"),
@@ -327,10 +447,10 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
         resume: z.string().optional().describe("Optional existing child agent session id to resume"),
         read_output: z.boolean().optional().describe("Set true to read the latest output/status for this child agent instead of starting a new task"),
         wait: z.boolean().optional().describe("With read_output, wait briefly for a queued/running child agent to finish"),
-        timeout_ms: z.number().int().min(500).max(120_000).optional().describe("Maximum wait time in milliseconds for read_output + wait"),
+        timeout_ms: z.number().int().min(500).max(120_000).optional().describe("Maximum wait time in milliseconds for read_output + wait, or for a synchronous child run before it is returned as background work"),
         run_in_background: z.boolean().optional().describe("Set true to return immediately and collect results from the child session transcript later"),
       }),
-      execute: async ({ description, prompt, subagent_type, handoff, harness, model, resume, read_output, wait, timeout_ms, run_in_background }) => {
+      execute: async ({ description, prompt, subagent_type, persona, handoff, harness, model, resume, read_output, wait, timeout_ms, run_in_background }) => {
         const normalizedDescription = description?.trim() ?? "读取子代理输出";
         const normalizedPrompt = prompt?.trim();
         if (read_output) {
@@ -352,20 +472,21 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
 
         const agentProfile = buildAgentProfile({
           subagentType: subagent_type,
+          persona,
           childAgent: getResumeChildAgent(parentSessionId, resume),
         });
 
         if (read_output) {
-          const childSessionId = resolveExistingChildSession({
+          const childSession = resolveExistingChildSession({
             parentSessionId,
             profile: agentProfile,
             resume,
           });
           return readAgentOutput({
             parentSessionId,
-            childSessionId,
+            childSessionId: childSession.childSessionId,
             description: normalizedDescription,
-            profile: agentProfile,
+            profile: childSession.profile,
             wait,
             timeoutMs: timeout_ms,
           });
@@ -397,6 +518,7 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
               agentKey: agentIdentity.agentKey,
               memoryScope: agentIdentity.memoryScope,
               subagentType: agentProfile.subagentType,
+              persona: agentProfile.persona,
               handoff,
               harness,
             }),
@@ -445,7 +567,30 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
           };
         }
 
-        await runPromise;
+        const completedInSyncWindow = await waitForRunCompletion(runPromise, timeout_ms ?? defaultSyncWaitTimeoutMs);
+        if (!completedInSyncWindow) {
+          void runPromise.catch((error) => {
+            console.warn("[agent-tool] timed-out child agent failed after background handoff", error);
+          });
+
+          const snapshot = getSessionSnapshot(childSessionId);
+          const binding = getSessionProjectBinding(childSessionId);
+          const outputFile = binding?.transcriptMarkdownPath ?? null;
+          return {
+            ...agentIdentity,
+            sessionId: childSessionId,
+            title: snapshot.session.title,
+            status: "async_launched",
+            reason: "sync_timeout",
+            reusedAgent: childSession.reusedAgent,
+            description: normalizedDescription,
+            prompt: taskPrompt,
+            outputFile,
+            transcriptMarkdownPath: outputFile,
+            canReadOutputFile: Boolean(outputFile),
+            response: "",
+          };
+        }
 
         const snapshot = getSessionSnapshot(childSessionId);
         const reply = [...snapshot.messages].reverse().find((message) => message.role === "assistant");

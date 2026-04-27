@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
-import { stepCountIs, streamText } from "ai";
+import { generateText, stepCountIs, streamText } from "ai";
 import { type AgentContext, loadContext } from "../context/index";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
@@ -579,6 +579,77 @@ interface StreamResult {
   };
 }
 
+function buildToolResultSummaryPrompt(
+  stateMachine: ToolStateMachine,
+  summarizeUnknown: (value: unknown, maxLength?: number) => string | null,
+) {
+  const toolStates = stateMachine.getAll();
+  const toolLines = toolStates.map((state, index) => {
+    const lines = [
+      `Tool ${index + 1}: ${state.toolName}`,
+      `status: ${state.status}`,
+    ];
+    const input = summarizeUnknown(state.input, 1200);
+    if (input) {
+      lines.push(`input: ${input}`);
+    }
+    if (state.error) {
+      lines.push(`error: ${state.error}`);
+    } else {
+      const output = summarizeUnknown(state.output, 6000);
+      if (output) {
+        lines.push(`output: ${output}`);
+      }
+    }
+    return lines.join("\n");
+  });
+
+  return [
+    "你刚刚已经执行完工具。请基于下面的工具结果，直接回答用户最初的请求。",
+    "不要输出新的工具调用、JSON、XML 或命令文本。不要只说工具已经完成。",
+    "如果工具结果足以回答，就给出最终答案；如果工具失败或信息不足，简短说明失败点和下一步。",
+    "",
+    "<tool_results>",
+    toolLines.join("\n\n"),
+    "</tool_results>",
+  ].join("\n");
+}
+
+async function synthesizeToolResultReply(input: {
+  run: AgentRun;
+  stateMachine: ToolStateMachine;
+  reasoningEffort: ReturnType<typeof getRuntimeSettings>["reasoningEffort"];
+  summarizeUnknown(value: unknown, maxLength?: number): string | null;
+}) {
+  if (input.stateMachine.getAll().length === 0) {
+    return null;
+  }
+
+  try {
+    const response = await generateText({
+      model: createProviderModel(input.run.provider, {
+        sessionId: input.run.sessionId,
+        enablePromptCacheEditing: true,
+      }),
+      system: input.run.context.systemPrompt,
+      messages: [
+        ...input.run.context.messages,
+        {
+          role: "user",
+          content: buildToolResultSummaryPrompt(input.stateMachine, input.summarizeUnknown),
+        },
+      ],
+      providerOptions: buildAgentProviderOptions(input.run.provider, input.reasoningEffort),
+      abortSignal: input.run.abortController.signal,
+    });
+    const text = response.text.trim();
+    return text ? { replacementText: text } : null;
+  } catch (error) {
+    console.warn("[agent-post-tool-summary] failed", error);
+    return null;
+  }
+}
+
 async function executeStreamAttempt(
   run: AgentRun,
   existingAssistantMessageId?: string | null,
@@ -650,6 +721,14 @@ async function executeStreamAttempt(
         extractBrowserToolPayload,
         publishRuntimeEvent,
         maybePublishToolImageAttachment,
+      });
+    },
+    resolveToolResultSummary: ({ stateMachine: summaryStateMachine, reasoningEffort }) => {
+      return synthesizeToolResultReply({
+        run,
+        stateMachine: summaryStateMachine,
+        reasoningEffort,
+        summarizeUnknown,
       });
     },
   });
@@ -755,8 +834,8 @@ export async function runAgent(sessionId: string, options?: RunAgentOptions) {
     sessionId,
     kind: "provider-completion",
     status: "queued",
-    title: "Preparing response",
-    detail: "Loading context and tools before the model starts responding.",
+    title: "Retrieving memories",
+    detail: "Searching relevant long-term memories before the model starts responding.",
   });
   return enqueueSessionRun(sessionId, async () => {
     const queueWaitMs = roundMs(nowMs() - enqueuedAt);

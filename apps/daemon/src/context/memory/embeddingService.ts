@@ -11,6 +11,13 @@ interface EmbeddingRequestOptions {
   abortSignal?: AbortSignal;
 }
 
+const modelOverrideTestApiKey = "fake-key-for-model-override-test";
+
+function normalizeEmbeddingApiKey(apiKey: string | null | undefined) {
+  const normalized = apiKey?.trim() ?? "";
+  return normalized === modelOverrideTestApiKey ? "" : normalized;
+}
+
 function normalizeGatewayBaseUrl(baseUrl: string) {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (!trimmed) {
@@ -21,7 +28,16 @@ function normalizeGatewayBaseUrl(baseUrl: string) {
 }
 
 function resolveOpenAICompatibleSettings() {
-  const explicitApiKey = process.env.OPENAI_API_KEY?.trim();
+  const dedicatedOpenAIProvider = getStoredProviderConfig("openai");
+  const dedicatedOpenAIApiKey = normalizeEmbeddingApiKey(dedicatedOpenAIProvider.apiKey);
+  if (dedicatedOpenAIApiKey) {
+    return {
+      apiKey: dedicatedOpenAIApiKey,
+      baseURL: normalizeGatewayBaseUrl(dedicatedOpenAIProvider.baseUrl) || undefined,
+    };
+  }
+
+  const explicitApiKey = normalizeEmbeddingApiKey(process.env.OPENAI_API_KEY);
   if (explicitApiKey) {
     return {
       apiKey: explicitApiKey,
@@ -29,16 +45,9 @@ function resolveOpenAICompatibleSettings() {
     };
   }
 
-  const dedicatedOpenAIProvider = getStoredProviderConfig("openai");
-  if (dedicatedOpenAIProvider.apiKey) {
-    return {
-      apiKey: dedicatedOpenAIProvider.apiKey,
-      baseURL: normalizeGatewayBaseUrl(dedicatedOpenAIProvider.baseUrl) || undefined,
-    };
-  }
-
   const activeProvider = getActiveProviderConfig();
-  if (!activeProvider?.apiKey) {
+  const activeProviderApiKey = normalizeEmbeddingApiKey(activeProvider?.apiKey);
+  if (!activeProvider || !activeProviderApiKey) {
     return null;
   }
 
@@ -52,7 +61,7 @@ function resolveOpenAICompatibleSettings() {
   }
 
   return {
-    apiKey: activeProvider.apiKey,
+    apiKey: activeProviderApiKey,
     baseURL: normalizeGatewayBaseUrl(activeProvider.baseUrl) || undefined,
   };
 }

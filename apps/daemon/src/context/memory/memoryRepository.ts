@@ -8,6 +8,7 @@ import type {
   MemoryFactState,
   MemoryNote,
   MemoryStats,
+  MemoryType,
   MemoryWithScore,
   UpdateMemoryInput,
 } from "@aliceloop/runtime-core";
@@ -44,6 +45,7 @@ interface MemoryRow {
   content: string;
   source: Memory["source"];
   durability: Memory["durability"];
+  memoryType: MemoryType;
   factKind: MemoryFactKind | null;
   factKey: string | null;
   factState: MemoryFactState;
@@ -175,6 +177,22 @@ function normalizeFactState(value: MemoryFactState | null | undefined): MemoryFa
   return value ?? "active";
 }
 
+function inferMemoryType(factKind: MemoryFactKind | null): MemoryType {
+  switch (factKind) {
+    case "profile":
+    case "account":
+      return "user";
+    case "preference":
+      return "feedback";
+    default:
+      return "project";
+  }
+}
+
+function normalizeMemoryType(value: MemoryType | null | undefined, factKind: MemoryFactKind | null): MemoryType {
+  return value ?? inferMemoryType(factKind);
+}
+
 function hasFactIdentity(memory: Pick<Memory, "factKind" | "factKey">) {
   return Boolean(memory.factKind && memory.factKey);
 }
@@ -234,6 +252,7 @@ function mapMemoryRow(row: MemoryRow): Memory {
     content: row.content,
     source: row.source,
     durability: row.durability,
+    memoryType: row.memoryType,
     factKind: row.factKind,
     factKey: row.factKey,
     factState: row.factState,
@@ -256,6 +275,7 @@ function getMemoryRowById(
           content,
           source,
           durability,
+          memory_type AS memoryType,
           fact_kind AS factKind,
           fact_key AS factKey,
           fact_state AS factState,
@@ -287,7 +307,7 @@ function scoreTextMatch(queryText: string, memory: Memory) {
     return 0;
   }
 
-  const haystack = [memory.factKind ?? "", memory.factKey ?? "", memory.content, ...memory.relatedTopics].join(" ").toLowerCase();
+  const haystack = [memory.memoryType, memory.factKind ?? "", memory.factKey ?? "", memory.content, ...memory.relatedTopics].join(" ").toLowerCase();
   const matchedTerms = significantTerms.filter((term) => haystack.includes(term));
   if (matchedTerms.length === 0) {
     return 0;
@@ -371,8 +391,8 @@ function searchMemoriesByText(
   const clauses: string[] = [];
   const params: Array<string | number> = [];
   for (const term of lexicalTerms) {
-    clauses.push("(content LIKE ? OR related_topics LIKE ? OR fact_key LIKE ? OR fact_kind LIKE ?)");
-    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
+    clauses.push("(content LIKE ? OR related_topics LIKE ? OR fact_key LIKE ? OR fact_kind LIKE ? OR memory_type LIKE ?)");
+    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
   }
   params.push(Math.max(limit * 3, limit));
 
@@ -384,6 +404,7 @@ function searchMemoriesByText(
           content,
           source,
           durability,
+          memory_type AS memoryType,
           fact_kind AS factKind,
           fact_key AS factKey,
           fact_state AS factState,
@@ -717,12 +738,14 @@ export async function createMemory(
   const factKind = normalizeFactKind(input.factKind);
   const factKey = normalizeFactKey(input.factKey);
   const factState = normalizeFactState(input.factState);
+  const memoryType = normalizeMemoryType(input.memoryType, factKind);
   const relatedTopics = input.relatedTopics?.map((topic) => topic.trim()).filter(Boolean) ?? [];
   const memory: Memory = {
     id: randomUUID(),
     content,
     source: input.source,
     durability: input.durability,
+    memoryType,
     factKind,
     factKey,
     factState,
@@ -778,6 +801,7 @@ export async function createMemory(
         content,
         source,
         durability,
+        memory_type,
         fact_kind,
         fact_key,
         fact_state,
@@ -785,13 +809,14 @@ export async function createMemory(
         updated_at,
         access_count,
         related_topics
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     memory.id,
     memory.content,
     memory.source,
     memory.durability,
+    memory.memoryType,
     memory.factKind,
     memory.factKey,
     memory.factState,
@@ -1083,6 +1108,7 @@ export function findMemoryByExactContent(content: string, db: Database.Database 
           content,
           source,
           durability,
+          memory_type AS memoryType,
           fact_kind AS factKind,
           fact_key AS factKey,
           fact_state AS factState,
@@ -1115,6 +1141,7 @@ function findActiveMemoryByFactIdentity(
           content,
           source,
           durability,
+          memory_type AS memoryType,
           fact_kind AS factKind,
           fact_key AS factKey,
           fact_state AS factState,
@@ -1154,6 +1181,7 @@ export async function updateMemory(
   const nextFactKind = updates.factKind !== undefined ? normalizeFactKind(updates.factKind) : current.factKind;
   const nextFactKey = updates.factKey !== undefined ? normalizeFactKey(updates.factKey) : current.factKey;
   const nextFactState = normalizeFactState(updates.factState ?? current.factState);
+  const nextMemoryType = updates.memoryType !== undefined ? normalizeMemoryType(updates.memoryType, nextFactKind) : current.memoryType;
   const nextRelatedTopics = updates.relatedTopics
     ? updates.relatedTopics.map((topic) => topic.trim()).filter(Boolean)
     : current.relatedTopics;
@@ -1168,6 +1196,7 @@ export async function updateMemory(
             content,
             source,
             durability,
+            memory_type AS memoryType,
             fact_kind AS factKind,
             fact_key AS factKey,
             fact_state AS factState,
@@ -1205,6 +1234,7 @@ export async function updateMemory(
       SET
         content = ?,
         durability = ?,
+        memory_type = ?,
         fact_kind = ?,
         fact_key = ?,
         fact_state = ?,
@@ -1215,6 +1245,7 @@ export async function updateMemory(
   ).run(
     nextContent,
     updates.durability ?? current.durability,
+    nextMemoryType,
     nextFactKind,
     nextFactKey,
     nextFactState,
@@ -1279,6 +1310,7 @@ export function listMemories(
     offset?: number;
     source?: Memory["source"];
     durability?: Memory["durability"];
+    memoryType?: MemoryType;
     orderBy?: "createdAt" | "updatedAt" | "accessCount";
     order?: "ASC" | "DESC";
   } = {},
@@ -1289,6 +1321,7 @@ export function listMemories(
     offset = 0,
     source,
     durability,
+    memoryType,
     orderBy = "createdAt",
     order = "DESC",
   } = options;
@@ -1303,6 +1336,7 @@ export function listMemories(
       content,
       source,
       durability,
+      memory_type AS memoryType,
       fact_kind AS factKind,
       fact_key AS factKey,
       fact_state AS factState,
@@ -1322,6 +1356,11 @@ export function listMemories(
   if (durability) {
     query += " AND durability = ?";
     params.push(durability);
+  }
+
+  if (memoryType) {
+    query += " AND memory_type = ?";
+    params.push(memoryType);
   }
 
   query += ` ORDER BY ${getMemoryOrderByColumn(orderBy)} ${normalizedOrder} LIMIT ? OFFSET ?`;

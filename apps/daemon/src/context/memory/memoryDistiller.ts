@@ -1,6 +1,6 @@
 import { generateText, Output } from "ai";
 import { z } from "zod";
-import type { MemoryFactKind } from "@aliceloop/runtime-core";
+import type { MemoryFactKind, MemoryType } from "@aliceloop/runtime-core";
 import { createProviderModel } from "../../providers/providerModelFactory";
 import { getToolModelConfig } from "../../providers/toolModelResolver";
 import { getMemoryConfig } from "./memoryConfig";
@@ -14,6 +14,7 @@ export interface DistilledMemory {
   content: string;
   durability: "permanent" | "temporary";
   relatedTopics: string[];
+  memoryType: MemoryType | null;
   factKind: MemoryFactKind | null;
   factKey: string | null;
 }
@@ -24,9 +25,11 @@ export interface DistilledMemoryBatch {
 }
 
 const memoryFactKindSchema = z.enum(["preference", "constraint", "decision", "profile", "account", "workflow", "other"]);
+const memoryTypeSchema = z.enum(["user", "feedback", "project", "reference"]);
 const extractedMemorySchema = z.object({
   content: z.string().trim().min(1).max(500),
   durability: z.enum(["permanent", "temporary"]),
+  memoryType: memoryTypeSchema.nullable().default(null),
   factKind: memoryFactKindSchema.nullable().default(null),
   factKey: z.string().trim().min(1).max(120).nullable().default(null),
   relatedTopics: z.array(z.string().trim().min(1).max(80)).max(6).default([]),
@@ -96,7 +99,9 @@ export async function extractMemoriesFromConversation(
         "Return both temporary session notes and permanent long-term facts when they are present.",
         "For temporary items, capture rolling session summary details such as temporary preferences, current conclusions, or topic summaries.",
         "For permanent items, keep only durable user preferences, project constraints, stable decisions, workflow conventions, or reusable solutions that would help future work.",
-        "For permanent items, fill factKind and factKey. Use a short stable lowercase fact key such as preferred-language, reply-style, or repo-boundary.",
+        "For permanent items, fill memoryType as one of: user (stable user profile, role, identity, account info), feedback (user guidance, preferences, style, workflow expectations), project (project decisions, constraints, or non-code project context), reference (external places or materials to consult later).",
+        "Use factKind and factKey as secondary labels. Use a short stable lowercase fact key such as preferred-language, reply-style, or repo-boundary.",
+        "Do not store code structure, file paths, git history, temporary task state, or implementation details as long-term memory.",
         "Do not store one-off research facts, biographies, web-search results, current events, or temporary file operations unless the user explicitly asked to remember them.",
         "Do not restate the entire conversation. Skip transient chit-chat. Return an empty array when nothing is worth storing.",
         "",
@@ -134,6 +139,7 @@ export async function reflectOnTurn(input: DistillationInput): Promise<Distilled
     content: memory.content,
     durability: memory.durability,
     relatedTopics: memory.relatedTopics,
+    memoryType: memory.memoryType,
     factKind: memory.factKind,
     factKey: memory.factKey,
   }));

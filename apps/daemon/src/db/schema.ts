@@ -29,6 +29,22 @@ export const schemaStatements = [
     ON sessions (project_id, updated_at DESC)
   `,
   `
+    CREATE TABLE IF NOT EXISTS session_open_tasks (
+      session_id TEXT PRIMARY KEY,
+      owner_tool TEXT NOT NULL,
+      status TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      tool_call_id TEXT,
+      tool_input TEXT NOT NULL DEFAULT '{}',
+      tool_output TEXT NOT NULL DEFAULT '{}',
+      child_agent_id TEXT,
+      subagent_type TEXT,
+      persona TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  `
     CREATE TABLE IF NOT EXISTS child_agents (
       parent_session_id TEXT NOT NULL,
       agent_key TEXT NOT NULL,
@@ -402,6 +418,7 @@ export const schemaStatements = [
       content TEXT NOT NULL,
       source TEXT NOT NULL CHECK(source IN ('auto', 'manual')),
       durability TEXT NOT NULL CHECK(durability IN ('permanent', 'temporary')),
+      memory_type TEXT NOT NULL DEFAULT 'project' CHECK(memory_type IN ('user', 'feedback', 'project', 'reference')),
       fact_kind TEXT CHECK(fact_kind IN ('preference', 'constraint', 'decision', 'profile', 'account', 'workflow', 'other')),
       fact_key TEXT,
       fact_state TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted')),
@@ -432,6 +449,14 @@ export const schemaStatements = [
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_memory_type_idx
+    ON memories (memory_type)
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS memories_type_state_updated_idx
+    ON memories (memory_type, fact_state, updated_at DESC)
   `,
   `
     CREATE INDEX IF NOT EXISTS memories_source_idx

@@ -733,6 +733,7 @@ export const defaultUserProfile: UserProfile = {
 
 export type MemorySource = "auto" | "manual";
 export type MemoryDurability = "permanent" | "temporary";
+export type MemoryType = "user" | "feedback" | "project" | "reference";
 export type MemoryFactKind = "preference" | "constraint" | "decision" | "profile" | "account" | "workflow" | "other";
 export type MemoryFactState = "active" | "superseded" | "retracted";
 export type MemoryEmbeddingModel = "text-embedding-3-small" | "text-embedding-3-large";
@@ -742,6 +743,7 @@ export interface Memory {
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
+  memoryType: MemoryType;
   factKind: MemoryFactKind | null;
   factKey: string | null;
   factState: MemoryFactState;
@@ -800,6 +802,7 @@ export interface CreateMemoryInput {
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
+  memoryType?: MemoryType | null;
   factKind?: MemoryFactKind | null;
   factKey?: string | null;
   factState?: MemoryFactState;
@@ -809,6 +812,7 @@ export interface CreateMemoryInput {
 export interface UpdateMemoryInput {
   content?: string;
   durability?: MemoryDurability;
+  memoryType?: MemoryType | null;
   factKind?: MemoryFactKind | null;
   factKey?: string | null;
   factState?: MemoryFactState;

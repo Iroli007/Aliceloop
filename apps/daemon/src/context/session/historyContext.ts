@@ -20,7 +20,7 @@ const HISTORY_SUMMARY_CHAR_BUDGET = parsePositiveInt(process.env.ALICELOOP_HISTO
 const HISTORY_FULL_CONTEXT_CHAR_BUDGET = parsePositiveInt(process.env.ALICELOOP_HISTORY_FULL_CONTEXT_CHAR_BUDGET, 4200);
 
 const historyIntentPattern =
-  /上次|之前|那次|那天|历史|会话|聊天记录|我们聊过|你还记得|还记得吗|以前说过|之前说过|full\s*context|完整上下文|完整会话|历史原文|原话/iu;
+  /最近|上次|之前|那次|那天|历史|会话|聊天记录|我们聊过|你还记得|还记得吗|以前说过|之前说过|full\s*context|完整上下文|完整会话|历史原文|原话/iu;
 const projectHistoryIntentPattern =
   /这个项目|这项目|这个工程|这个仓库|这个\s*repo|刚才那个项目|之前那个项目|我们定的|之前怎么定的|前面怎么定的/iu;
 const fullContextIntentPattern =

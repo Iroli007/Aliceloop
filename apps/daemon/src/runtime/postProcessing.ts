@@ -37,6 +37,7 @@ export function schedulePostProcessing(input: {
           content: memory.content,
           source: "auto",
           durability: "permanent",
+          memoryType: memory.memoryType,
           factKind: memory.factKind,
           factKey: memory.factKey,
           relatedTopics: memory.relatedTopics,

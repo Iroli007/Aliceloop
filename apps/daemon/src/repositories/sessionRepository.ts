@@ -798,6 +798,25 @@ export function getChildAgentSessionByChildId(parentSessionId: string, childSess
   return row ?? null;
 }
 
+export function listChildAgentSessions(parentSessionId: string): ChildAgentRecord[] {
+  return getDatabase().prepare(
+    `
+      SELECT
+        parent_session_id AS parentSessionId,
+        agent_key AS agentKey,
+        child_session_id AS childSessionId,
+        agent_kind AS agentKind,
+        agent_role AS agentRole,
+        display_name AS displayName,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM child_agents
+      WHERE parent_session_id = ?
+      ORDER BY updated_at DESC
+    `,
+  ).all(parentSessionId) as ChildAgentRecord[];
+}
+
 export function upsertChildAgentSession(input: {
   parentSessionId: string;
   agentKey: string;

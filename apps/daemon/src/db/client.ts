@@ -548,10 +548,11 @@ function seedProviderData(db: Database.Database) {
 function ensureColumn(db: Database.Database, tableName: string, columnName: string, definition: string) {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
   if (columns.some((column) => column.name === columnName)) {
-    return;
+    return false;
   }
 
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  return true;
 }
 
 function runMigrations(db: Database.Database) {
@@ -565,6 +566,7 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, "memories", "fact_kind", "TEXT CHECK(fact_kind IN ('preference', 'constraint', 'decision', 'profile', 'account', 'workflow', 'other'))");
   ensureColumn(db, "memories", "fact_key", "TEXT");
   ensureColumn(db, "memories", "fact_state", "TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted'))");
+  const addedMemoryType = ensureColumn(db, "memories", "memory_type", "TEXT NOT NULL DEFAULT 'project' CHECK(memory_type IN ('user', 'feedback', 'project', 'reference'))");
   ensureColumn(db, "runtime_settings", "reasoning_effort", "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn(db, "runtime_settings", "auto_approve_tool_requests", "INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "runtime_settings", "tool_provider_id", "TEXT");
@@ -574,6 +576,18 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
   db.prepare("UPDATE memories SET fact_state = 'active' WHERE COALESCE(fact_state, '') = ''").run();
+  if (addedMemoryType) {
+    db.prepare(
+      `
+        UPDATE memories
+        SET memory_type = CASE
+          WHEN fact_kind IN ('profile', 'account') THEN 'user'
+          WHEN fact_kind = 'preference' THEN 'feedback'
+          ELSE 'project'
+        END
+      `,
+    ).run();
+  }
   db.prepare("UPDATE task_runs SET task_type = 'script-runner' WHERE task_type = 'local-script-runner'").run();
   db.prepare("UPDATE job_runs SET kind = 'script-runner' WHERE kind = 'local-script-runner'").run();
   db.prepare(
@@ -782,6 +796,7 @@ function bootstrap(db: Database.Database) {
           || statement.includes("fact_state")
           || statement.includes("fact_kind")
           || statement.includes("fact_key")
+          || statement.includes("memory_type")
         )
       ) {
         deferredStatements.push(statement);

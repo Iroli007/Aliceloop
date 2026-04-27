@@ -1,5 +1,5 @@
 import { Jieba } from "@node-rs/jieba";
-import { dict } from "@node-rs/jieba/dict";
+import { dict } from "@node-rs/jieba/dict.js";
 
 const jieba = Jieba.withDict(dict);
 const stopTokens = new Set(["的", "了", "和", "是", "我", "你", "他", "她", "它", "在", "有", "就", "都", "而", "及", "与", "或", "啊", "吗", "呢", "吧"]);
