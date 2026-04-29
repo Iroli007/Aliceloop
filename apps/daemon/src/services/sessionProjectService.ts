@@ -46,7 +46,7 @@ function buildTranscriptMarkdown(snapshot: ReturnType<typeof getSessionSnapshot>
   const lines: string[] = [
     "---",
     `threadId: ${snapshot.session.id}`,
-    `title: ""`,
+    `title: ${JSON.stringify(snapshot.session.title)}`,
     `createdAt: ${snapshot.session.createdAt}`,
     `updatedAt: ${snapshot.session.updatedAt}`,
     "model: unknown",

@@ -33,6 +33,7 @@ import type { ShellState } from "./useShellData";
 import { getDesktopBridge } from "../../platform/desktopBridge";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { MessageContent } from "./MessageContent";
+import { ThreadSearchPanel } from "./ThreadSearchPanel";
 
 interface ShellLayoutProps {
   state: ShellState;
@@ -333,11 +334,12 @@ function buildComposerContextDashboard(input: {
     + estimateToolWorkflowTokens(input.toolWorkflowEntries)
     + recentMessageTokens
     + approxTokenCountFromLength(input.composerDraft.trim().length);
-  const usagePercent = Math.max(1, Math.min(100, Math.round((estimatedTokens / input.contextBudget.compactTriggerTokens) * 100)));
+  const usagePercent = Math.min(100, Math.round((estimatedTokens / input.contextBudget.compactTriggerTokens) * 100));
   const tone: ContextLoadTone = usagePercent >= 80 ? "hot" : usagePercent >= 55 ? "warm" : "calm";
   const tooltip = [
     `估算上下文负载 ${usagePercent}%`,
-    `约 ${formatTokenCount(estimatedTokens)} / ${formatTokenCount(input.contextBudget.compactTriggerTokens)} tokens`,
+    `约 ${formatTokenCount(estimatedTokens)} / ${formatTokenCount(input.contextBudget.compactTriggerTokens)} tokens 触发压缩`,
+    `模型窗口约 ${formatTokenCount(input.contextBudget.contextWindowTokens)} tokens`,
     `最近原文 ${input.recentTurnsCount} 轮`,
   ].join("\n");
 
@@ -354,7 +356,7 @@ function ContextUsageGauge({ percent, tone }: { percent: number; tone: ContextLo
   const radius = 10;
   const circumference = 2 * Math.PI * radius;
   const visibleArc = circumference * 0.76;
-  const progressArc = Math.max(0.08, percent / 100) * visibleArc;
+  const progressArc = percent <= 0 ? 0 : Math.max(0.08, percent / 100) * visibleArc;
 
   return (
     <svg
@@ -1326,6 +1328,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [reasoningDropdownOpen, setReasoningDropdownOpen] = useState(false);
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+  const [threadSearchOpen, setThreadSearchOpen] = useState(false);
   const [threadNotice, setThreadNotice] = useState<string | null>(null);
   const [threadDeleteTarget, setThreadDeleteTarget] = useState<ThreadGroup["threads"][number] | null>(null);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
@@ -2083,6 +2086,13 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     }
   }
 
+  function selectThreadFromSearch(thread: ThreadGroup["threads"][number]) {
+    setThreadSearchOpen(false);
+    setThreadNotice(null);
+    setQueuedAttachments([]);
+    conversation.selectSession(thread.id);
+  }
+
   async function confirmDeleteThread() {
     if (!threadDeleteTarget) {
       return;
@@ -2418,6 +2428,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                 onClick: toggleSidebar,
               }}
               showThreadSearch
+              onThreadSearchClick={() => setThreadSearchOpen(true)}
             />
           </header>
 
@@ -2540,6 +2551,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                     onClick: toggleSidebar,
                   }}
                   showThreadSearch
+                  onThreadSearchClick={() => setThreadSearchOpen(true)}
                 />
               ) : null}
               <div className="main__title">
@@ -3329,6 +3341,14 @@ export function ShellLayout({ state }: ShellLayoutProps) {
           ) : null}
         </main>
       </div>
+
+      <ThreadSearchPanel
+        open={threadSearchOpen}
+        daemonBaseUrl={conversation.daemonBaseUrl}
+        activeSessionId={conversation.sessionId}
+        onClose={() => setThreadSearchOpen(false)}
+        onSelectThread={selectThreadFromSearch}
+      />
 
       {threadDeleteTarget ? (
         <div className="thread-delete-overlay" onClick={() => setThreadDeleteTarget(null)}>

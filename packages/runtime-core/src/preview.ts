@@ -165,6 +165,9 @@ export const previewSessionSnapshot: SessionSnapshot = {
     remaining: [],
     decisions: [],
     rememberedTurnCount: 0,
+    lastTokenEstimate: 0,
+    lastToolCallCount: 0,
+    lastUpdateReason: null,
     updatedAt: null,
   },
   compactionState: {

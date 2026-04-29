@@ -24,6 +24,8 @@ interface HealthPayload {
 
 interface SemanticMemoryPayload {
   id: string;
+  title: string;
+  description: string;
   content: string;
   source: string;
   durability: string;
@@ -235,6 +237,7 @@ function usage() {
     "Usage:",
     "  aliceloop status",
     "  aliceloop memory list [limit]",
+    "  aliceloop memory get <id>",
     "  aliceloop memory search <query>",
     "  aliceloop memory grep <query>",
     "  aliceloop memory archive",
@@ -754,6 +757,15 @@ async function handleMemory(args: string[]) {
   if (action === "list") {
     const limit = parseOptionalLimit(args[1], 20);
     return apiRequest<SemanticMemoryPayload[]>(`/api/memory/entries?limit=${limit}`);
+  }
+
+  if (action === "get") {
+    const memoryId = args[1]?.trim();
+    if (!memoryId) {
+      throw new CliError("memory get requires an id");
+    }
+
+    return apiRequest<SemanticMemoryPayload>(`/api/memory/entries/${encodeURIComponent(memoryId)}`);
   }
 
   if (action === "search") {

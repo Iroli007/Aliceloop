@@ -3,6 +3,7 @@ import { extname, join } from "node:path";
 import type { ModelMessage } from "ai";
 import type { AttentionState, TaskRun } from "@aliceloop/runtime-core";
 import type { SessionEvent } from "@aliceloop/runtime-core";
+import type { SessionMemoryState } from "@aliceloop/runtime-core";
 import type { SessionMessage } from "@aliceloop/runtime-core";
 import type { SessionSnapshot } from "@aliceloop/runtime-core";
 import type { SessionProjectBinding } from "@aliceloop/runtime-core";
@@ -21,6 +22,10 @@ import {
 import { withMessageCacheBreakpoint } from "../cacheControl";
 import { getAttentionState } from "../../repositories/overviewRepository";
 import { listPlans, type PlanRecord } from "../../repositories/planRepository";
+import {
+  getSessionOpenTask,
+  type OpenTaskRecord,
+} from "../../repositories/sessionOpenTaskRepository";
 import { listTaskRuns } from "../../repositories/taskRunRepository";
 import {
   buildCompactionSummarySystemMessage,
@@ -450,6 +455,8 @@ export interface RecentConversationFocus {
   carryForwardConstraints: string | null;
   resolvedCurrentRequest: string | null;
   effectiveUserQuery: string | null;
+  openTask: OpenTaskRecord | null;
+  ownerToolContinuation: string | null;
   agentContinuation: boolean;
   routeHints: SkillRouteHints;
 }
@@ -496,6 +503,7 @@ interface SessionContextFragmentTimings {
   latestUserMs: number;
   projectBindingMs: number;
   attachmentRootsMs: number;
+  openTaskMs: number;
   recentToolTraceMs: number;
   recentConversationFocusMs: number;
   recentResearchMemoryMs: number;
@@ -604,6 +612,7 @@ function syncCompactionStateForSnapshot(sessionId: string, snapshot: SessionSnap
     sessionId,
     messages: snapshot.messages,
     currentState: snapshot.compactionState,
+    sessionMemory: snapshot.sessionMemory,
   });
 
   const changed = nextCompactionState.updatedAt !== snapshot.compactionState.updatedAt
@@ -703,6 +712,12 @@ export function buildActiveTurnPromptSectionsFromFocus(recentConversationFocus: 
           "</resolved_current_request>",
         ]
       : []),
+    ...(recentConversationFocus.ownerToolContinuation
+      ? [
+          `- The latest user message is a continuation/correction of an open task owned by \`${recentConversationFocus.ownerToolContinuation}\`.`,
+          `- Required action for this turn: call \`${recentConversationFocus.ownerToolContinuation}\` as a real tool call. Do not switch to another tool or write a fake tool call as plain text.`,
+        ]
+      : []),
     "",
     "<latest_user_message>",
     latestContent,
@@ -718,6 +733,7 @@ export function buildActiveTurnPromptSectionsFromFocus(recentConversationFocus: 
 function buildRecentConversationFocusFromSnapshot(
   snapshot: SessionSnapshot,
   recentToolTraces: RecentToolTrace[],
+  openTask: OpenTaskRecord | null,
 ): RecentConversationFocus {
   const recentMessages = snapshot.messages
     .filter((message) => message.role !== "system")
@@ -745,6 +761,8 @@ function buildRecentConversationFocusFromSnapshot(
       carryForwardConstraints: null,
       resolvedCurrentRequest: null,
       effectiveUserQuery: null,
+      openTask,
+      ownerToolContinuation: null,
       agentContinuation: false,
       routeHints: {
         stickySkillIds: [],
@@ -773,7 +791,8 @@ function buildRecentConversationFocusFromSnapshot(
     return toolName === "web_search" || toolName === "web_fetch";
   });
   const needsDeepResearchFollowup = sawRecentWebTool && prefersDeepResearchFetch(latestContent);
-  const agentContinuation = continuationLike && sawRecentAgentTool;
+  const ownerToolContinuation = continuationLike && openTask ? openTask.ownerTool : null;
+  const agentContinuation = continuationLike && (sawRecentAgentTool || openTask?.ownerTool === "agent");
   const resolvedCurrentRequest = buildResolvedCurrentRequest({
     latestContent,
     continuationLike,
@@ -800,6 +819,9 @@ function buildRecentConversationFocusFromSnapshot(
   }).routeHints;
   if (agentContinuation) {
     routeHints.reasons.push("carry forward recent child-agent delegation");
+  }
+  if (ownerToolContinuation) {
+    routeHints.reasons.push(`continue open task through ${ownerToolContinuation}`);
   }
 
   const lines = [
@@ -834,8 +856,15 @@ function buildRecentConversationFocusFromSnapshot(
       lines.push("- Required action for this turn: continue the recent file-management request with `bash` instead of replying with a command as plain text.");
       lines.push("- If the action is destructive, use the existing delete confirmation flow and then continue after the user resolves it.");
     }
-    if (agentContinuation) {
-      lines.push("- Required action for this turn: continue the recent child-agent task with the `agent` tool instead of switching to `bash` or writing a tool call as plain text.");
+    if (ownerToolContinuation && openTask) {
+      lines.push(`- Open task ownerTool: \`${openTask.ownerTool}\`; status: ${openTask.status}; summary: ${trimInline(openTask.summary, 220)}`);
+      lines.push(`- Required action for this turn: continue or correct the open task through \`${ownerToolContinuation}\` as a real tool call.`);
+      lines.push("- Do not answer with a plain-text pseudo call such as `bash:0{...}` or `agent:0{...}`.");
+    }
+    if (agentContinuation && openTask?.ownerTool === "agent") {
+      if (openTask.childAgentId) {
+        lines.push(`- Child agent id for read_output/resume: ${openTask.childAgentId}`);
+      }
       lines.push("- If the user corrected the child-agent task target, send the corrected target back through `agent` as a new child-agent task. If only checking progress, use `read_output: true` with the returned `agent_id` when available.");
     }
     if (needsDeepResearchFollowup) {
@@ -868,8 +897,15 @@ function buildRecentConversationFocusFromSnapshot(
   }
   lines.push("</recent_exchange>");
 
+  const shouldRenderFocus = continuationLike
+    || latestUserHasImageAttachment
+    || routeHints.stickySkillIds.length > 0
+    || Boolean(ownerToolContinuation)
+    || agentContinuation
+    || needsDeepResearchFollowup;
+
   return {
-    content: lines.join("\n"),
+    content: shouldRenderFocus ? lines.join("\n") : "",
     latestContent,
     latestUserHasImageAttachment,
     latestOpeningLines: latestMessageAnchorLines.openingLines,
@@ -883,6 +919,8 @@ function buildRecentConversationFocusFromSnapshot(
     carryForwardConstraints,
     resolvedCurrentRequest,
     effectiveUserQuery,
+    openTask,
+    ownerToolContinuation,
     agentContinuation,
     routeHints,
   };
@@ -1088,10 +1126,79 @@ function buildTaskRunSection(taskRuns: TaskRun[]) {
   return lines.join("\n");
 }
 
+function buildOpenTaskSection(openTask: OpenTaskRecord | null) {
+  if (!openTask) {
+    return "";
+  }
+
+  const lines = ["### Open Task"];
+  lines.push(`- ownerTool: ${openTask.ownerTool}`);
+  lines.push(`- status: ${openTask.status}`);
+  lines.push(`- summary: ${trimInline(openTask.summary, 220)}`);
+  if (openTask.childAgentId) {
+    lines.push(`- childAgentId: ${openTask.childAgentId}`);
+  }
+  if (openTask.subagentType) {
+    lines.push(`- subagent_type: ${openTask.subagentType}`);
+  }
+  if (openTask.persona) {
+    lines.push(`- persona: ${openTask.persona}`);
+  }
+  lines.push(`- Continuations, corrections, and progress checks for this task should use the ownerTool \`${openTask.ownerTool}\` as a real tool call.`);
+  return lines.join("\n");
+}
+
+function sessionMemoryHasContent(sessionMemory: SessionMemoryState) {
+  return Boolean(
+    sessionMemory.currentPhase.trim()
+    || sessionMemory.summary.trim()
+    || sessionMemory.completed.length > 0
+    || sessionMemory.remaining.length > 0
+    || sessionMemory.decisions.length > 0
+  );
+}
+
+function wantsSessionMemoryContext(recentConversationFocus: RecentConversationFocus) {
+  const latestContent = recentConversationFocus.latestContent.trim();
+  return /session memory|会话记忆|临时记忆|线程记忆|当前进展|进展如何|做到哪|做到哪里|现在到哪|总结当前|总结一下|compact|压缩/u.test(latestContent);
+}
+
+function buildSessionMemorySection(sessionMemory: SessionMemoryState) {
+  if (!sessionMemory.updatedAt) {
+    return "";
+  }
+
+  if (!sessionMemoryHasContent(sessionMemory)) {
+    return "";
+  }
+
+  const lines = ["### Session Memory"];
+  lines.push("- Scope: current thread only; use this as working state, not long-term user memory.");
+  if (sessionMemory.currentPhase) {
+    lines.push(`- Current phase: ${trimInline(sessionMemory.currentPhase, 180)}`);
+  }
+  if (sessionMemory.summary) {
+    lines.push(`- Summary: ${trimInline(sessionMemory.summary, 480)}`);
+  }
+  if (sessionMemory.completed.length > 0) {
+    lines.push(`- Completed: ${sessionMemory.completed.map((item) => trimInline(item, 160)).join("; ")}`);
+  }
+  if (sessionMemory.remaining.length > 0) {
+    lines.push(`- Remaining: ${sessionMemory.remaining.map((item) => trimInline(item, 160)).join("; ")}`);
+  }
+  if (sessionMemory.decisions.length > 0) {
+    lines.push(`- Turn-local decisions: ${sessionMemory.decisions.map((item) => trimInline(item, 160)).join("; ")}`);
+  }
+
+  return lines.join("\n");
+}
+
 function buildTaskWorkingMemorySections(input: {
   sessionId: string;
   projectBinding: SessionProjectBinding | null;
+  sessionMemory: SessionMemoryState;
   recentConversationFocus: RecentConversationFocus;
+  openTask: OpenTaskRecord | null;
 }) {
   const workspaceBoundary = buildWorkspaceBoundarySection(input.projectBinding);
   const prefix = [
@@ -1107,27 +1214,17 @@ function buildTaskWorkingMemorySections(input: {
     sections.push(attention);
   }
 
-  const requestLines = ["### Current Request"];
-  requestLines.push(`- Goal: ${trimInline(input.recentConversationFocus.resolvedCurrentRequest ?? input.recentConversationFocus.latestContent, 240)}`);
-  if (input.recentConversationFocus.latestOpeningLines.length > 0) {
-    requestLines.push(`- Latest opening lines: ${trimInline(input.recentConversationFocus.latestOpeningLines.join(" / "), 240)}`);
+  const openTaskSection = buildOpenTaskSection(input.openTask);
+  if (openTaskSection) {
+    sections.push(openTaskSection);
   }
-  if (input.recentConversationFocus.latestClosingLines.length > 0) {
-    requestLines.push(`- Latest closing lines: ${trimInline(input.recentConversationFocus.latestClosingLines.join(" / "), 240)}`);
+
+  const sessionMemorySection = wantsSessionMemoryContext(input.recentConversationFocus)
+    ? buildSessionMemorySection(input.sessionMemory)
+    : "";
+  if (sessionMemorySection) {
+    sections.push(sessionMemorySection);
   }
-  if (input.recentConversationFocus.effectiveUserQuery && input.recentConversationFocus.effectiveUserQuery !== input.recentConversationFocus.latestContent) {
-    requestLines.push(`- Effective query: ${trimInline(input.recentConversationFocus.effectiveUserQuery, 240)}`);
-  }
-  if (input.recentConversationFocus.carryForwardFacts) {
-    requestLines.push(`- Carry-forward facts: ${trimInline(input.recentConversationFocus.carryForwardFacts, 240)}`);
-  }
-  if (input.recentConversationFocus.carryForwardConstraints) {
-    requestLines.push(`- Temporary constraints: ${trimInline(input.recentConversationFocus.carryForwardConstraints, 240)}`);
-  }
-  if (input.recentConversationFocus.routeHints.reasons.length > 0) {
-    requestLines.push(`- Routing hints: ${input.recentConversationFocus.routeHints.reasons.join("; ")}`);
-  }
-  sections.push(requestLines.join("\n"));
 
   const plans = listPlans({ sessionId: input.sessionId, limit: 2 });
   const planSection = buildPlanStateSection(plans);
@@ -1391,12 +1488,16 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const attachmentRoots = buildSessionAttachmentSandboxRoots(snapshot.project, snapshot.attachments);
   const attachmentRootsMs = roundMs(nowMs() - attachmentRootsStartedAt);
 
+  const openTaskStartedAt = nowMs();
+  const openTask = getSessionOpenTask(sessionId);
+  const openTaskMs = roundMs(nowMs() - openTaskStartedAt);
+
   const recentToolTraceStartedAt = nowMs();
   const recentToolTraces = extractRecentToolTracesFromSnapshot(sessionId, snapshot);
   const recentToolTraceMs = roundMs(nowMs() - recentToolTraceStartedAt);
 
   const recentConversationFocusStartedAt = nowMs();
-  const recentConversationFocus = buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces);
+  const recentConversationFocus = buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces, openTask);
   const recentConversationFocusMs = roundMs(nowMs() - recentConversationFocusStartedAt);
 
   const activeTurnStartedAt = nowMs();
@@ -1415,7 +1516,9 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
   const taskWorkingMemorySections = buildTaskWorkingMemorySections({
     sessionId,
     projectBinding,
+    sessionMemory: snapshot.sessionMemory,
     recentConversationFocus,
+    openTask,
   });
   const taskWorkingMemoryMs = roundMs(nowMs() - taskWorkingMemoryStartedAt);
 
@@ -1438,6 +1541,7 @@ export function buildSessionContextFragments(sessionId: string): SessionContextF
       latestUserMs,
       projectBindingMs,
       attachmentRootsMs,
+      openTaskMs,
       recentToolTraceMs,
       recentConversationFocusMs,
       recentResearchMemoryMs,
@@ -1458,14 +1562,14 @@ export function buildSessionMessages(sessionId: string): ModelMessage[] {
 export function buildActiveTurnBlock(sessionId: string): string {
   const snapshot = getSessionSnapshot(sessionId);
   const recentToolTraces = extractRecentToolTracesFromSnapshot(sessionId, snapshot);
-  const recentConversationFocus = buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces);
+  const recentConversationFocus = buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces, getSessionOpenTask(sessionId));
   return buildActiveTurnBlockFromFocus(recentConversationFocus);
 }
 
 export function buildRecentConversationFocus(sessionId: string): RecentConversationFocus {
   const snapshot = getSessionSnapshot(sessionId);
   const recentToolTraces = extractRecentToolTracesFromSnapshot(sessionId, snapshot);
-  return buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces);
+  return buildRecentConversationFocusFromSnapshot(snapshot, recentToolTraces, getSessionOpenTask(sessionId));
 }
 
 export function buildRecentConversationFocusBlock(sessionId: string): string {

@@ -97,7 +97,7 @@ const toolModelRecommendationPatterns: Record<ProviderKind, RegExp[]> = {
 };
 
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 32_000;
-const DEFAULT_STATIC_CONTEXT_OVERHEAD_TOKENS = 6_000;
+const DEFAULT_STATIC_CONTEXT_OVERHEAD_TOKENS = 0;
 
 const modelContextWindowPatterns: Array<{ pattern: RegExp; tokens: number }> = [
   { pattern: /gpt-5(?:\.1)?(?:-[\w.]+)?/iu, tokens: 400_000 },
@@ -106,7 +106,6 @@ const modelContextWindowPatterns: Array<{ pattern: RegExp; tokens: number }> = [
   { pattern: /(?:^|\/)o[34](?:-[\w.]+)?$/iu, tokens: 200_000 },
   { pattern: /claude(?:-[\w.]+)?/iu, tokens: 200_000 },
   { pattern: /gemini-(?:2\.5|2\.0|1\.5)(?:-[\w.]+)?/iu, tokens: 1_048_576 },
-  { pattern: /(?:kimi|moonshot|moonshotai|kimi-for-coding)(?:-[\w.]+)?/iu, tokens: 256_000 },
   { pattern: /deepseek-(?:chat|reasoner)(?:-[\w.]+)?/iu, tokens: 128_000 },
   { pattern: /glm-5(?:\.[\w-]+)?/iu, tokens: 204_800 },
 ];
@@ -114,7 +113,7 @@ const modelContextWindowPatterns: Array<{ pattern: RegExp; tokens: number }> = [
 const providerFallbackContextWindowTokens: Record<ProviderKind, number> = {
   minimax: 128_000,
   gemini: 1_048_576,
-  moonshot: 256_000,
+  moonshot: 32_000,
   deepseek: 128_000,
   zhipu: 204_800,
   aihubmix: 128_000,

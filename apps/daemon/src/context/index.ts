@@ -121,6 +121,7 @@ export async function loadContext(
   timings.latestUserMs = sessionContext.timings.latestUserMs;
   timings.projectBindingMs = sessionContext.timings.projectBindingMs;
   timings.attachmentRootsMs = sessionContext.timings.attachmentRootsMs;
+  timings.openTaskMs = sessionContext.timings.openTaskMs;
   timings.recentToolTraceMs = sessionContext.timings.recentToolTraceMs;
   timings.recentConversationFocusMs = sessionContext.timings.recentConversationFocusMs;
   timings.recentResearchMemoryMs = sessionContext.timings.recentResearchMemoryMs;
@@ -235,8 +236,21 @@ export async function loadContext(
   const activeSkillsStartedAt = nowMs();
   timings.activeSkillsMs = roundMs(nowMs() - activeSkillsStartedAt);
 
+  const profileFactMemoryStartedAt = nowMs();
+  const profileFactMemory = await profileFactMemoryPromise;
+  timings.profileFactMemoryMs = typeof profileFactMemory.timings.totalMs === "number"
+    ? profileFactMemory.timings.totalMs
+    : roundMs(nowMs() - profileFactMemoryStartedAt);
+  timings.profileFactMemoryChars = profileFactMemory.content.length;
+  timings.profileFactMemoryCount = profileFactMemory.timings.memoryCount ?? null;
+  timings.profileFactMemorySkipReason = typeof profileFactMemory.timings.skipReason === "string"
+    ? profileFactMemory.timings.skipReason
+    : null;
+
   const additionalToolNames = [
     ...(options?.additionalToolNames ?? []),
+    ...(profileFactMemory.displayMemories.length > 0 ? ["memory_get"] : []),
+    ...(recentConversationFocus.ownerToolContinuation ? [recentConversationFocus.ownerToolContinuation] : []),
     ...(recentConversationFocus.agentContinuation ? ["agent"] : []),
   ];
 
@@ -261,19 +275,18 @@ export async function loadContext(
     return Boolean(anthropic && typeof anthropic === "object" && "deferLoading" in anthropic);
   }).length;
 
-  const profileFactMemoryStartedAt = nowMs();
-  const profileFactMemory = await profileFactMemoryPromise;
-  timings.profileFactMemoryMs = typeof profileFactMemory.timings.totalMs === "number"
-    ? profileFactMemory.timings.totalMs
-    : roundMs(nowMs() - profileFactMemoryStartedAt);
-  timings.profileFactMemoryChars = profileFactMemory.content.length;
-  timings.profileFactMemoryCount = profileFactMemory.timings.memoryCount ?? null;
-  timings.profileFactMemorySkipReason = typeof profileFactMemory.timings.skipReason === "string"
-    ? profileFactMemory.timings.skipReason
-    : null;
-
   const initialToolChoice = (() => {
     const toolNames = new Set(Object.keys(tools));
+
+    if (
+      recentConversationFocus.ownerToolContinuation
+      && toolNames.has(recentConversationFocus.ownerToolContinuation)
+    ) {
+      return {
+        type: "tool",
+        toolName: recentConversationFocus.ownerToolContinuation,
+      } as const;
+    }
 
     if (toolNames.has("view_image") && (latestUserHasImageAttachment || intentDecision.needs.imageAnalysis)) {
       return { type: "tool", toolName: "view_image" } as const;
@@ -350,6 +363,8 @@ export async function loadContext(
             "- The `agent` tool is available this turn for delegated work.",
             "- Use `subagent_type` to select the execution template: general-purpose, coder, Plan, Explore, alma-guide, alma-operator, statusline-setup.",
             "- Use `persona` for the expert perspective: developer, designer, researcher, product-manager, operator, planner, evaluator.",
+            "- Use `execution_mode: \"ephemeral\"` for one-off expert critique, planning, memory curation, or structured synthesis that does not need tools, a transcript, background execution, or later resume.",
+            "- Use the default session execution mode for child-agent work that needs tool access, long-running execution, visible transcript, `read_output`, or resume.",
             "- `agent_id` is not an input selector; it appears in the tool result as the runtime id of the spawned child agent.",
             "- The stable child agent key is `subagent_type` plus optional `persona`; reuse the same pair when checking or continuing that expert.",
             "- When the user asks a named expert such as designer/planner/evaluator to inspect, plan, review, or execute something, call `agent` instead of answering as that expert yourself.",

@@ -35,12 +35,14 @@ import {
   deleteMemoryNote,
   getMemoryById,
   getMemoryStats,
+  listMemoryProjectionRecords,
   listMemories,
   rebuildAllEmbeddings,
   searchMemoriesBySimilarity,
   searchMemoryNotes,
   updateMemory,
 } from "./context/memory/memoryRepository";
+import { syncMemoryFileProtocol } from "./context/memory/memoryFileProtocol";
 import {
   getDocumentStructure,
   listContentBlocks,
@@ -106,7 +108,11 @@ import {
   listTaskRuns,
   updateTrackedTask,
 } from "./repositories/taskRunRepository";
-import { abortAgentForSession } from "./runtime/agentRuntime";
+import {
+  abortAgentForSession,
+  pauseAgentForDisconnectedStream,
+  resumeAgentForReconnectedStream,
+} from "./runtime/agentRuntime";
 import { runProviderReply } from "./services/providerRunner";
 import { createPermissionSandboxExecutor } from "./services/sandboxExecutor";
 import { generateImage } from "./services/imageGenerationService";
@@ -373,6 +379,8 @@ interface SemanticMemoryConfigBody {
 }
 
 interface CreateSemanticMemoryBody {
+  title?: string;
+  description?: string;
   content?: string;
   source?: string;
   durability?: string;
@@ -384,6 +392,8 @@ interface CreateSemanticMemoryBody {
 }
 
 interface UpdateSemanticMemoryBody {
+  title?: string;
+  description?: string;
   content?: string;
   durability?: string;
   memoryType?: string;
@@ -692,6 +702,24 @@ function writeSseEvent(write: (chunk: string) => void, event: unknown, seq: numb
   write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+const sseConnectionsBySession = new Map<string, number>();
+
+function addSseConnection(sessionId: string) {
+  sseConnectionsBySession.set(sessionId, (sseConnectionsBySession.get(sessionId) ?? 0) + 1);
+}
+
+function removeSseConnection(sessionId: string) {
+  const current = sseConnectionsBySession.get(sessionId) ?? 0;
+  const next = Math.max(0, current - 1);
+  if (next === 0) {
+    sseConnectionsBySession.delete(sessionId);
+    return 0;
+  }
+
+  sseConnectionsBySession.set(sessionId, next);
+  return next;
+}
+
 export async function createServer() {
   const activeSkills = listActiveSkillDefinitions();
   const availableToolAdapterNames = listAvailableToolAdapterNames();
@@ -852,6 +880,8 @@ export async function createServer() {
 
     try {
       const memory = await createMemory({
+        title: body.title,
+        description: body.description,
         content,
         source: normalizeSemanticMemorySource(body.source, "manual"),
         durability: normalizeSemanticMemoryDurability(body.durability, "permanent") ?? "permanent",
@@ -861,6 +891,7 @@ export async function createServer() {
         factState: normalizeSemanticMemoryFactState(body.factState) ?? "active",
         relatedTopics: Array.isArray(body.relatedTopics) ? body.relatedTopics : undefined,
       });
+      syncMemoryFileProtocol(listMemoryProjectionRecords());
       return reply.code(201).send(memory);
     } catch (error) {
       if (error instanceof Error) {
@@ -899,6 +930,8 @@ export async function createServer() {
   server.put<{ Params: MemoryParams; Body: UpdateSemanticMemoryBody }>("/api/memory/entries/:id", async (request, reply) => {
     try {
       const memory = await updateMemory(request.params.id, {
+        title: request.body?.title,
+        description: request.body?.description,
         content: request.body?.content,
         durability: normalizeSemanticMemoryDurability(request.body?.durability),
         memoryType: normalizeSemanticMemoryType(request.body?.memoryType),
@@ -914,6 +947,7 @@ export async function createServer() {
         });
       }
 
+      syncMemoryFileProtocol(listMemoryProjectionRecords());
       return memory;
     } catch (error) {
       if (error instanceof Error) {
@@ -932,6 +966,7 @@ export async function createServer() {
       });
     }
 
+    syncMemoryFileProtocol(listMemoryProjectionRecords());
     return {
       ok: true,
       id: request.params.id,
@@ -939,6 +974,7 @@ export async function createServer() {
   });
   server.delete("/api/memory/entries", async () => {
     clearAllMemories();
+    syncMemoryFileProtocol(listMemoryProjectionRecords());
     return {
       ok: true,
     };
@@ -1599,6 +1635,7 @@ export async function createServer() {
     });
 
     reply.raw.write("retry: 2000\n\n");
+    addSseConnection(sessionId);
 
     let ready = false;
     const bufferedEvents: ReturnType<typeof listSessionEventsSince> = [];
@@ -1654,6 +1691,9 @@ export async function createServer() {
       cleanedUp = true;
       clearInterval(keepAlive);
       unsubscribe();
+      if (removeSseConnection(sessionId) === 0) {
+        pauseAgentForDisconnectedStream(sessionId);
+      }
       reply.raw.end();
     };
 
@@ -1677,6 +1717,7 @@ export async function createServer() {
 
     reply.raw.on("close", cleanup);
     request.raw.on("close", cleanup);
+    resumeAgentForReconnectedStream(sessionId);
   });
 
   server.post<{ Params: SessionParams; Body: CreateMessageBody }>("/api/session/:id/messages", async (request, reply) => {

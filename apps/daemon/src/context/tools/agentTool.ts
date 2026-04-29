@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { tool, type ToolSet } from "ai";
+import { generateText, tool, type ToolSet } from "ai";
 import { z } from "zod";
+import { createProviderModel } from "../../providers/providerModelFactory";
+import { getToolModelConfig } from "../../providers/toolModelResolver";
+import type { StoredProviderConfig } from "../../repositories/providerRepository";
 import { publishSessionEvent } from "../../realtime/sessionStreams";
 import {
   createSession,
@@ -15,6 +18,13 @@ import {
   type ChildAgentRecord,
 } from "../../repositories/sessionRepository";
 import { syncSessionProjectHistory } from "../../services/sessionProjectService";
+import {
+  appendAgentMemory,
+  extractAgentMemoryUpdate,
+  getAgentMemoryPath,
+  readAgentMemory,
+  stripAgentMemoryUpdate,
+} from "./agentMemoryStore";
 
 const DEFAULT_SESSION_ID = "agent";
 const subagentTypes = [
@@ -36,11 +46,13 @@ const personaTypes = [
   "evaluator",
 ] as const;
 const writeBackKinds = ["summary", "artifact", "decision", "patch"] as const;
+const executionModes = ["session", "ephemeral"] as const;
 const outputPollIntervalMs = 300;
 const defaultSyncWaitTimeoutMs = 30_000;
 
 type SubagentType = typeof subagentTypes[number];
 type PersonaType = typeof personaTypes[number];
+type ExecutionMode = typeof executionModes[number];
 
 const subagentTypeBriefs: Record<SubagentType, string> = {
   "general-purpose": "Handle a broad delegated task with balanced reasoning and concise reporting.",
@@ -98,6 +110,11 @@ function buildWriteBackInstruction(writeBack: typeof writeBackKinds[number] | un
     default:
       return "Output contract: start with the conclusion, then 3-5 key points, then only the details needed to support them.";
   }
+}
+
+function applyAgentModelOption(provider: StoredProviderConfig, model?: string) {
+  const trimmedModel = model?.trim();
+  return trimmedModel ? { ...provider, model: trimmedModel } : provider;
 }
 
 const handoffSchema = z.object({
@@ -182,6 +199,9 @@ function buildSystemPrompt(input: {
   persona?: PersonaType;
   handoff?: z.infer<typeof handoffSchema>;
   harness?: { enabled?: boolean };
+  agentMemory: string;
+  agentMemoryPath: string;
+  executionMode?: ExecutionMode;
 }) {
   const executionBrief = subagentTypeBriefs[input.subagentType];
   const personaBrief = input.persona ? personaBriefs[input.persona] : "";
@@ -193,11 +213,15 @@ function buildSystemPrompt(input: {
     `Child agent id: ${input.childSessionId}`,
     `Agent key: ${input.agentKey}`,
     `Memory scope: ${input.memoryScope}`,
+    `Agent memory file: ${input.agentMemoryPath}`,
     `Subagent type: ${input.subagentType}`,
     input.persona ? `Persona: ${input.persona}` : "",
     executionBrief ? `Execution template:\n${executionBrief}` : "",
     personaBrief ? `Expert perspective:\n${personaBrief}` : "",
     input.harness?.enabled ? "Harness: enabled. Break complex work into sprint-sized loops and report each loop's result." : "",
+    input.executionMode === "ephemeral"
+      ? "Execution mode: ephemeral. This run has no persistent child session, transcript, resume handle, or tool access. Return the requested result directly."
+      : "",
     handoff?.goal?.trim() ? `Goal:\n${handoff.goal.trim()}` : "",
     handoff?.deliverable?.trim() ? `Deliverable:\n${handoff.deliverable.trim()}` : "",
     formatList("Constraints:", handoff?.constraints),
@@ -205,9 +229,120 @@ function buildSystemPrompt(input: {
     formatList("Acceptance criteria:", handoff?.acceptanceCriteria),
     formatList("Artifact references:", handoff?.artifactRefs),
     handoff?.writeBack ? `Write back as: ${handoff.writeBack}` : "",
+    input.agentMemory
+      ? [
+          "Existing agent memory:",
+          "<agent_memory_context>",
+          input.agentMemory,
+          "</agent_memory_context>",
+        ].join("\n")
+      : "Existing agent memory: (none)",
+    "If you learn reusable guidance for this agent key, include a short hidden update block at the end of your final reply in this exact form: <agent_memory type=\"feedback\">one reusable lesson</agent_memory>. Use type=\"project\" for stable project knowledge and type=\"reference\" for reusable external references. Omit the block when there is nothing durable to store.",
     buildWriteBackInstruction(handoff?.writeBack),
     "Work independently and return a concise result for the parent agent.",
   ].filter(Boolean).join("\n\n");
+}
+
+async function runEphemeralAgent(input: {
+  parentSessionId: string;
+  description: string;
+  prompt: string;
+  profile: ReturnType<typeof buildAgentProfile>;
+  handoff?: z.infer<typeof handoffSchema>;
+  harness?: { enabled?: boolean };
+  model?: string;
+}) {
+  const provider = getToolModelConfig();
+  if (!provider?.apiKey) {
+    throw new Error("No enabled model gateway with an API key is configured for ephemeral agent runs.");
+  }
+
+  const ephemeralId = `ephemeral-agent-${randomUUID()}`;
+  const identity = buildAgentIdentity({
+    childSessionId: ephemeralId,
+    parentSessionId: input.parentSessionId,
+    description: input.description,
+    profile: input.profile,
+  });
+  const agentMemory = readAgentMemory(identity.agentKey);
+  const response = await generateText({
+    model: createProviderModel(applyAgentModelOption(provider, input.model)),
+    system: buildSystemPrompt({
+      parentSessionId: input.parentSessionId,
+      childSessionId: ephemeralId,
+      agentKey: identity.agentKey,
+      memoryScope: identity.memoryScope,
+      subagentType: input.profile.subagentType,
+      persona: input.profile.persona,
+      handoff: input.handoff,
+      harness: input.harness,
+      agentMemory,
+      agentMemoryPath: getAgentMemoryPath(identity.agentKey),
+      executionMode: "ephemeral",
+    }),
+    prompt: input.prompt,
+    temperature: 0.2,
+  });
+  const agentMemoryPath = persistAgentMemoryFromText({
+    agentKey: identity.agentKey,
+    childSessionId: ephemeralId,
+    text: response.text,
+  });
+  const replyContent = stripAgentMemoryUpdate(response.text);
+
+  return {
+    ...identity,
+    executionMode: "ephemeral",
+    sessionId: null,
+    childSessionId: null,
+    childAgentId: null,
+    agentInstanceId: ephemeralId,
+    status: "completed",
+    reusedAgent: false,
+    description: input.description,
+    prompt: input.prompt,
+    outputFile: null,
+    transcriptMarkdownPath: null,
+    canReadOutputFile: false,
+    agentMemoryPath,
+    result: replyContent,
+    response: replyContent,
+  };
+}
+
+function persistAgentMemoryFromText(input: {
+  agentKey: string;
+  childSessionId: string;
+  text: string;
+}) {
+  const update = extractAgentMemoryUpdate(input.text);
+  if (!update) {
+    return null;
+  }
+
+  return appendAgentMemory({
+    agentKey: input.agentKey,
+    memoryType: update.memoryType,
+    content: update.content,
+    sourceSessionId: input.childSessionId,
+  });
+}
+
+function persistAgentMemoryFromLatestReply(input: {
+  agentKey: string;
+  childSessionId: string;
+}) {
+  const snapshot = getSessionSnapshot(input.childSessionId);
+  const reply = [...snapshot.messages].reverse().find((message) => message.role === "assistant");
+  if (!reply?.content) {
+    return null;
+  }
+
+  return persistAgentMemoryFromText({
+    agentKey: input.agentKey,
+    childSessionId: input.childSessionId,
+    text: reply.content,
+  });
 }
 
 function resolveChildSession(input: {
@@ -381,6 +516,7 @@ function buildOutputSnapshot(input: {
   const snapshot = getSessionSnapshot(input.childSessionId);
   const latestJob = getLatestProviderJob(snapshot);
   const latestAssistant = [...snapshot.messages].reverse().find((message) => message.role === "assistant");
+  const latestResponse = latestAssistant?.content ? stripAgentMemoryUpdate(latestAssistant.content) : "";
   const binding = getSessionProjectBinding(input.childSessionId);
   const outputFile = binding?.transcriptMarkdownPath ?? null;
   const status = mapJobStatus(latestJob);
@@ -399,9 +535,9 @@ function buildOutputSnapshot(input: {
     jobStatus: latestJob?.status ?? null,
     jobId: latestJob?.id ?? null,
     error: latestJob?.status === "failed" ? latestJob.detail : undefined,
-    latestResponse: latestAssistant?.content ?? "",
-    result: latestAssistant?.content ?? "",
-    response: latestAssistant?.content ?? "",
+    latestResponse,
+    result: latestResponse,
+    response: latestResponse,
     outputFile,
     transcriptMarkdownPath: outputFile,
     canReadOutputFile: Boolean(outputFile),
@@ -433,7 +569,7 @@ async function readAgentOutput(input: {
 export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
   return {
     agent: tool({
-      description: "Spawn or resume a child Aliceloop agent in its own session. Use it for delegated research, planning, design, operations, or coding work with a structured handoff.",
+      description: "Run a delegated Aliceloop agent. Use session mode for child sessions with tools/resume, or ephemeral mode for one-off expert synthesis without a child session.",
       inputSchema: z.object({
         description: z.string().min(1).optional().describe("Optional 3-5 word task summary; required when starting a new task"),
         prompt: z.string().min(1).optional().describe("Detailed task instructions for the child agent; required unless read_output is true"),
@@ -443,6 +579,7 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
         harness: z.object({
           enabled: z.boolean().optional().describe("Set true to ask the child agent to run multi-sprint orchestration"),
         }).optional().describe("Optional harness controls"),
+        execution_mode: z.enum(executionModes).optional().describe("session creates or reuses a child session; ephemeral runs once without a child session, transcript, resume, background execution, or tools"),
         model: z.string().optional().describe("Optional requested model; omitted means inherit parent runtime model"),
         resume: z.string().optional().describe("Optional existing child agent session id to resume"),
         read_output: z.boolean().optional().describe("Set true to read the latest output/status for this child agent instead of starting a new task"),
@@ -450,15 +587,19 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
         timeout_ms: z.number().int().min(500).max(120_000).optional().describe("Maximum wait time in milliseconds for read_output + wait, or for a synchronous child run before it is returned as background work"),
         run_in_background: z.boolean().optional().describe("Set true to return immediately and collect results from the child session transcript later"),
       }),
-      execute: async ({ description, prompt, subagent_type, persona, handoff, harness, model, resume, read_output, wait, timeout_ms, run_in_background }) => {
+      execute: async ({ description, prompt, subagent_type, persona, handoff, harness, execution_mode, model, resume, read_output, wait, timeout_ms, run_in_background }) => {
         const normalizedDescription = description?.trim() ?? "读取子代理输出";
         const normalizedPrompt = prompt?.trim();
+        const executionMode = execution_mode ?? "session";
         if (read_output) {
           if (normalizedPrompt) {
             throw new Error("read_output cannot be combined with prompt; start a task or read output, not both.");
           }
           if (run_in_background) {
             throw new Error("read_output cannot be combined with run_in_background.");
+          }
+          if (executionMode === "ephemeral") {
+            throw new Error("ephemeral agent runs cannot be read later; use session mode for read_output.");
           }
         } else {
           if (!description?.trim()) {
@@ -467,6 +608,9 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
           if (!normalizedPrompt) {
             throw new Error("prompt is required unless read_output is true.");
           }
+        }
+        if (executionMode === "ephemeral" && (resume || run_in_background || wait || timeout_ms)) {
+          throw new Error("ephemeral agent runs do not support resume, run_in_background, wait, or timeout_ms.");
         }
         const taskPrompt = normalizedPrompt ?? "";
 
@@ -492,6 +636,18 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
           });
         }
 
+        if (executionMode === "ephemeral") {
+          return runEphemeralAgent({
+            parentSessionId,
+            description: normalizedDescription,
+            prompt: taskPrompt,
+            profile: agentProfile,
+            handoff,
+            harness,
+            model,
+          });
+        }
+
         const childSession = resolveChildSession({
           description: normalizedDescription,
           parentSessionId,
@@ -507,6 +663,7 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
         });
 
         if (childSession.shouldWriteSystemPrompt) {
+          const agentMemory = readAgentMemory(agentIdentity.agentKey);
           const systemMessage = createSessionMessage({
             sessionId: childSessionId,
             clientMessageId: `child-agent-system-${randomUUID()}`,
@@ -521,6 +678,9 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
               persona: agentProfile.persona,
               handoff,
               harness,
+              agentMemory,
+              agentMemoryPath: getAgentMemoryPath(agentIdentity.agentKey),
+              executionMode: "session",
             }),
             attachmentIds: [],
           });
@@ -545,9 +705,16 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
         });
 
         if (run_in_background) {
-          void runPromise.catch((error) => {
-            console.warn("[agent-tool] background child agent failed", error);
-          });
+          void runPromise
+            .then(() => {
+              persistAgentMemoryFromLatestReply({
+                agentKey: agentIdentity.agentKey,
+                childSessionId,
+              });
+            })
+            .catch((error) => {
+              console.warn("[agent-tool] background child agent failed", error);
+            });
 
           const snapshot = getSessionSnapshot(childSessionId);
           const binding = getSessionProjectBinding(childSessionId);
@@ -569,9 +736,16 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
 
         const completedInSyncWindow = await waitForRunCompletion(runPromise, timeout_ms ?? defaultSyncWaitTimeoutMs);
         if (!completedInSyncWindow) {
-          void runPromise.catch((error) => {
-            console.warn("[agent-tool] timed-out child agent failed after background handoff", error);
-          });
+          void runPromise
+            .then(() => {
+              persistAgentMemoryFromLatestReply({
+                agentKey: agentIdentity.agentKey,
+                childSessionId,
+              });
+            })
+            .catch((error) => {
+              console.warn("[agent-tool] timed-out child agent failed after background handoff", error);
+            });
 
           const snapshot = getSessionSnapshot(childSessionId);
           const binding = getSessionProjectBinding(childSessionId);
@@ -594,6 +768,12 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
 
         const snapshot = getSessionSnapshot(childSessionId);
         const reply = [...snapshot.messages].reverse().find((message) => message.role === "assistant");
+        const replyContent = reply?.content ? stripAgentMemoryUpdate(reply.content) : "";
+        const agentMemoryPath = persistAgentMemoryFromText({
+          agentKey: agentIdentity.agentKey,
+          childSessionId,
+          text: reply?.content ?? "",
+        });
         const binding = getSessionProjectBinding(childSessionId);
         const job = snapshot.jobs.find((entry) => entry.kind === "provider-completion");
         const outputFile = binding?.transcriptMarkdownPath ?? null;
@@ -607,8 +787,9 @@ export function createAgentTool(parentSessionId = DEFAULT_SESSION_ID): ToolSet {
           error: job?.status === "failed" ? job.detail : undefined,
           outputFile,
           transcriptMarkdownPath: outputFile,
-          result: reply?.content ?? "",
-          response: reply?.content ?? "",
+          agentMemoryPath,
+          result: replyContent,
+          response: replyContent,
         };
       },
     }),

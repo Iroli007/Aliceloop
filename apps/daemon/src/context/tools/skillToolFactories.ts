@@ -5,6 +5,7 @@ import type { ToolSet } from "ai";
 import { createBrowserTools } from "./browserTool";
 import { createChromeRelayTools } from "./chromeRelayTool";
 import { createManagedTaskTools } from "./managedTaskTools";
+import { createMemoryTool } from "./memoryTool";
 import { createViewImageTool } from "./viewImageTool";
 import { createWebFetchTool } from "./webFetchTool";
 import { createWebSearchTool } from "./webSearchTool";
@@ -27,6 +28,7 @@ const cachedWebSearchTools = new Map<string, ToolSet>();
 const cachedAudioUnderstandTools = new Map<string, ToolSet>();
 const cachedViewImageTools = new Map<string, ToolSet>();
 const cachedAgentTools = new Map<string, ToolSet>();
+let cachedMemoryTools: ToolSet | null = null;
 let cachedAnthropicToolSearchTools: ToolSet | null = null;
 
 interface SkillToolFactoryOptions {
@@ -121,6 +123,13 @@ function getAgentToolSet(sessionId?: string) {
   return tools;
 }
 
+function getMemoryToolSet() {
+  if (!cachedMemoryTools) {
+    cachedMemoryTools = createMemoryTool();
+  }
+  return cachedMemoryTools;
+}
+
 export function getAnthropicToolSearchToolSet() {
   if (cachedAnthropicToolSearchTools) {
     return cachedAnthropicToolSearchTools;
@@ -181,6 +190,7 @@ const skillToolFactories = new Map<string, (options?: SkillToolFactoryOptions) =
   ["browser_video_watch_poll", (options) => getBrowserToolSet(options?.sessionId)],
   ["browser_video_watch_stop", (options) => getBrowserToolSet(options?.sessionId)],
   ["document_ingest", () => ({ document_ingest: getManagedTaskTools().document_ingest })],
+  ["memory_get", () => getMemoryToolSet()],
   ["review_coach", () => ({ review_coach: getManagedTaskTools().review_coach })],
   ["view_image", (options) => getViewImageToolSet(options?.sessionId)],
   ["web_fetch", (options) => getWebFetchToolSet(options?.sessionId)],
@@ -266,5 +276,6 @@ export function resetSkillToolCache() {
   cachedAudioUnderstandTools.clear();
   cachedViewImageTools.clear();
   cachedAgentTools.clear();
+  cachedMemoryTools = null;
   cachedAnthropicToolSearchTools = null;
 }

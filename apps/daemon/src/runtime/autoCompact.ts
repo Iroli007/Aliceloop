@@ -1,5 +1,5 @@
 import type { ModelMessage } from "ai";
-import type { SessionCompactionState, SessionMessage } from "@aliceloop/runtime-core";
+import type { SessionCompactionState, SessionMemoryState, SessionMessage } from "@aliceloop/runtime-core";
 import { createEmptySessionCompactionState } from "../repositories/sessionRepository";
 
 export const SESSION_HOT_TAIL_MESSAGE_COUNT = 8;
@@ -22,11 +22,54 @@ function summarizeSessionMessage(message: SessionMessage) {
   const attachmentSummary = message.attachments.length > 0
     ? ` [attachments: ${message.attachments.map((attachment) => attachment.fileName).join(", ")}]`
     : "";
+  if (!content && !attachmentSummary) {
+    return null;
+  }
   const raw = `${content || "(no text)"}${attachmentSummary}`;
   const compact = raw.length > MAX_MESSAGE_SUMMARY_CHARS
     ? `${raw.slice(0, MAX_MESSAGE_SUMMARY_CHARS).trimEnd()}…`
     : raw;
   return `${role}: ${compact}`;
+}
+
+function hasSessionMemoryContent(
+  sessionMemory: SessionMemoryState | null | undefined,
+): sessionMemory is SessionMemoryState {
+  return Boolean(
+    sessionMemory
+    && (
+      sessionMemory.currentPhase.trim()
+      || sessionMemory.summary.trim()
+      || sessionMemory.completed.length > 0
+      || sessionMemory.remaining.length > 0
+      || sessionMemory.decisions.length > 0
+    ),
+  );
+}
+
+function buildSessionMemoryCheckpointSummary(sessionMemory: SessionMemoryState | null | undefined) {
+  if (!hasSessionMemoryContent(sessionMemory)) {
+    return "";
+  }
+
+  const lines = ["Session memory fallback:"];
+  if (sessionMemory.currentPhase.trim()) {
+    lines.push(`Current phase: ${normalizeInline(sessionMemory.currentPhase)}`);
+  }
+  if (sessionMemory.summary.trim()) {
+    lines.push(`Summary: ${normalizeInline(sessionMemory.summary)}`);
+  }
+  if (sessionMemory.completed.length > 0) {
+    lines.push(`Completed: ${sessionMemory.completed.map(normalizeInline).join("; ")}`);
+  }
+  if (sessionMemory.remaining.length > 0) {
+    lines.push(`Remaining: ${sessionMemory.remaining.map(normalizeInline).join("; ")}`);
+  }
+  if (sessionMemory.decisions.length > 0) {
+    lines.push(`Decisions: ${sessionMemory.decisions.map(normalizeInline).join("; ")}`);
+  }
+
+  return trimCheckpointSummary(lines).join("\n");
 }
 
 function splitCheckpointSummary(summary: string) {
@@ -65,6 +108,7 @@ export function deriveSessionCompactionState(input: {
   sessionId: string;
   messages: SessionMessage[];
   currentState: SessionCompactionState;
+  sessionMemory?: SessionMemoryState;
   hotTailCount?: number;
   triggerMessageCount?: number;
 }): SessionCompactionState {
@@ -111,9 +155,10 @@ export function deriveSessionCompactionState(input: {
 
   const nextSummaryLines = trimCheckpointSummary([
     ...splitCheckpointSummary(validCurrentState.checkpointSummary),
-    ...absorbedMessages.map(summarizeSessionMessage),
+    ...absorbedMessages.map(summarizeSessionMessage).filter((line): line is string => Boolean(line)),
   ]);
-  const nextSummary = nextSummaryLines.join("\n");
+  const nextSummary = nextSummaryLines.join("\n")
+    || buildSessionMemoryCheckpointSummary(input.sessionMemory);
   const lastCompactedMessageId = absorbedMessages.at(-1)?.id ?? validCurrentState.lastCompactedMessageId;
   const hotTailMessages = liveMessages.slice(absorbedCount);
   const now = new Date().toISOString();

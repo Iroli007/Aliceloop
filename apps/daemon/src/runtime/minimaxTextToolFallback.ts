@@ -77,7 +77,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
     const availablePreview = availableTools.slice(0, 12).join(", ");
     return {
       replacementText: [
-        `MiniMax 尝试调用 \`${parsed.toolName}\`，但当前回合没有把这个工具加入工具集。`,
+        `模型输出了文本形式的 \`${parsed.toolName}\` 调用，但当前回合没有把这个工具加入工具集。`,
         availablePreview
           ? `当前已挂载的工具有：${availablePreview}${availableTools.length > 12 ? " 等" : ""}。`
           : "当前回合没有挂载任何可执行工具。",
@@ -169,7 +169,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
 
     if (!finalText) {
       finalText = [
-        `已接住 MiniMax 的文本工具调用并执行了 \`${parsed.toolName}\`。`,
+        `已接住文本形式的工具调用并执行了 \`${parsed.toolName}\`。`,
         input.summarizeUnknown(output, 4000) ?? "",
       ].filter(Boolean).join("\n\n");
     }
@@ -204,7 +204,7 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
 
     return {
       replacementText: [
-        `MiniMax 返回了文本形式的工具调用：${parsed.markup}`,
+        `模型返回了文本形式的工具调用：${parsed.markup}`,
         `我尝试按 AI-native fallback 执行 \`${parsed.toolName}\`，但失败了：${error instanceof Error ? error.message : String(error)}`,
       ].join("\n\n"),
       toolCallCount: 1,

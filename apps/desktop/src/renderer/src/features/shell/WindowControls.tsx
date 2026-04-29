@@ -7,9 +7,10 @@ type WindowControlsProps = {
     onClick: () => void;
   };
   showThreadSearch?: boolean;
+  onThreadSearchClick?: () => void;
 };
 
-export function WindowControls({ onClose, sidebarToggle, showThreadSearch = false }: WindowControlsProps) {
+export function WindowControls({ onClose, sidebarToggle, showThreadSearch = false, onThreadSearchClick }: WindowControlsProps) {
   const desktopBridge = getDesktopBridge();
 
   async function handleCloseWindow() {
@@ -96,6 +97,7 @@ export function WindowControls({ onClose, sidebarToggle, showThreadSearch = fals
               type="button"
               aria-label="线程搜索"
               title="线程搜索"
+              onClick={onThreadSearchClick}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M10.2 18.2c4.42 0 8-3.13 8-6.98s-3.58-6.97-8-6.97s-8 3.12-8 6.97c0 1.92.89 3.66 2.34 4.92l-.73 3.3l3.27-1.44c.96.14 1.69.2 3.12.2Z" />

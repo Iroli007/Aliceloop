@@ -38,6 +38,7 @@ import {
 } from "./capabilityRecovery";
 import type { PromptCacheRunTrace } from "./promptCacheTelemetry";
 import { schedulePostProcessing } from "./postProcessing";
+import { getStreamCheckpoint, type StreamCheckpoint } from "./streamCheckpoint";
 
 // ---------------------------------------------------------------------------
 // Helpers (unchanged)
@@ -392,6 +393,7 @@ interface AgentRun {
   provider: StoredProviderConfig;
   enableAnthropicToolSearch: boolean;
   abortController: AbortController;
+  resumeCheckpoint: StreamCheckpoint | null;
   context: AgentContext;
   safety: ReturnType<typeof createSafetyChecker>;
   queueWaitMs: number;
@@ -406,6 +408,43 @@ interface AgentRun {
 
 interface RunAgentOptions {
   model?: string;
+  resumeAfterDisconnect?: boolean;
+}
+
+const DISCONNECT_ABORT_REASON = "client_disconnected";
+const DISCONNECTED_RESUME_WINDOW_MS = 5 * 60 * 1000;
+
+function estimateModelMessageChars(message: AgentContext["messages"][number]) {
+  return typeof message.content === "string"
+    ? message.content.length
+    : JSON.stringify(message.content).length;
+}
+
+function estimateContextTokens(context: AgentContext) {
+  const systemPromptChars = Array.isArray(context.systemPrompt)
+    ? context.systemPrompt.reduce((sum, message) => sum + message.content.length, 0)
+    : context.systemPrompt.length;
+  const messageChars = context.messages.reduce((sum, message) => sum + estimateModelMessageChars(message), 0);
+  return Math.ceil((systemPromptChars + messageChars) / 4);
+}
+const RESUME_PROMPT_TEXT_TAIL_CHARS = 4_000;
+
+function buildDisconnectedResumePrompt(checkpoint: StreamCheckpoint | null) {
+  const lines = [
+    "The previous assistant response was interrupted because the client disconnected.",
+    "Continue the same response from the exact point where it stopped.",
+    "Do not repeat text that is already visible in the assistant message.",
+  ];
+
+  const visibleText = checkpoint?.accumulatedText.trim();
+  if (visibleText) {
+    const tail = visibleText.length > RESUME_PROMPT_TEXT_TAIL_CHARS
+      ? visibleText.slice(-RESUME_PROMPT_TEXT_TAIL_CHARS)
+      : visibleText;
+    lines.push("", "<already_visible_assistant_text_tail>", tail, "</already_visible_assistant_text_tail>");
+  }
+
+  return lines.join("\n");
 }
 
 function applyRunOptions(provider: StoredProviderConfig, options?: RunAgentOptions): StoredProviderConfig {
@@ -460,6 +499,20 @@ async function createAgentRun(
   }
   const contextLoadMs = roundMs(nowMs() - contextStartedAt);
 
+  const resumeCheckpoint = options?.resumeAfterDisconnect ? getStreamCheckpoint(sessionId) : null;
+  if (options?.resumeAfterDisconnect) {
+    context = {
+      ...context,
+      messages: [
+        ...context.messages,
+        {
+          role: "user",
+          content: buildDisconnectedResumePrompt(resumeCheckpoint),
+        },
+      ],
+    };
+  }
+
   const safety = createSafetyChecker(context.safetyConfig);
   const startedAtMs = nowMs();
 
@@ -469,6 +522,7 @@ async function createAgentRun(
     provider: activeProvider,
     enableAnthropicToolSearch,
     abortController,
+    resumeCheckpoint,
     context,
     safety,
     queueWaitMs,
@@ -487,6 +541,7 @@ async function createAgentRun(
     },
 
     reportCompleted(text: string, streamTimings: Record<string, number | string | null>) {
+      disconnectedPausedAgents.delete(sessionId);
       const providerRunMs = roundMs(nowMs() - startedAtMs);
       const endToEndMs = roundMs(queueWaitMs + contextLoadMs + providerRunMs);
       publishJob({
@@ -533,16 +588,21 @@ async function createAgentRun(
         });
         publishRuntimeNotice(sessionId, error.message);
       } else if (abortController.signal.aborted) {
-        const detail = "Agent loop aborted: user sent a new message or requested cancellation.";
+        const disconnected = abortController.signal.reason === DISCONNECT_ABORT_REASON;
+        const detail = disconnected
+          ? "Agent loop paused because the client stream disconnected. It will resume when the stream reconnects."
+          : "Agent loop aborted: user sent a new message or requested cancellation.";
         publishJob({
           id: jobId,
           sessionId,
           kind: "provider-completion",
           status: "failed",
-          title: "Agent stopped",
+          title: disconnected ? "Agent paused" : "Agent stopped",
           detail,
         });
-        publishRuntimeNotice(sessionId, detail);
+        if (!disconnected) {
+          publishRuntimeNotice(sessionId, detail);
+        }
       } else {
         const detail = error instanceof Error ? error.message : "Agent call failed";
         publishJob({
@@ -655,6 +715,7 @@ async function executeStreamAttempt(
   existingAssistantMessageId?: string | null,
 ): Promise<StreamResult & { assistantMessageId: string | null; attachedToolNames: string[] }> {
   const requestStartedAt = nowMs();
+  const resumeCheckpoint = existingAssistantMessageId ? null : run.resumeCheckpoint;
   const runtimeSettings = getRuntimeSettings();
   const stateMachine = new ToolStateMachine();
   const toolOrchestration = createToolOrchestration({
@@ -704,7 +765,8 @@ async function executeStreamAttempt(
     stateMachine,
     reasoningEffort: runtimeSettings.reasoningEffort,
     requestStartedAt,
-    existingAssistantMessageId: existingAssistantMessageId ?? null,
+    existingAssistantMessageId: existingAssistantMessageId ?? resumeCheckpoint?.assistantMessageId ?? null,
+    initialText: resumeCheckpoint?.accumulatedText,
     checkActive: () => run.safety.checkActive(),
     summarizeUnknown,
     resolveTextFallback: ({ assistantText, stateMachine: fallbackStateMachine, reasoningEffort }) => {
@@ -865,6 +927,7 @@ export async function runAgent(sessionId: string, options?: RunAgentOptions) {
         sessionId: run.sessionId,
         messages: run.context.messages,
         assistantText: text,
+        contextTokenEstimate: estimateContextTokens(run.context),
         publishRuntimeNotice,
       });
     } catch (error) {
@@ -876,13 +939,41 @@ export async function runAgent(sessionId: string, options?: RunAgentOptions) {
 }
 
 const activeAgents = new Map<string, AbortController>();
+const disconnectedPausedAgents = new Map<string, number>();
 
 export function abortAgentForSession(sessionId: string) {
+  disconnectedPausedAgents.delete(sessionId);
   const controller = activeAgents.get(sessionId);
   if (!controller) {
     return false;
   }
 
   controller.abort();
+  return true;
+}
+
+export function pauseAgentForDisconnectedStream(sessionId: string) {
+  const controller = activeAgents.get(sessionId);
+  if (!controller || controller.signal.aborted) {
+    return false;
+  }
+
+  disconnectedPausedAgents.set(sessionId, Date.now());
+  controller.abort(DISCONNECT_ABORT_REASON);
+  return true;
+}
+
+export function resumeAgentForReconnectedStream(sessionId: string) {
+  const pausedAt = disconnectedPausedAgents.get(sessionId);
+  if (!pausedAt) {
+    return false;
+  }
+
+  disconnectedPausedAgents.delete(sessionId);
+  if (Date.now() - pausedAt > DISCONNECTED_RESUME_WINDOW_MS) {
+    return false;
+  }
+
+  void runAgent(sessionId, { resumeAfterDisconnect: true });
   return true;
 }

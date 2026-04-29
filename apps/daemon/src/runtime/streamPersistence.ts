@@ -44,6 +44,7 @@ interface ConsumeTextStreamInput {
   reasoningEffort: ReasoningEffort;
   requestStartedAt: number;
   existingAssistantMessageId: string | null;
+  initialText?: string;
   checkActive(): void;
   summarizeUnknown(value: unknown, maxLength?: number): string | null;
   resolveTextFallback(input: {
@@ -69,7 +70,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     promptCache: PromptCacheRunTrace | null;
   };
 }> {
-  let text = "";
+  let text = input.initialText ?? "";
   const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
   let assistantMessageId: string | null = input.existingAssistantMessageId;
   let pendingFlush = false;
@@ -109,7 +110,9 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     if (!delta) continue;
 
     text += delta;
-    saveStreamCheckpoint(input.sessionId, text);
+    if (assistantMessageId) {
+      saveStreamCheckpoint(input.sessionId, assistantMessageId, text);
+    }
 
     if (!assistantMessageId) {
       const content = getChatContent();
@@ -129,6 +132,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
       });
 
       assistantMessageId = messageResult.message.id;
+      saveStreamCheckpoint(input.sessionId, assistantMessageId, text);
       for (const event of messageResult.events) {
         publishSessionEvent(event);
       }

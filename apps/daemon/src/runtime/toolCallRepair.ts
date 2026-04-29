@@ -1,5 +1,5 @@
 export interface RepairedToolCall {
-  source: "minimax_text_tool_call" | "tool_call_json";
+  source: "minimax_text_tool_call" | "tool_call_json" | "inline_tool_json";
   rawToolName: string;
   toolName: string;
   input: Record<string, unknown>;
@@ -315,6 +315,98 @@ function parseJsonToolCall(text: string): RepairedToolCall | null {
   }
 }
 
+function extractBalancedJsonObject(text: string, startIndex: number) {
+  if (text[startIndex] !== "{") {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          json: text.slice(startIndex, index + 1),
+          endIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseInlineToolJsonCall(text: string): RepairedToolCall | null {
+  const markerPattern = /(?:^|[^\w-])([a-zA-Z_][\w-]*)\s*:\s*\d+\s*\{/gu;
+
+  for (const match of text.matchAll(markerPattern)) {
+    const rawToolName = match[1] ?? "";
+    const matchedText = match[0] ?? "";
+    const markerStart = match.index ?? 0;
+    const callStart = markerStart + Math.max(0, matchedText.indexOf(rawToolName));
+    const jsonStart = markerStart + matchedText.lastIndexOf("{");
+    const extracted = extractBalancedJsonObject(text, jsonStart);
+    if (!extracted) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(extracted.json) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        continue;
+      }
+
+      const toolName = normalizeToolName(rawToolName);
+      if (!toolName) {
+        continue;
+      }
+
+      const input = buildNormalizedInput(toolName, parsed as Record<string, unknown>);
+      if (!input) {
+        continue;
+      }
+
+      return {
+        source: "inline_tool_json",
+        rawToolName,
+        toolName,
+        input,
+        markup: text.slice(callStart, extracted.endIndex).trim(),
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 export function repairTextToolCall(text: string): RepairedToolCall | null {
-  return parseJsonToolCall(text) ?? parseMiniMaxTextToolCall(text);
+  return parseJsonToolCall(text) ?? parseInlineToolJsonCall(text) ?? parseMiniMaxTextToolCall(text);
 }

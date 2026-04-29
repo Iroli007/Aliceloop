@@ -65,6 +65,9 @@ function createEmptySessionMemoryState(sessionId: string): SessionMemoryState {
     remaining: [],
     decisions: [],
     rememberedTurnCount: 0,
+    lastTokenEstimate: 0,
+    lastToolCallCount: 0,
+    lastUpdateReason: null,
     updatedAt: null,
   };
 }
@@ -569,6 +572,21 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
           updatedAt: event.createdAt,
         },
         planMode,
+      };
+    }
+    case "session_memory.updated": {
+      const sessionMemory = (event.payload as { sessionMemory?: SessionMemoryState }).sessionMemory;
+      if (!sessionMemory) {
+        return snapshot;
+      }
+
+      return {
+        ...snapshot,
+        session: {
+          ...snapshot.session,
+          updatedAt: event.createdAt,
+        },
+        sessionMemory,
       };
     }
     case "presence.updated":

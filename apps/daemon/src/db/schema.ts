@@ -415,6 +415,8 @@ export const schemaStatements = [
   `
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY,
+      title TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
       content TEXT NOT NULL,
       source TEXT NOT NULL CHECK(source IN ('auto', 'manual')),
       durability TEXT NOT NULL CHECK(durability IN ('permanent', 'temporary')),

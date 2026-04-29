@@ -75,6 +75,7 @@ export type SessionEventType =
   | "tool.call.completed"
   | "tool.state.change"
   | "plan_mode.updated"
+  | "session_memory.updated"
   | "compaction.updated";
 
 export interface SessionPlanModeState {
@@ -216,6 +217,7 @@ export interface SessionThreadSummary {
   isChildAgent?: boolean;
   matchedPreview?: string | null;
   matchedMessageCreatedAt?: string | null;
+  matchCount?: number | null;
   projectId?: string | null;
   projectName?: string | null;
   projectPath?: string | null;
@@ -657,6 +659,9 @@ export interface SessionMemoryState {
   remaining: string[];
   decisions: string[];
   rememberedTurnCount: number;
+  lastTokenEstimate: number;
+  lastToolCallCount: number;
+  lastUpdateReason: string | null;
   updatedAt: string | null;
 }
 
@@ -740,6 +745,8 @@ export type MemoryEmbeddingModel = "text-embedding-3-small" | "text-embedding-3-
 
 export interface Memory {
   id: string;
+  title: string;
+  description: string;
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
@@ -799,6 +806,8 @@ export interface MemoryStats {
 }
 
 export interface CreateMemoryInput {
+  title?: string | null;
+  description?: string | null;
   content: string;
   source: MemorySource;
   durability: MemoryDurability;
@@ -810,6 +819,8 @@ export interface CreateMemoryInput {
 }
 
 export interface UpdateMemoryInput {
+  title?: string | null;
+  description?: string | null;
   content?: string;
   durability?: MemoryDurability;
   memoryType?: MemoryType | null;

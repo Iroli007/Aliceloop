@@ -1,14 +1,16 @@
-interface StreamCheckpoint {
+export interface StreamCheckpoint {
   sessionId: string;
+  assistantMessageId: string;
   accumulatedText: string;
   timestamp: number;
 }
 
 const checkpoints = new Map<string, StreamCheckpoint>();
 
-export function saveStreamCheckpoint(sessionId: string, text: string) {
+export function saveStreamCheckpoint(sessionId: string, assistantMessageId: string, text: string) {
   checkpoints.set(sessionId, {
     sessionId,
+    assistantMessageId,
     accumulatedText: text,
     timestamp: Date.now(),
   });

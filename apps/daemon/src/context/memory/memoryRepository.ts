@@ -42,6 +42,8 @@ interface CreateMemoryNoteInput {
 
 interface MemoryRow {
   id: string;
+  title: string;
+  description: string;
   content: string;
   source: Memory["source"];
   durability: Memory["durability"];
@@ -61,7 +63,7 @@ interface MemoryEmbeddingRow {
   embeddingDimension: number;
 }
 
-export type MemorySearchMode = "semantic" | "lexical";
+export type MemorySearchMode = "semantic" | "lexical" | "hybrid";
 export const MEMORY_RETRIEVAL_TIMEOUT_REASON = "memory_retrieval_timeout";
 export type MemorySearchFallbackReason =
   | "embedding_provider_unavailable"
@@ -177,6 +179,32 @@ function normalizeFactState(value: MemoryFactState | null | undefined): MemoryFa
   return value ?? "active";
 }
 
+function compactMemoryText(value: string | null | undefined) {
+  return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function truncateMemoryText(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, maxLength).trimEnd()}…` : value;
+}
+
+function normalizeMemoryTitle(value: string | null | undefined, content: string) {
+  const explicitTitle = compactMemoryText(value);
+  if (explicitTitle) {
+    return truncateMemoryText(explicitTitle, 96);
+  }
+
+  return truncateMemoryText(compactMemoryText(content), 96);
+}
+
+function normalizeMemoryDescription(value: string | null | undefined, content: string) {
+  const explicitDescription = compactMemoryText(value);
+  if (explicitDescription) {
+    return truncateMemoryText(explicitDescription, 220);
+  }
+
+  return truncateMemoryText(compactMemoryText(content), 220);
+}
+
 function inferMemoryType(factKind: MemoryFactKind | null): MemoryType {
   switch (factKind) {
     case "profile":
@@ -195,6 +223,14 @@ function normalizeMemoryType(value: MemoryType | null | undefined, factKind: Mem
 
 function hasFactIdentity(memory: Pick<Memory, "factKind" | "factKey">) {
   return Boolean(memory.factKind && memory.factKey);
+}
+
+function buildMemoryManifestText(memory: Pick<Memory, "memoryType" | "title" | "description">) {
+  return [
+    memory.memoryType,
+    memory.title,
+    memory.description,
+  ].filter(Boolean).join("\n");
 }
 
 const lexicalStopWords = new Set([
@@ -249,6 +285,8 @@ function extractLexicalTerms(queryText: string) {
 function mapMemoryRow(row: MemoryRow): Memory {
   return {
     id: row.id,
+    title: row.title,
+    description: row.description,
     content: row.content,
     source: row.source,
     durability: row.durability,
@@ -272,6 +310,8 @@ function getMemoryRowById(
       `
         SELECT
           id,
+          title,
+          description,
           content,
           source,
           durability,
@@ -307,22 +347,36 @@ function scoreTextMatch(queryText: string, memory: Memory) {
     return 0;
   }
 
-  const haystack = [memory.memoryType, memory.factKind ?? "", memory.factKey ?? "", memory.content, ...memory.relatedTopics].join(" ").toLowerCase();
+  const haystack = buildMemoryManifestText(memory).toLowerCase();
   const matchedTerms = significantTerms.filter((term) => haystack.includes(term));
   if (matchedTerms.length === 0) {
     return 0;
   }
 
   const coverage = matchedTerms.length / significantTerms.length;
-  const topicBonus = matchedTerms.some((term) => memory.relatedTopics.some((topic) => topic.toLowerCase().includes(term)))
+  const titleBonus = matchedTerms.some((term) => memory.title.toLowerCase().includes(term))
     ? 0.15
-    : 0;
-  const factKeyBonus = memory.factKey && queryText.trim().toLowerCase().includes(memory.factKey.toLowerCase())
-    ? 0.2
     : 0;
   const exactPhraseBonus = haystack.includes(queryText.trim().toLowerCase()) ? 0.2 : 0;
 
-  return Math.min(1, coverage + topicBonus + factKeyBonus + exactPhraseBonus);
+  return Math.min(1, coverage + titleBonus + exactPhraseBonus);
+}
+
+function mergeMemoryCandidates(candidates: MemoryWithScore[], limit: number) {
+  const byId = new Map<string, MemoryWithScore>();
+  for (const memory of candidates) {
+    const existing = byId.get(memory.id);
+    if (!existing || existing.similarityScore < memory.similarityScore) {
+      byId.set(memory.id, memory);
+    }
+  }
+
+  return Array.from(byId.values())
+    .sort((left, right) => {
+      const scoreDiff = right.similarityScore - left.similarityScore;
+      return scoreDiff !== 0 ? scoreDiff : right.updatedAt.localeCompare(left.updatedAt);
+    })
+    .slice(0, limit);
 }
 
 function clearMemoryEmbedding(memoryId: string, db: Database.Database = getDatabase()) {
@@ -331,7 +385,7 @@ function clearMemoryEmbedding(memoryId: string, db: Database.Database = getDatab
 }
 
 async function upsertMemoryEmbedding(
-  memory: Pick<Memory, "id" | "content">,
+  memory: Pick<Memory, "id" | "title" | "description" | "memoryType">,
   config: MemoryConfig,
   db: Database.Database = getDatabase(),
   abortSignal?: AbortSignal,
@@ -341,7 +395,7 @@ async function upsertMemoryEmbedding(
     return;
   }
 
-  const embedding = await generateEmbedding(memory.content, config.embeddingModel, {
+  const embedding = await generateEmbedding(buildMemoryManifestText(memory), config.embeddingModel, {
     abortSignal,
     dimension: config.embeddingDimension,
   });
@@ -391,8 +445,8 @@ function searchMemoriesByText(
   const clauses: string[] = [];
   const params: Array<string | number> = [];
   for (const term of lexicalTerms) {
-    clauses.push("(content LIKE ? OR related_topics LIKE ? OR fact_key LIKE ? OR fact_kind LIKE ? OR memory_type LIKE ?)");
-    params.push(`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`);
+    clauses.push("(title LIKE ? OR description LIKE ? OR memory_type LIKE ?)");
+    params.push(`%${term}%`, `%${term}%`, `%${term}%`);
   }
   params.push(Math.max(limit * 3, limit));
 
@@ -401,6 +455,8 @@ function searchMemoriesByText(
       `
         SELECT
           id,
+          title,
+          description,
           content,
           source,
           durability,
@@ -739,9 +795,13 @@ export async function createMemory(
   const factKey = normalizeFactKey(input.factKey);
   const factState = normalizeFactState(input.factState);
   const memoryType = normalizeMemoryType(input.memoryType, factKind);
+  const title = normalizeMemoryTitle(input.title, content);
+  const description = normalizeMemoryDescription(input.description, content);
   const relatedTopics = input.relatedTopics?.map((topic) => topic.trim()).filter(Boolean) ?? [];
   const memory: Memory = {
     id: randomUUID(),
+    title,
+    description,
     content,
     source: input.source,
     durability: input.durability,
@@ -798,6 +858,8 @@ export async function createMemory(
     `
       INSERT INTO memories (
         id,
+        title,
+        description,
         content,
         source,
         durability,
@@ -809,10 +871,12 @@ export async function createMemory(
         updated_at,
         access_count,
         related_topics
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
   ).run(
     memory.id,
+    memory.title,
+    memory.description,
     memory.content,
     memory.source,
     memory.durability,
@@ -1007,7 +1071,7 @@ export async function searchMemories(
   }
 
   const hydrateStartedAt = nowMs();
-  const memories = scoredMemories
+  const semanticMemories = scoredMemories
     .map((scoredMemory) => {
       const row = getMemoryRowById(scoredMemory.memoryId, db);
       if (!row) {
@@ -1021,10 +1085,14 @@ export async function searchMemories(
     })
     .filter((memory): memory is MemoryWithScore => memory !== null);
   const hydrateMs = roundMs(nowMs() - hydrateStartedAt);
+  const lexicalStartedAt = nowMs();
+  const lexicalMemories = searchMemoriesByText(trimmedQuery, normalizedLimit, threshold, db);
+  const lexicalLookupMs = roundMs(nowMs() - lexicalStartedAt);
+  const memories = mergeMemoryCandidates([...semanticMemories, ...lexicalMemories], normalizedLimit);
 
   return {
     memories,
-    mode: "semantic" as const,
+    mode: "hybrid" as const,
     fallbackReason: null,
     timings: {
       embeddingCacheHit,
@@ -1032,6 +1100,7 @@ export async function searchMemories(
       embeddingRowsMs,
       vectorRankMs,
       hydrateMs,
+      lexicalLookupMs,
       totalMs: roundMs(nowMs() - startedAt),
     },
   };
@@ -1105,6 +1174,8 @@ export function findMemoryByExactContent(content: string, db: Database.Database 
       `
         SELECT
           id,
+          title,
+          description,
           content,
           source,
           durability,
@@ -1138,6 +1209,8 @@ function findActiveMemoryByFactIdentity(
       `
         SELECT
           id,
+          title,
+          description,
           content,
           source,
           durability,
@@ -1178,6 +1251,8 @@ export async function updateMemory(
     throw new Error("memory_content_required");
   }
 
+  const nextTitle = updates.title !== undefined ? normalizeMemoryTitle(updates.title, nextContent) : current.title;
+  const nextDescription = updates.description !== undefined ? normalizeMemoryDescription(updates.description, nextContent) : current.description;
   const nextFactKind = updates.factKind !== undefined ? normalizeFactKind(updates.factKind) : current.factKind;
   const nextFactKey = updates.factKey !== undefined ? normalizeFactKey(updates.factKey) : current.factKey;
   const nextFactState = normalizeFactState(updates.factState ?? current.factState);
@@ -1193,6 +1268,8 @@ export async function updateMemory(
         `
           SELECT
             id,
+            title,
+            description,
             content,
             source,
             durability,
@@ -1232,6 +1309,8 @@ export async function updateMemory(
     `
       UPDATE memories
       SET
+        title = ?,
+        description = ?,
         content = ?,
         durability = ?,
         memory_type = ?,
@@ -1243,6 +1322,8 @@ export async function updateMemory(
       WHERE id = ?
     `,
   ).run(
+    nextTitle,
+    nextDescription,
     nextContent,
     updates.durability ?? current.durability,
     nextMemoryType,
@@ -1254,7 +1335,7 @@ export async function updateMemory(
     memoryId,
   );
 
-  if (updates.content !== undefined || updates.factKind !== undefined || updates.factKey !== undefined || updates.factState !== undefined) {
+  if (updates.title !== undefined || updates.description !== undefined || updates.content !== undefined || updates.memoryType !== undefined || updates.factKind !== undefined || updates.factKey !== undefined || updates.factState !== undefined) {
     if (nextFactState !== "active") {
       clearMemoryEmbedding(memoryId, db);
       return getMemoryById(memoryId, db);
@@ -1262,7 +1343,12 @@ export async function updateMemory(
 
     try {
       const config = getMemoryConfig(db);
-      await upsertMemoryEmbedding({ id: memoryId, content: nextContent }, config, db, abortSignal);
+      await upsertMemoryEmbedding({
+        id: memoryId,
+        title: nextTitle,
+        description: nextDescription,
+        memoryType: nextMemoryType,
+      }, config, db, abortSignal);
     } catch (error) {
       await clearMemoryEmbedding(memoryId, db);
       console.warn("[memory] Failed to refresh embedding after memory update", error);
@@ -1333,6 +1419,8 @@ export function listMemories(
   let query = `
     SELECT
       id,
+      title,
+      description,
       content,
       source,
       durability,
@@ -1370,6 +1458,34 @@ export function listMemories(
   return rows.map(mapMemoryRow);
 }
 
+export function listMemoryProjectionRecords(db: Database.Database = getDatabase()) {
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          id,
+          title,
+          description,
+          content,
+          source,
+          durability,
+          memory_type AS memoryType,
+          fact_kind AS factKind,
+          fact_key AS factKey,
+          fact_state AS factState,
+          created_at AS createdAt,
+          updated_at AS updatedAt,
+          access_count AS accessCount,
+          related_topics AS relatedTopics
+        FROM memories
+        WHERE durability = 'permanent'
+        ORDER BY updated_at DESC
+      `,
+    )
+    .all() as MemoryRow[];
+  return rows.map(mapMemoryRow);
+}
+
 export function clearAllMemories(db: Database.Database = getDatabase()) {
   db.prepare("DELETE FROM memories").run();
 }
@@ -1388,13 +1504,15 @@ export async function rebuildAllEmbeddings(
       `
         SELECT
           id,
-          content
+          title,
+          description,
+          memory_type AS memoryType
         FROM memories
         WHERE fact_state = 'active'
         ORDER BY created_at ASC
       `,
     )
-    .all() as Array<{ id: string; content: string }>;
+    .all() as Array<Pick<Memory, "id" | "title" | "description" | "memoryType">>;
 
   if (memories.length === 0) {
     return { rebuiltCount: 0 };
@@ -1435,7 +1553,7 @@ export async function rebuildAllEmbeddings(
   for (let index = 0; index < memories.length; index += batchSize) {
     const batch = memories.slice(index, index + batchSize);
     const embeddings = await generateEmbeddingsBatch(
-      batch.map((memory) => memory.content),
+      batch.map((memory) => buildMemoryManifestText(memory)),
       config.embeddingModel,
       {
         abortSignal,

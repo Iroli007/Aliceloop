@@ -143,6 +143,7 @@ interface SessionThreadSummaryRow {
   isChildAgent?: number;
   matchedPreview: string | null;
   matchedMessageCreatedAt: string | null;
+  matchCount?: number | null;
   projectId: string | null;
   projectName: string | null;
   projectPath: string | null;
@@ -219,6 +220,43 @@ function summarizeMessagePreview(content: string | null) {
   return normalized.length > 72 ? `${normalized.slice(0, 72).trimEnd()}…` : normalized;
 }
 
+function summarizeMatchedMessagePreview(content: string | null, query?: string) {
+  if (!content || !query?.trim()) {
+    return summarizeMessagePreview(content);
+  }
+
+  const normalized = content.replace(/\s+/g, " ").trim();
+  const normalizedQuery = query.replace(/\s+/g, " ").trim();
+  if (!normalized || !normalizedQuery) {
+    return summarizeMessagePreview(content);
+  }
+
+  const haystack = normalized.toLocaleLowerCase();
+  const directNeedle = normalizedQuery.toLocaleLowerCase();
+  let matchIndex = haystack.indexOf(directNeedle);
+  let matchLength = normalizedQuery.length;
+
+  if (matchIndex < 0) {
+    for (const token of directNeedle.split(/\s+/).filter((item) => item.length > 1)) {
+      const tokenIndex = haystack.indexOf(token);
+      if (tokenIndex >= 0) {
+        matchIndex = tokenIndex;
+        matchLength = token.length;
+        break;
+      }
+    }
+  }
+
+  if (matchIndex < 0) {
+    return summarizeMessagePreview(content);
+  }
+
+  const start = Math.max(0, matchIndex - 22);
+  const end = Math.min(normalized.length, matchIndex + matchLength + 46);
+  const snippet = `${start > 0 ? "…" : ""}${normalized.slice(start, end).trim()}${end < normalized.length ? "…" : ""}`;
+  return snippet.length > 96 ? `${snippet.slice(0, 96).trimEnd()}…` : snippet;
+}
+
 function summarizeSessionTitle(content: string) {
   const normalized = content.replace(/\s+/g, " ").trim();
   if (!normalized) {
@@ -277,6 +315,9 @@ export function createEmptySessionMemoryState(sessionId: string): SessionMemoryS
     remaining: [],
     decisions: [],
     rememberedTurnCount: 0,
+    lastTokenEstimate: 0,
+    lastToolCallCount: 0,
+    lastUpdateReason: null,
     updatedAt: null,
   };
 }
@@ -339,6 +380,41 @@ function isSessionCompactionState(value: unknown): value is SessionCompactionSta
     && (typeof compaction.updatedAt === "string" || compaction.updatedAt === null);
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isSessionMemoryState(value: unknown): value is SessionMemoryState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const memory = value as Partial<SessionMemoryState>;
+  return typeof memory.sessionId === "string"
+    && typeof memory.currentPhase === "string"
+    && typeof memory.summary === "string"
+    && isStringArray(memory.completed)
+    && isStringArray(memory.remaining)
+    && isStringArray(memory.decisions)
+    && typeof memory.rememberedTurnCount === "number"
+    && (typeof memory.lastTokenEstimate === "number" || memory.lastTokenEstimate === undefined)
+    && (typeof memory.lastToolCallCount === "number" || memory.lastToolCallCount === undefined)
+    && (typeof memory.lastUpdateReason === "string" || memory.lastUpdateReason === null || memory.lastUpdateReason === undefined)
+    && (typeof memory.updatedAt === "string" || memory.updatedAt === null);
+}
+
+function normalizeSessionMemoryState(sessionId: string, value: SessionMemoryState): SessionMemoryState {
+  const empty = createEmptySessionMemoryState(sessionId);
+  return {
+    ...empty,
+    ...value,
+    sessionId,
+    lastTokenEstimate: value.lastTokenEstimate ?? 0,
+    lastToolCallCount: value.lastToolCallCount ?? 0,
+    lastUpdateReason: value.lastUpdateReason ?? null,
+  };
+}
+
 export function getSessionPlanModeState(sessionId: string): SessionPlanModeState {
   const events = listSessionEventsSince(sessionId, 0);
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -386,6 +462,33 @@ export function updateSessionCompactionState(sessionId: string, compactionState:
     compactionState.updatedAt ?? new Date().toISOString(),
   );
   return { compactionState, event };
+}
+
+export function getSessionMemoryState(sessionId: string): SessionMemoryState {
+  const events = listSessionEventsSince(sessionId, 0);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "session_memory.updated") {
+      continue;
+    }
+
+    const sessionMemory = (event.payload as { sessionMemory?: unknown }).sessionMemory;
+    if (isSessionMemoryState(sessionMemory)) {
+      return normalizeSessionMemoryState(sessionId, sessionMemory);
+    }
+  }
+
+  return createEmptySessionMemoryState(sessionId);
+}
+
+export function updateSessionMemoryState(sessionId: string, sessionMemory: SessionMemoryState) {
+  const event = appendSessionEvent(
+    sessionId,
+    "session_memory.updated",
+    { sessionMemory },
+    sessionMemory.updatedAt ?? new Date().toISOString(),
+  );
+  return { sessionMemory, event };
 }
 
 export function enterSessionPlanMode(sessionId: string, activePlanId: string | null = null) {
@@ -899,7 +1002,7 @@ function countMessagesForSession(sessionId: string) {
   return row.count;
 }
 
-function toSessionThreadSummary(row: SessionThreadSummaryRow): SessionThreadSummary {
+function toSessionThreadSummary(row: SessionThreadSummaryRow, matchedPreviewQuery?: string): SessionThreadSummary {
   return {
     id: row.id,
     title: row.title,
@@ -909,8 +1012,9 @@ function toSessionThreadSummary(row: SessionThreadSummaryRow): SessionThreadSumm
     latestMessagePreview: summarizeMessagePreview(row.latestMessagePreview),
     latestMessageAt: row.latestMessageAt,
     isChildAgent: Boolean(row.isChildAgent),
-    matchedPreview: summarizeMessagePreview(row.matchedPreview),
+    matchedPreview: summarizeMatchedMessagePreview(row.matchedPreview, matchedPreviewQuery),
     matchedMessageCreatedAt: row.matchedMessageCreatedAt,
+    matchCount: row.matchCount ?? null,
     projectId: row.projectId,
     projectName: row.projectName,
     projectPath: row.projectPath,
@@ -1036,7 +1140,7 @@ export function listSessionThreads(): SessionThreadSummary[] {
     )
     .all() as SessionThreadSummaryRow[];
 
-  const threads = rows.map(toSessionThreadSummary);
+  const threads = rows.map((row) => toSessionThreadSummary(row));
   const draft = findVisibleDraftSession();
   if (draft && !threads.some((thread) => thread.id === draft.id)) {
     threads.push(draft);
@@ -1110,7 +1214,7 @@ export function listHistoricalSessionCandidates(
     )
     .all(excludedSessionId, projectId, projectId, normalizedLimit) as SessionThreadSummaryRow[];
 
-  return rows.map(toSessionThreadSummary);
+  return rows.map((row) => toSessionThreadSummary(row));
 }
 
 export function listSessionConversationMessages(
@@ -1154,6 +1258,59 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
 
   const normalizedLimit = Math.max(1, Math.min(limit, 100));
   const db = getDatabase();
+  const likePattern = `%${escapeSqlLikePattern(trimmedQuery)}%`;
+  const titleRows = db
+    .prepare(
+      `
+        SELECT
+          sessions.id AS id,
+          sessions.title AS title,
+          sessions.created_at AS createdAt,
+          sessions.updated_at AS updatedAt,
+          COALESCE(message_counts.messageCount, 0) AS messageCount,
+          latest_message.content AS latestMessagePreview,
+          latest_message.created_at AS latestMessageAt,
+          EXISTS (
+            SELECT 1
+            FROM child_agents
+            WHERE child_agents.child_session_id = sessions.id
+          ) AS isChildAgent,
+          latest_message.content AS matchedPreview,
+          latest_message.created_at AS matchedMessageCreatedAt,
+          1 AS matchCount,
+          projects.id AS projectId,
+          projects.name AS projectName,
+          projects.path AS projectPath,
+          projects.kind AS projectKind
+        FROM sessions
+        LEFT JOIN projects
+          ON projects.id = sessions.project_id
+        LEFT JOIN (
+          SELECT
+            session_id,
+            COUNT(*) AS messageCount
+          FROM session_messages
+          WHERE role IN ('user', 'assistant')
+          GROUP BY session_id
+        ) AS message_counts
+          ON message_counts.session_id = sessions.id
+        LEFT JOIN session_messages AS latest_message
+          ON latest_message.id = (
+            SELECT id
+            FROM session_messages
+            WHERE session_id = sessions.id
+              AND role IN ('user', 'assistant')
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+          )
+        WHERE sessions.title LIKE ? ESCAPE '\\'
+        ORDER BY sessions.updated_at DESC, sessions.created_at DESC
+        LIMIT ?
+      `,
+    )
+    .all(likePattern, normalizedLimit) as SessionThreadSummaryRow[];
+  const titleResults = titleRows.map((row) => toSessionThreadSummary(row));
+  const seenSessionIds = new Set(titleResults.map((thread) => thread.id));
   const ftsQuery = (db
     .prepare("SELECT jieba_fts_query(?) AS query")
     .get(trimmedQuery) as { query: string }).query;
@@ -1180,6 +1337,7 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
               content,
               createdAt,
               rank,
+              COUNT(*) OVER (PARTITION BY sessionId) AS matchCount,
               ROW_NUMBER() OVER (
                 PARTITION BY sessionId
                 ORDER BY rank ASC, createdAt DESC, id DESC
@@ -1194,8 +1352,14 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
             COALESCE(message_counts.messageCount, 0) AS messageCount,
             latest_message.content AS latestMessagePreview,
             latest_message.created_at AS latestMessageAt,
+            EXISTS (
+              SELECT 1
+              FROM child_agents
+              WHERE child_agents.child_session_id = sessions.id
+            ) AS isChildAgent,
             matched_message.content AS matchedPreview,
             matched_message.createdAt AS matchedMessageCreatedAt,
+            matched_message.matchCount AS matchCount,
             projects.id AS projectId,
             projects.name AS projectName,
             projects.path AS projectPath,
@@ -1230,14 +1394,17 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
       )
       .all(trimmedQuery, normalizedLimit) as SessionThreadSummaryRow[]
     : [];
-  const ftsResults = ftsRows.map(toSessionThreadSummary);
-  const seenSessionIds = new Set(ftsResults.map((thread) => thread.id));
-
-  if (ftsResults.length >= normalizedLimit) {
-    return ftsResults;
+  const ftsResults = ftsRows
+    .map((row) => toSessionThreadSummary(row, trimmedQuery))
+    .filter((thread) => !seenSessionIds.has(thread.id));
+  for (const thread of ftsResults) {
+    seenSessionIds.add(thread.id);
   }
 
-  const likePattern = `%${escapeSqlLikePattern(trimmedQuery)}%`;
+  if (titleResults.length + ftsResults.length >= normalizedLimit) {
+    return [...titleResults, ...ftsResults].slice(0, normalizedLimit);
+  }
+
   const rows = db
     .prepare(
       `
@@ -1249,6 +1416,19 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
           COALESCE(message_counts.messageCount, 0) AS messageCount,
           latest_message.content AS latestMessagePreview,
           latest_message.created_at AS latestMessageAt,
+          EXISTS (
+            SELECT 1
+            FROM child_agents
+            WHERE child_agents.child_session_id = sessions.id
+          ) AS isChildAgent,
+          (
+            SELECT COUNT(*)
+            FROM session_messages
+            WHERE session_id = sessions.id
+              AND role IN ('user', 'assistant')
+              AND TRIM(content) <> ''
+              AND content LIKE ? ESCAPE '\\'
+          ) AS matchCount,
           matched_message.content AS matchedPreview,
           matched_message.created_at AS matchedMessageCreatedAt,
           projects.id AS projectId,
@@ -1292,13 +1472,13 @@ export function searchSessionThreads(query: string, limit = 10): SessionThreadSu
         LIMIT ?
       `,
     )
-    .all(likePattern, Math.min(normalizedLimit * 2, 200)) as SessionThreadSummaryRow[];
+    .all(likePattern, likePattern, Math.min(normalizedLimit * 2, 200)) as SessionThreadSummaryRow[];
 
   const fallbackResults = rows
-    .map(toSessionThreadSummary)
+    .map((row) => toSessionThreadSummary(row, trimmedQuery))
     .filter((thread) => !seenSessionIds.has(thread.id));
 
-  return [...ftsResults, ...fallbackResults].slice(0, normalizedLimit);
+  return [...titleResults, ...ftsResults, ...fallbackResults].slice(0, normalizedLimit);
 }
 
 export function createSession(
@@ -1878,7 +2058,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     planMode: getSessionPlanModeState(sessionId),
     focusState: createEmptySessionFocusState(sessionId),
     rollingSummary: createEmptySessionRollingSummary(sessionId),
-    sessionMemory: createEmptySessionMemoryState(sessionId),
+    sessionMemory: getSessionMemoryState(sessionId),
     compactionState: getSessionCompactionState(sessionId),
     messages,
     attachments,

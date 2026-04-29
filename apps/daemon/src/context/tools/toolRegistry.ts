@@ -71,6 +71,7 @@ const SESSION_STABLE_TOOL_ORDER = [
   "chrome_relay_eval",
   "chrome_relay_back",
   "chrome_relay_forward",
+  "memory_get",
   "document_ingest",
   "review_coach",
 ] as const;

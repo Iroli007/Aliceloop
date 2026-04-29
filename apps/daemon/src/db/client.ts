@@ -563,6 +563,8 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");
+  const addedMemoryTitle = ensureColumn(db, "memories", "title", "TEXT NOT NULL DEFAULT ''");
+  const addedMemoryDescription = ensureColumn(db, "memories", "description", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "memories", "fact_kind", "TEXT CHECK(fact_kind IN ('preference', 'constraint', 'decision', 'profile', 'account', 'workflow', 'other'))");
   ensureColumn(db, "memories", "fact_key", "TEXT");
   ensureColumn(db, "memories", "fact_state", "TEXT NOT NULL DEFAULT 'active' CHECK(fact_state IN ('active', 'superseded', 'retracted'))");
@@ -576,6 +578,12 @@ function runMigrations(db: Database.Database) {
   db.prepare("UPDATE runtime_settings SET reasoning_effort = 'medium' WHERE COALESCE(reasoning_effort, '') = ''").run();
   db.prepare("UPDATE task_runs SET detail = title WHERE COALESCE(detail, '') = ''").run();
   db.prepare("UPDATE memories SET fact_state = 'active' WHERE COALESCE(fact_state, '') = ''").run();
+  db.prepare("UPDATE memories SET title = substr(trim(replace(replace(content, char(10), ' '), char(13), ' ')), 1, 96) WHERE COALESCE(title, '') = ''").run();
+  db.prepare("UPDATE memories SET description = substr(trim(replace(replace(content, char(10), ' '), char(13), ' ')), 1, 220) WHERE COALESCE(description, '') = ''").run();
+  if (addedMemoryTitle || addedMemoryDescription) {
+    db.prepare("DELETE FROM memory_embeddings").run();
+    db.prepare("DELETE FROM memory_metadata").run();
+  }
   if (addedMemoryType) {
     db.prepare(
       `
