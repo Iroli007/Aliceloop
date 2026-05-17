@@ -441,6 +441,8 @@ export async function loadContext(
   timings.promptCacheBreakpointCount = promptCacheTrace.breakpointCount;
   timings.promptCacheBreakpointIds = promptCacheTrace.breakpointIds.join(",");
   timings.promptCacheRequestHash = promptCacheTrace.requestHash;
+  timings.contextTokenEstimate = promptCacheTrace.estimatedInputTokens;
+  timings.contextSerializedRequestChars = promptCacheTrace.serializedRequestChars;
   timings.totalMs = roundMs(Object.values({
     personaMs: timings.personaMs,
     sessionContextMs: timings.sessionContextMs,

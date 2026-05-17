@@ -14,6 +14,7 @@ export interface ProviderDefinition {
   transport: ProviderTransportKind;
   defaultBaseUrl: string;
   defaultModel: string;
+  defaultContextWindowTokens: number;
 }
 
 const providerDefinitions: ProviderDefinition[] = [
@@ -23,6 +24,7 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "anthropic",
     defaultBaseUrl: "https://api.minimaxi.com/anthropic/v1",
     defaultModel: "MiniMax-M2.7-highspeed",
+    defaultContextWindowTokens: 128_000,
   },
   {
     id: "gemini",
@@ -30,6 +32,7 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "openai-compatible",
     defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
     defaultModel: "gemini-2.5-flash",
+    defaultContextWindowTokens: 1_048_576,
   },
   {
     id: "moonshot",
@@ -37,13 +40,15 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "openai-compatible",
     defaultBaseUrl: "https://api.moonshot.cn/v1",
     defaultModel: "moonshot-v1-8k",
+    defaultContextWindowTokens: 8_000,
   },
   {
     id: "deepseek",
     label: "DeepSeek",
     transport: "openai-compatible",
     defaultBaseUrl: "https://api.deepseek.com/v1",
-    defaultModel: "deepseek-chat",
+    defaultModel: "deepseek-v4-pro",
+    defaultContextWindowTokens: 1_000_000,
   },
   {
     id: "zhipu",
@@ -51,6 +56,7 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "openai-compatible",
     defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
     defaultModel: "glm-5",
+    defaultContextWindowTokens: 204_800,
   },
   {
     id: "aihubmix",
@@ -58,6 +64,7 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "auto",
     defaultBaseUrl: "https://aihubmix.com/v1",
     defaultModel: "gpt-4o-mini",
+    defaultContextWindowTokens: 128_000,
   },
   {
     id: "openai",
@@ -65,6 +72,7 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "openai-compatible",
     defaultBaseUrl: "https://api.openai.com/v1",
     defaultModel: "gpt-4.1-mini",
+    defaultContextWindowTokens: 1_047_576,
   },
   {
     id: "anthropic",
@@ -72,6 +80,7 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "anthropic",
     defaultBaseUrl: "https://api.anthropic.com/v1",
     defaultModel: "claude-sonnet-4-5",
+    defaultContextWindowTokens: 200_000,
   },
   {
     id: "openrouter",
@@ -79,6 +88,7 @@ const providerDefinitions: ProviderDefinition[] = [
     transport: "openai-compatible",
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     defaultModel: "openai/gpt-4.1-mini",
+    defaultContextWindowTokens: 1_047_576,
   },
 ];
 
@@ -88,7 +98,7 @@ const toolModelRecommendationPatterns: Record<ProviderKind, RegExp[]> = {
   minimax: [/minimax.*highspeed/iu, /abab.*6\.5s-chat/iu],
   gemini: [/gemini-2\.0-flash/iu, /gemini-2\.5-flash-lite/iu, /gemini-2\.5-flash/iu, /gemini-1\.5-flash/iu],
   moonshot: [/moonshot-v1-8k/iu, /moonshot.*8k/iu, /kimi.*8k/iu],
-  deepseek: [/^deepseek-chat$/iu, /deepseek-chat/iu],
+  deepseek: [/^deepseek-v4-pro$/iu, /^deepseek-v4-flash$/iu, /^deepseek-chat$/iu, /deepseek-chat/iu],
   zhipu: [/glm-4-flash/iu, /glm-4-air/iu, /glm-5-flash/iu, /^glm-5$/iu],
   aihubmix: [/gpt-4o-mini/iu, /deepseek-chat/iu, /gemini-2\.0-flash/iu, /haiku/iu],
   openai: [/^gpt-4o-mini$/iu, /^gpt-4\.1-mini$/iu, /gpt-4o-mini/iu, /gpt-4\.1-mini/iu],
@@ -106,6 +116,7 @@ const modelContextWindowPatterns: Array<{ pattern: RegExp; tokens: number }> = [
   { pattern: /(?:^|\/)o[34](?:-[\w.]+)?$/iu, tokens: 200_000 },
   { pattern: /claude(?:-[\w.]+)?/iu, tokens: 200_000 },
   { pattern: /gemini-(?:2\.5|2\.0|1\.5)(?:-[\w.]+)?/iu, tokens: 1_048_576 },
+  { pattern: /deepseek-v4-(?:pro|flash)(?:-[\w.]+)?/iu, tokens: 1_000_000 },
   { pattern: /deepseek-(?:chat|reasoner)(?:-[\w.]+)?/iu, tokens: 128_000 },
   { pattern: /glm-5(?:\.[\w-]+)?/iu, tokens: 204_800 },
 ];
@@ -114,7 +125,7 @@ const providerFallbackContextWindowTokens: Record<ProviderKind, number> = {
   minimax: 128_000,
   gemini: 1_048_576,
   moonshot: 32_000,
-  deepseek: 128_000,
+  deepseek: 1_000_000,
   zhipu: 204_800,
   aihubmix: 128_000,
   openai: 128_000,
@@ -198,6 +209,7 @@ export function createDefaultProviderConfig(providerId: ProviderKind): ProviderC
     transport: definition.transport,
     baseUrl: definition.defaultBaseUrl,
     model: definition.defaultModel,
+    contextWindowTokens: definition.defaultContextWindowTokens,
     enabled: false,
     hasApiKey: false,
     apiKeyMasked: null,
@@ -228,8 +240,11 @@ export function recommendToolModel(providerId: ProviderKind, models: string[]): 
 export function resolveModelContextBudget(input: {
   providerId?: ProviderKind | null;
   model?: string | null;
+  contextWindowTokens?: number | null;
 }): ModelContextBudget {
-  const contextWindowTokens = resolveContextWindowTokens(input);
+  const contextWindowTokens = input.contextWindowTokens && input.contextWindowTokens >= 8_000
+    ? input.contextWindowTokens
+    : resolveContextWindowTokens(input);
   const outputHeadroomTokens = deriveOutputHeadroomTokens(contextWindowTokens);
   const compactBufferTokens = deriveCompactBufferTokens(contextWindowTokens);
   const compactTriggerTokens = Math.max(

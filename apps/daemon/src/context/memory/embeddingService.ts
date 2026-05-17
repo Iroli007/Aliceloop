@@ -50,6 +50,9 @@ function resolveOpenAICompatibleSettings() {
   if (!activeProvider || !activeProviderApiKey) {
     return null;
   }
+  if (activeProvider.id === "deepseek") {
+    return null;
+  }
 
   const normalizedModel = activeProvider.model.trim().toLowerCase();
   const effectiveTransport = activeProvider.transport === "auto" && normalizedModel.startsWith("claude")

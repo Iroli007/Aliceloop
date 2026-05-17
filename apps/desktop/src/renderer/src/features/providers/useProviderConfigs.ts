@@ -8,6 +8,7 @@ interface SaveProviderInput {
   providerId: ProviderKind;
   baseUrl: string;
   model: string;
+  contextWindowTokens: number | null;
   apiKey?: string;
   enabled: boolean;
 }
@@ -77,6 +78,7 @@ export function useProviderConfigs(): ProviderConfigsState {
         body: JSON.stringify({
           baseUrl: input.baseUrl,
           model: input.model,
+          contextWindowTokens: input.contextWindowTokens,
           apiKey: input.apiKey,
           enabled: input.enabled,
         }),

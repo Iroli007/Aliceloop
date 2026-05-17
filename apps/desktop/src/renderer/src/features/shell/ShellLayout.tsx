@@ -1,5 +1,6 @@
 import {
   extractStructuredPlanDraft,
+  isToolWorkflowTerminalStatus,
   reasoningEffortDefinitions,
   resolveModelContextBudget,
   type Attachment,
@@ -7,10 +8,8 @@ import {
   type ProviderConfig,
   type ProviderTransportKind,
   type RuntimeSettings,
-  type SessionCompactionState,
+  type SessionContextUsageState,
   type SessionEvent,
-  type SessionFocusState,
-  type SessionMemoryState,
   type SessionMessage,
   type SessionPlanModeState,
   type ReasoningEffort,
@@ -53,7 +52,6 @@ const minSidebarWidthPx = 220;
 const maxSidebarWidthPx = 420;
 const sidebarWidthStorageKey = "aliceloop-shell-sidebar-width";
 const reasoningEffortLabels = new Map(reasoningEffortDefinitions.map((definition) => [definition.id, definition.label] as const));
-const maxContextDashboardToolEntries = 4;
 
 function formatReasoningEffortLabel(value: ReasoningEffort) {
   return reasoningEffortLabels.get(value) ?? value;
@@ -195,100 +193,28 @@ function formatBytes(byteSize: number) {
   return `${(byteSize / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function approxTokenCountFromLength(length: number) {
-  if (!Number.isFinite(length) || length <= 0) {
-    return 0;
+const tokenCountFormatter = new Intl.NumberFormat("en-US");
+
+function formatFullTokenCount(tokenCount: number) {
+  return tokenCountFormatter.format(Math.max(0, Math.round(tokenCount)));
+}
+
+function formatCompactTokenCount(tokenCount: number) {
+  const normalizedTokenCount = Math.max(0, Math.round(tokenCount));
+  if (normalizedTokenCount >= 10_000) {
+    return `${Math.round(normalizedTokenCount / 1_000)}k`;
   }
-
-  return Math.ceil(length / 4);
-}
-
-function formatTokenCount(tokenCount: number) {
-  if (tokenCount >= 10_000) {
-    return `${(tokenCount / 1_000).toFixed(1)}k`;
+  if (normalizedTokenCount >= 1_000) {
+    return `${Math.round(normalizedTokenCount / 100) / 10}k`;
   }
-
-  if (tokenCount >= 1_000) {
-    return `${Math.round(tokenCount / 100) / 10}k`;
-  }
-
-  return String(Math.max(0, Math.round(tokenCount)));
-}
-
-function listRecentTurnMessages(messages: SessionMessage[], recentTurnsCount: number) {
-  if (recentTurnsCount <= 0 || messages.length === 0) {
-    return [];
-  }
-
-  let remainingUserTurns = recentTurnsCount;
-  let startIndex = messages.length - 1;
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    startIndex = index;
-    if (messages[index]?.role === "user") {
-      remainingUserTurns -= 1;
-      if (remainingUserTurns <= 0) {
-        break;
-      }
-    }
-  }
-
-  return messages.slice(Math.max(0, startIndex));
-}
-
-function sumListLength(values: string[]) {
-  return values.reduce((sum, value) => sum + value.length, 0);
-}
-
-function estimateFocusTokens(focusState: SessionFocusState) {
-  return approxTokenCountFromLength(
-    focusState.goal.length
-      + focusState.nextStep.length
-      + sumListLength(focusState.constraints)
-      + sumListLength(focusState.priorities)
-      + sumListLength(focusState.doneCriteria)
-      + sumListLength(focusState.blockers),
-  );
-}
-
-function estimateSessionMemoryTokens(sessionMemory: SessionMemoryState) {
-  return approxTokenCountFromLength(
-    sessionMemory.currentPhase.length
-      + sessionMemory.summary.length
-      + sumListLength(sessionMemory.completed)
-      + sumListLength(sessionMemory.remaining)
-      + sumListLength(sessionMemory.decisions),
-  );
-}
-
-function estimateCheckpointTokens(compactionState: SessionCompactionState) {
-  return approxTokenCountFromLength(
-    compactionState.checkpointSummary.length
-      + compactionState.checkpointToolTranscript.length
-      + compactionState.checkpointResearchMemory.length
-      + compactionState.checkpointFocusSnapshot.length
-      + compactionState.checkpointPlanSnapshot.length,
-  );
-}
-
-function estimateToolWorkflowTokens(toolWorkflowEntries: ToolWorkflowEntry[]) {
-  return toolWorkflowEntries
-    .slice(-maxContextDashboardToolEntries)
-    .reduce((sum, entry) => {
-      return sum + approxTokenCountFromLength(
-        entry.toolName.length
-          + entry.status.length
-          + (entry.inputPreview?.length ?? 0)
-          + (entry.resultPreview?.length ?? 0)
-          + (entry.error?.length ?? 0),
-      );
-    }, 0);
+  return String(normalizedTokenCount);
 }
 
 type ContextLoadTone = "calm" | "warm" | "hot";
 
 interface ComposerContextDashboardState {
   estimatedTokens: number;
+  contextWindowTokens: number;
   triggerTokens: number;
   usagePercent: number;
   tone: ContextLoadTone;
@@ -310,42 +236,36 @@ function resolveContextDashboardBudget(input: {
   return resolveModelContextBudget({
     providerId,
     model,
+    contextWindowTokens: configuredProvider?.contextWindowTokens ?? fallbackProvider?.contextWindowTokens ?? null,
   });
 }
 
 function buildComposerContextDashboard(input: {
-  messages: SessionMessage[];
-  focusState: SessionFocusState;
-  sessionMemory: SessionMemoryState;
-  compactionState: SessionCompactionState;
-  toolWorkflowEntries: ToolWorkflowEntry[];
-  recentTurnsCount: number;
-  composerDraft: string;
+  contextUsage?: SessionContextUsageState;
   contextBudget: ModelContextBudget;
 }): ComposerContextDashboardState {
-  const recentMessages = listRecentTurnMessages(input.messages, input.recentTurnsCount);
-  const recentMessageTokens = recentMessages.reduce((sum, message) => {
-    return sum + approxTokenCountFromLength(message.content.length);
-  }, 0);
-  const estimatedTokens = input.contextBudget.staticOverheadTokens
-    + estimateFocusTokens(input.focusState)
-    + estimateSessionMemoryTokens(input.sessionMemory)
-    + estimateCheckpointTokens(input.compactionState)
-    + estimateToolWorkflowTokens(input.toolWorkflowEntries)
-    + recentMessageTokens
-    + approxTokenCountFromLength(input.composerDraft.trim().length);
-  const usagePercent = Math.min(100, Math.round((estimatedTokens / input.contextBudget.compactTriggerTokens) * 100));
+  const backendContextUsage = input.contextUsage
+    && input.contextUsage.inputTokens > 0
+    && input.contextUsage.contextWindowTokens > 0
+    && input.contextUsage.source !== "frontend-estimate"
+    ? input.contextUsage
+    : null;
+  const estimatedTokens = backendContextUsage?.inputTokens ?? 0;
+  const contextWindowTokens = backendContextUsage?.contextWindowTokens ?? input.contextBudget.contextWindowTokens;
+  const compactTriggerTokens = backendContextUsage?.compactTriggerTokens ?? input.contextBudget.compactTriggerTokens;
+  const usagePercent = Math.min(100, Math.round((estimatedTokens / contextWindowTokens) * 100));
   const tone: ContextLoadTone = usagePercent >= 80 ? "hot" : usagePercent >= 55 ? "warm" : "calm";
   const tooltip = [
-    `估算上下文负载 ${usagePercent}%`,
-    `约 ${formatTokenCount(estimatedTokens)} / ${formatTokenCount(input.contextBudget.compactTriggerTokens)} tokens 触发压缩`,
-    `模型窗口约 ${formatTokenCount(input.contextBudget.contextWindowTokens)} tokens`,
-    `最近原文 ${input.recentTurnsCount} 轮`,
+    `上下文负载 ${usagePercent}%`,
+    `${formatFullTokenCount(estimatedTokens)} / ${formatFullTokenCount(contextWindowTokens)} tokens`,
+    `压缩触发约 ${formatFullTokenCount(compactTriggerTokens)} tokens`,
+    `来源 ${backendContextUsage?.source ?? "pending"}`,
   ].join("\n");
 
   return {
     estimatedTokens,
-    triggerTokens: input.contextBudget.compactTriggerTokens,
+    contextWindowTokens,
+    triggerTokens: compactTriggerTokens,
     usagePercent,
     tone,
     tooltip,
@@ -355,8 +275,7 @@ function buildComposerContextDashboard(input: {
 function ContextUsageGauge({ percent, tone }: { percent: number; tone: ContextLoadTone }) {
   const radius = 10;
   const circumference = 2 * Math.PI * radius;
-  const visibleArc = circumference * 0.76;
-  const progressArc = percent <= 0 ? 0 : Math.max(0.08, percent / 100) * visibleArc;
+  const progressArc = percent <= 0 ? 0 : Math.max(0.012, percent / 100) * circumference;
 
   return (
     <svg
@@ -370,8 +289,6 @@ function ContextUsageGauge({ percent, tone }: { percent: number; tone: ContextLo
         cy="14"
         r={radius}
         className="composer__context-gauge-track"
-        strokeDasharray={`${visibleArc} ${circumference}`}
-        transform="rotate(140 14 14)"
       />
       <circle
         cx="14"
@@ -379,9 +296,8 @@ function ContextUsageGauge({ percent, tone }: { percent: number; tone: ContextLo
         r={radius}
         className="composer__context-gauge-progress"
         strokeDasharray={`${progressArc} ${circumference}`}
-        transform="rotate(140 14 14)"
+        transform="rotate(-90 14 14)"
       />
-      <circle cx="14" cy="14" r="1.8" className="composer__context-gauge-core" />
     </svg>
   );
 }
@@ -396,14 +312,6 @@ function mergeAttachments(current: Attachment[], next: Attachment[]) {
   }
 
   return merged;
-}
-
-function formatThreadId(threadId: string) {
-  if (threadId.length <= 18) {
-    return threadId;
-  }
-
-  return `${threadId.slice(0, 8)}…${threadId.slice(-4)}`;
 }
 
 function normalizeQuickReplyOption(value: string, side: "left" | "right") {
@@ -698,6 +606,32 @@ function dedupeToolSourceLinks(links: ToolSourceLink[]) {
   });
 }
 
+interface TurnReasoningMeta {
+  status: string;
+  kind: string;
+  label: string;
+  traceCount: number;
+  summary: string | null;
+}
+
+interface AssistantTurnMeta {
+  memories: string[];
+  tools: string[];
+  skills: string[];
+  reasoning: TurnReasoningMeta | null;
+}
+
+function isTurnReasoningMeta(value: unknown): value is TurnReasoningMeta {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<TurnReasoningMeta>;
+  return typeof candidate.status === "string"
+    && typeof candidate.kind === "string"
+    && typeof candidate.label === "string";
+}
+
 function buildAssistantTurnMetadata(
   sessionEvents: SessionEvent[],
   toolWorkflowEntries: ToolWorkflowEntry[],
@@ -705,15 +639,11 @@ function buildAssistantTurnMetadata(
   const sourceLinksByToolCallId = new Map<string, ToolSourceLink[]>(
     toolWorkflowEntries.map((entry) => [entry.toolCallId, buildToolSourceLinks(entry)] as const),
   );
-  const turnMetadataByMessageId = new Map<string, {
-    memories: string[];
-    tools: string[];
-    skills: string[];
-    sourceLinks: ToolSourceLink[];
-  }>();
+  const turnMetadataByMessageId = new Map<string, AssistantTurnMeta & { sourceLinks: ToolSourceLink[] }>();
   const currentTurnMemories = new Set<string>();
   const currentTurnTools = new Set<string>();
   const currentTurnSkills = new Set<string>();
+  let currentTurnReasoning: TurnReasoningMeta | null = null;
   const currentTurnSourceLinks: ToolSourceLink[] = [];
   const currentTurnAssistantMessageIds: string[] = [];
   const seenSourceToolCallIds = new Set<string>();
@@ -723,6 +653,7 @@ function buildAssistantTurnMetadata(
       currentTurnMemories.clear();
       currentTurnTools.clear();
       currentTurnSkills.clear();
+      currentTurnReasoning = null;
       currentTurnSourceLinks.length = 0;
       return;
     }
@@ -738,6 +669,7 @@ function buildAssistantTurnMetadata(
         memories: turnMemories,
         tools: turnTools,
         skills: turnSkills,
+        reasoning: currentTurnReasoning,
         sourceLinks: messageId === lastAssistantMessageId ? turnSourceLinks : [],
       });
     }
@@ -745,13 +677,20 @@ function buildAssistantTurnMetadata(
     currentTurnMemories.clear();
     currentTurnTools.clear();
     currentTurnSkills.clear();
+    currentTurnReasoning = null;
     currentTurnSourceLinks.length = 0;
     currentTurnAssistantMessageIds.length = 0;
   }
 
   for (const event of sessionEvents) {
-    if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
-      const payload = event.payload as { message?: SessionMessage; memories?: unknown; skills?: unknown };
+    if (
+      event.type === "message.created"
+      || event.type === "message.acked"
+      || event.type === "message.delta"
+      || event.type === "message.completed"
+      || event.type === "message.updated"
+    ) {
+      const payload = event.payload as { message?: SessionMessage; memories?: unknown; skills?: unknown; reasoning?: unknown };
       const message = payload.message;
       if (!message) {
         continue;
@@ -780,6 +719,10 @@ function buildAssistantTurnMetadata(
             currentTurnSkills.add(skill.trim());
           }
         }
+      }
+
+      if (isTurnReasoningMeta(payload.reasoning)) {
+        currentTurnReasoning = payload.reasoning;
       }
 
       continue;
@@ -816,10 +759,12 @@ type TimelineEntry =
       sortSeq: number | null;
       sortTime: string;
       sourceLinks: ToolSourceLink[];
+      displayMode: string | null;
       turnMeta: {
         memories: string[];
         tools: string[];
         skills: string[];
+        reasoning: TurnReasoningMeta | null;
       } | null;
     }
   | {
@@ -859,10 +804,12 @@ type TimelineBlock =
       kind: "message";
       message: import("@aliceloop/runtime-core").SessionMessage;
       sourceLinks: ToolSourceLink[];
+      displayMode: string | null;
       turnMeta: {
         memories: string[];
         tools: string[];
         skills: string[];
+        reasoning: TurnReasoningMeta | null;
       } | null;
     }
   | {
@@ -871,12 +818,14 @@ type TimelineBlock =
         memories: string[];
         tools: string[];
         skills: string[];
+        reasoning: TurnReasoningMeta | null;
       };
       items: Array<
         | {
             kind: "message";
             message: import("@aliceloop/runtime-core").SessionMessage;
             sourceLinks: ToolSourceLink[];
+            displayMode: string | null;
           }
         | {
             kind: "tool";
@@ -906,6 +855,8 @@ type TimelineBlock =
     planMode: SessionPlanModeState;
   };
 
+type AssistantTurnItem = Extract<TimelineBlock, { kind: "assistant-turn" }>["items"][number];
+
 function buildTimeline(
   messages: import("@aliceloop/runtime-core").SessionMessage[],
   resolvedApprovals: ToolApproval[],
@@ -918,10 +869,17 @@ function buildTimeline(
   const messageSeqById = new Map<string, number>();
   const approvalSeqById = new Map<string, number>();
   const assistantTurnMetadataByMessageId = buildAssistantTurnMetadata(sessionEvents, toolWorkflowEntries);
+  const messageDisplayModeById = buildMessageDisplayModeById(sessionEvents);
   const entries: TimelineEntry[] = [];
 
   for (const event of sessionEvents) {
-    if (event.type === "message.created" || event.type === "message.acked" || event.type === "message.updated") {
+    if (
+      event.type === "message.created"
+      || event.type === "message.acked"
+      || event.type === "message.delta"
+      || event.type === "message.completed"
+      || event.type === "message.updated"
+    ) {
       const payload = event.payload as { message?: { id?: unknown } };
       if (typeof payload.message?.id === "string") {
         if (!messageSeqById.has(payload.message.id)) {
@@ -981,11 +939,13 @@ function buildTimeline(
       sortSeq: messageSeqById.get(message.id) ?? null,
       sortTime: message.createdAt,
       sourceLinks: assistantTurnMetadata?.sourceLinks ?? [],
+      displayMode: messageDisplayModeById.get(message.id) ?? null,
       turnMeta: assistantTurnMetadata
-        ? {
+          ? {
             memories: assistantTurnMetadata.memories,
             tools: assistantTurnMetadata.tools,
             skills: assistantTurnMetadata.skills,
+            reasoning: assistantTurnMetadata.reasoning,
           }
         : null,
     });
@@ -1059,12 +1019,14 @@ function buildTimeline(
       memories: string[];
       tools: string[];
       skills: string[];
+      reasoning: TurnReasoningMeta | null;
     } | null;
     items: Array<
       | {
           kind: "message";
           message: import("@aliceloop/runtime-core").SessionMessage;
           sourceLinks: ToolSourceLink[];
+          displayMode: string | null;
         }
       | {
           kind: "tool";
@@ -1081,7 +1043,7 @@ function buildTimeline(
     if (pendingAssistantTurn.items.length > 0) {
       blocks.push({
         kind: "assistant-turn",
-        turnMeta: pendingAssistantTurn.turnMeta ?? { memories: [], tools: [], skills: [] },
+        turnMeta: pendingAssistantTurn.turnMeta ?? { memories: [], tools: [], skills: [], reasoning: null },
         items: pendingAssistantTurn.items,
       });
     }
@@ -1119,6 +1081,7 @@ function buildTimeline(
         kind: "message",
         message: entry.message,
         sourceLinks: entry.sourceLinks,
+        displayMode: entry.displayMode,
       });
       continue;
     }
@@ -1153,7 +1116,13 @@ function buildMessageDisplayModeById(sessionEvents: SessionEvent[]) {
   const next = new Map<string, string>();
 
   for (const event of sessionEvents) {
-    if (event.type !== "message.created" && event.type !== "message.acked" && event.type !== "message.updated") {
+    if (
+      event.type !== "message.created"
+      && event.type !== "message.acked"
+      && event.type !== "message.delta"
+      && event.type !== "message.completed"
+      && event.type !== "message.updated"
+    ) {
       continue;
     }
 
@@ -1185,6 +1154,124 @@ function getAssistantTurnRenderKey(
   }
 
   return `assistant-turn-${sessionId}-tool-${firstItem.tool.toolCallId}`;
+}
+
+function formatProcessedDuration(milliseconds: number | null) {
+  if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds) || milliseconds <= 0) {
+    return null;
+  }
+
+  const totalSeconds = Math.max(1, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function getProcessedDurationMs(
+  tools: ToolWorkflowEntry[],
+  processingMessages: SessionMessage[],
+  completed: boolean,
+  completedAt: string | null,
+  nowMs: number,
+) {
+  if (processingMessages.length > 0) {
+    const createdAtTimes = processingMessages
+      .map((message) => Date.parse(message.createdAt))
+      .filter((timestamp) => Number.isFinite(timestamp));
+
+    if (createdAtTimes.length > 0) {
+      const startedAt = Math.min(...createdAtTimes);
+      const completedAtMs = completedAt ? Date.parse(completedAt) : NaN;
+      const endedAt = completed && Number.isFinite(completedAtMs) ? completedAtMs : nowMs;
+      return Math.max(0, endedAt - startedAt);
+    }
+  }
+
+  if (tools.length === 0) {
+    return null;
+  }
+
+  const timestamps = tools.flatMap((tool) => [Date.parse(tool.createdAt), Date.parse(tool.updatedAt)])
+    .filter((timestamp) => Number.isFinite(timestamp));
+  if (timestamps.length === 0) {
+    return null;
+  }
+
+  if (!completed) {
+    return Math.max(0, nowMs - Math.min(...timestamps));
+  }
+
+  const explicitDurations = tools
+    .map((tool) => tool.durationMs)
+    .filter((duration): duration is number => typeof duration === "number" && Number.isFinite(duration));
+
+  if (explicitDurations.length > 0) {
+    return explicitDurations.reduce((sum, duration) => sum + duration, 0);
+  }
+
+  return Math.max(0, Math.max(...timestamps) - Math.min(...timestamps));
+}
+
+function ProcessedTurnSummary({
+  items,
+  reasoning,
+  planModeActive,
+  completed,
+  completedAt,
+}: {
+  items: AssistantTurnItem[];
+  reasoning: TurnReasoningMeta | null;
+  planModeActive: boolean;
+  completed: boolean;
+  completedAt: string | null;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (completed) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [completed]);
+
+  const tools = items.flatMap((item) => item.kind === "tool" ? [item.tool] : []);
+  const processingMessages = items.flatMap((item) => item.kind === "message" ? [item.message] : []);
+  const hasError = tools.some((tool) => tool.success === false || tool.status === "output-error" || tool.status === "permission-denied");
+  const durationLabel = formatProcessedDuration(getProcessedDurationMs(tools, processingMessages, completed, completedAt, nowMs));
+  const label = completed
+    ? (hasError ? "已处理，含错误" : (reasoning?.label ?? "已处理"))
+    : "思考中";
+  const visibleItems = items.filter((item) => item.kind === "tool" || item.message.content.trim());
+
+  return (
+    <details className={`workspace__processed-turn${hasError ? " workspace__processed-turn--error" : ""}`} open={completed ? undefined : true}>
+      <summary className="workspace__processed-turn-summary">
+        <span className="workspace__processed-turn-label">{label}</span>
+        {durationLabel ? <span className="workspace__processed-turn-duration">{durationLabel}</span> : null}
+        <span className="workspace__processed-turn-chevron" aria-hidden="true">›</span>
+      </summary>
+      <div className="workspace__processed-turn-details">
+        {visibleItems.length > 0 ? (
+          <div className="workspace__processed-turn-flow">
+            {visibleItems.map((item, index) => {
+              if (item.kind === "tool") {
+                return <ToolWorkflowCard key={`tool-${item.tool.toolCallId}`} entry={item.tool} planModeActive={planModeActive} />;
+              }
+
+              return (
+                <article key={`processing-${item.message.id}-${index}`} className="workspace__message workspace__message--assistant workspace__processed-turn-message">
+                  <div className="workspace__message-body">
+                    <MessageContent content={item.message.content} renderMarkdown />
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
 }
 
 function getThreadDateParts(value: string | null) {
@@ -1311,6 +1398,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
   const [providerApiKeyInput, setProviderApiKeyInput] = useState("");
   const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("");
   const [providerModelInput, setProviderModelInput] = useState("");
+  const [providerContextWindowInput, setProviderContextWindowInput] = useState("");
   const [providerEnabled, setProviderEnabled] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
   const [reasoningEffortInput, setReasoningEffortInput] = useState<ReasoningEffort>("medium");
@@ -1381,24 +1469,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
     });
 
     return buildComposerContextDashboard({
-      messages: conversation.messages,
-      focusState: conversation.focusState,
-      sessionMemory: conversation.sessionMemory,
-      compactionState: conversation.compactionState,
-      toolWorkflowEntries: conversation.toolWorkflowEntries,
-      recentTurnsCount: runtimeSettings.settings.recentTurnsCount,
-      composerDraft,
+      contextUsage: conversation.contextUsage,
       contextBudget,
     });
   }, [
-    composerDraft,
-    conversation.compactionState,
-    conversation.focusState,
-    conversation.messages,
-    conversation.sessionMemory,
-    conversation.toolWorkflowEntries,
+    conversation.contextUsage,
     providers,
-    runtimeSettings.settings.recentTurnsCount,
     runtimeSettings.settings.toolModel,
     runtimeSettings.settings.toolProviderId,
   ]);
@@ -1690,6 +1766,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
 
     setProviderBaseUrlInput(activeProvider.baseUrl);
     setProviderModelInput(activeProvider.model);
+    setProviderContextWindowInput(activeProvider.contextWindowTokens ? String(activeProvider.contextWindowTokens) : "");
     setProviderEnabled(activeProvider.enabled);
   }, [activeProvider]);
 
@@ -1898,6 +1975,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
       providerId: activeProvider.id,
       baseUrl: providerBaseUrlInput,
       model: providerModelInput,
+      contextWindowTokens: providerContextWindowInput.trim() ? Number(providerContextWindowInput.trim()) : null,
       apiKey: providerApiKeyInput.trim() ? providerApiKeyInput.trim() : undefined,
       enabled: providerEnabled,
     });
@@ -1913,6 +1991,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
         providerId: provider.id,
         baseUrl: provider.baseUrl,
         model: provider.model,
+        contextWindowTokens: provider.contextWindowTokens,
         enabled: false,
       })));
       if (disableResults.some((item) => !item.ok)) {
@@ -2479,34 +2558,28 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                               {thread.title}
                               {thread.planMode?.active ? <span className="sidebar__thread-plan-marker">计划中</span> : null}
                             </span>
-                            <span className="sidebar__thread-meta">
-                              <span className="sidebar__thread-id">{formatThreadId(thread.id)}</span>
-                              <button
-                                type="button"
-                                className="sidebar__thread-delete"
-                                aria-label={`Delete thread ${thread.title}`}
-                                title="Delete thread"
-                                onKeyDown={(event) => {
-                                  event.stopPropagation();
-                                }}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setThreadNotice(null);
-                                  setThreadDeleteTarget(thread);
-                                }}
-                              >
-                                <svg viewBox="0 0 24 24" aria-hidden="true">
-                                  <path d="M4 7h16" />
-                                  <path d="M10 11v6" />
-                                  <path d="M14 11v6" />
-                                  <path d="M6.5 7l.7 13h9.6l.7-13" />
-                                  <path d="M9 7V4.8h6V7" />
-                                </svg>
-                              </button>
-                            </span>
-                          </div>
-                          <div className="sidebar__thread-preview">
-                            {thread.latestMessagePreview ?? "还没有消息，先开始一段新对话。"}
+                            <button
+                              type="button"
+                              className="sidebar__thread-delete"
+                              aria-label={`删除线程 ${thread.title}`}
+                              title="删除线程"
+                              onKeyDown={(event) => {
+                                event.stopPropagation();
+                              }}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setThreadNotice(null);
+                                setThreadDeleteTarget(thread);
+                              }}
+                            >
+                              <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M4 7h16" />
+                                <path d="M10 11v6" />
+                                <path d="M14 11v6" />
+                                <path d="M6.5 7l.7 13h9.6l.7-13" />
+                                <path d="M9 7V4.8h6V7" />
+                              </svg>
+                            </button>
                           </div>
                         </div>
                       ))}
@@ -2568,27 +2641,63 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               <div ref={messagesContentRef} className="workspace__messages">
                 {timelineBlocks.map((entry) => {
                   if (entry.kind === "assistant-turn") {
+                    const toolItems = entry.items.filter((item) => item.kind === "tool");
+                    const messageItems = entry.items.filter((item) => item.kind === "message");
+                    const finalMessageItems = conversation.isResponding
+                      ? []
+                      : messageItems.filter((item) => item.displayMode === "final");
+                    const hasExplicitProcessingMessage = messageItems.some((item) => item.displayMode === "processing");
+                    const finalMessageIds = new Set(finalMessageItems.map((item) => item.message.id));
+                    const processingMessageItems = finalMessageItems.length > 0
+                      ? messageItems.filter((item) => !finalMessageIds.has(item.message.id))
+                      : hasExplicitProcessingMessage || conversation.isResponding
+                        ? messageItems.filter((item) => item.displayMode === "processing" || conversation.isResponding)
+                        : [];
+                    const processingMessageIds = new Set(processingMessageItems.map((item) => item.message.id));
+                    const processingItems = entry.items.filter((item) => (
+                      item.kind === "tool"
+                      || processingMessageIds.has(item.message.id)
+                    ));
+                    const toolsAreComplete = toolItems.length === 0
+                      || toolItems.every((item) => isToolWorkflowTerminalStatus(item.tool.status));
+                    const processingCompleted = !conversation.isResponding
+                      && processingItems.length > 0
+                      && (finalMessageItems.length > 0 || !hasExplicitProcessingMessage)
+                      && toolsAreComplete;
+                    const shouldShowProcessingSummary = processingItems.length > 0;
+                    const renderedMessageItems = finalMessageItems.length > 0
+                      ? finalMessageItems
+                      : messageItems.filter((item) => !processingMessageIds.has(item.message.id));
+                    const processingCompletedAt = finalMessageItems[0]?.message.createdAt ?? null;
+
                     return (
                       <section
                         key={getAssistantTurnRenderKey(conversation.sessionId, entry)}
                         className="workspace__assistant-turn"
                       >
                         <TurnMetaBadge memories={entry.turnMeta.memories} tools={entry.turnMeta.tools} skills={entry.turnMeta.skills} />
-                        {entry.items.map((item, itemIndex) => {
-                          if (item.kind === "tool") {
-                            return <ToolWorkflowCard key={`tool-${item.tool.toolCallId}`} entry={item.tool} planModeActive={conversation.planMode.active} />;
-                          }
+                        {shouldShowProcessingSummary ? (
+                          <ProcessedTurnSummary
+                            items={processingItems}
+                            reasoning={entry.turnMeta.reasoning}
+                            planModeActive={conversation.planMode.active}
+                            completed={processingCompleted}
+                            completedAt={processingCompletedAt}
+                          />
+                        ) : null}
+                        {renderedMessageItems.length > 0 ? (
+                          <div className="workspace__assistant-turn-messages">
+                            {renderedMessageItems.map((item, itemIndex) => {
+                              const message = item.message;
+                              const assistantSources = message.role === "assistant" && item.sourceLinks.length > 0 ? item.sourceLinks : null;
+                              const planMeta = message.role === "assistant" ? (planMetaByMessageId.get(message.id) ?? null) : null;
+                              const isPlanExpanded = planMeta ? expandedPlanMessageIds.has(message.id) : false;
 
-                          const message = item.message;
-                          const assistantSources = message.role === "assistant" && item.sourceLinks.length > 0 ? item.sourceLinks : null;
-                          const planMeta = message.role === "assistant" ? (planMetaByMessageId.get(message.id) ?? null) : null;
-                          const isPlanExpanded = planMeta ? expandedPlanMessageIds.has(message.id) : false;
-
-                          return (
-                            <article
-                              key={`${message.id}::${itemIndex}`}
-                              className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}${planMeta ? " workspace__message--plan" : ""}`}
-                            >
+                              return (
+                                <article
+                                  key={`${message.id}::${itemIndex}`}
+                                  className={`workspace__message workspace__message--${message.role}${message.attachments.length > 0 ? " workspace__message--has-attachments" : ""}${planMeta ? " workspace__message--plan" : ""}`}
+                                >
                               <div className={`workspace__message-body${planMeta ? " workspace__message-body--plan" : ""}`}>
                                 {planMeta ? (
                                   <div className="workspace__plan-card-head">
@@ -2701,7 +2810,9 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                               ) : null}
                             </article>
                           );
-                        })}
+                            })}
+                          </div>
+                        ) : null}
                       </section>
                     );
                   }
@@ -3175,12 +3286,12 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                           type="button"
                           className={`composer__dropdown-item${provider.enabled ? " composer__dropdown-item--active" : ""}`}
                           onClick={async () => {
-                            const enableResult = await providerState.save({ providerId: provider.id, baseUrl: provider.baseUrl, model: provider.model, enabled: true });
+                            const enableResult = await providerState.save({ providerId: provider.id, baseUrl: provider.baseUrl, model: provider.model, contextWindowTokens: provider.contextWindowTokens, enabled: true });
                             if (!enableResult.ok) {
                               return;
                             }
                             await Promise.all(providers.filter((p) => p.id !== provider.id && p.enabled).map((p) =>
-                              providerState.save({ providerId: p.id, baseUrl: p.baseUrl, model: p.model, enabled: false })
+                              providerState.save({ providerId: p.id, baseUrl: p.baseUrl, model: p.model, contextWindowTokens: p.contextWindowTokens, enabled: false })
                             ));
                             await runtimeSettings.save({ toolProviderId: provider.id, toolModel: provider.model });
                             setModelDropdownOpen(false);
@@ -3301,12 +3412,15 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               <span className="composer__spacer" />
               <div
                 className={`composer__context-dashboard composer__context-dashboard--${contextDashboard.tone}`}
-                title={contextDashboard.tooltip}
                 aria-label={contextDashboard.tooltip}
               >
                 <ContextUsageGauge percent={contextDashboard.usagePercent} tone={contextDashboard.tone} />
-                <div className="composer__context-copy">
-                  <strong>{contextDashboard.usagePercent}%</strong>
+                <div className="composer__context-tooltip" role="tooltip">
+                  <span className="composer__context-tooltip-title">背景信息窗口：</span>
+                  <span className="composer__context-tooltip-percent">{contextDashboard.usagePercent}% 已用</span>
+                  <span className="composer__context-tooltip-value">
+                    已用 {formatCompactTokenCount(contextDashboard.estimatedTokens)} 标记，共 {formatCompactTokenCount(contextDashboard.contextWindowTokens)}
+                  </span>
                 </div>
               </div>
               <button
@@ -3486,6 +3600,18 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             type="text"
                             value={providerModelInput}
                             onChange={(event) => setProviderModelInput(event.target.value)}
+                          />
+                        </div>
+
+                        <div className="provider-field">
+                          <label>上下文窗口 tokens</label>
+                          <input
+                            className="provider-field__input"
+                            type="number"
+                            min={8000}
+                            step={1000}
+                            value={providerContextWindowInput}
+                            onChange={(event) => setProviderContextWindowInput(event.target.value)}
                           />
                         </div>
 

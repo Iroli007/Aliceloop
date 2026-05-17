@@ -71,6 +71,7 @@ function hasStickySkill(hints: SkillRouteHints | undefined, skillId: string) {
 const MEMORY_FACT_QUERY_PATTERN = /记忆|memory|记住|忘掉|forget|偏好|事实|稳定|长期|profile|account|fact|还记得|记不记得|记得我|我的偏好|我的习惯|记一下|帮我记住|(?:你|当前|现在)?.{0,8}(?:记了|记着|记下|存了|保存了).{0,12}(?:什么|哪些|啥|东西|内容)|(?:你|当前|现在)?.{0,8}(?:有哪些|有什么).{0,8}(?:记着|记下|存着|保存).{0,8}(?:的)?(?:东西|内容|事实|偏好)/u;
 const EPISODIC_HISTORY_QUERY_PATTERN = /聊天记录|历史会话|之前的对话|最近的对话|最近对话|上次对话|conversation history|episodic history|最近聊|最近说|最近提到|上次聊|刚才说|之前说过|之前聊过|我们聊到哪|昨晚|昨天晚上|昨天聊|昨晚跟你说|昨天跟你说|今天我们做了什么|今天做了什么|今天都做了什么|今天聊了什么|今天聊了啥|我们今天聊了什么|我们今天做了什么|(?:这个|上个)?(?:线程|thread|会话|session).*(?:聊了什么|说了什么|提到什么|记录)/iu;
 const THREAD_MANAGEMENT_QUERY_PATTERN = /线程管理|管理线程|^threads?$|thread\s+(?:list|info|delete|new|search)|thread id|线程\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|会话\s*(?:列表|清单|id|信息|详情|删除|新建|创建|搜索|查找|切换|打开)|列出.*(?:线程|会话)|删除.*(?:线程|会话)|新建.*(?:线程|会话)|创建.*(?:线程|会话)|打开.*(?:线程|会话)|切换.*(?:线程|会话)/iu;
+const THREAD_INSPECTION_QUERY_PATTERN = /(?:最新|当前|这个|本轮|latest|current).{0,12}(?:线程|会话|对话|thread|session)|(?:线程|会话|对话|thread|session).{0,12}(?:里|里面|中).{0,18}(?:看看|检查|显示|渲染|执行|命令|工具|tool|markdown|md)/iu;
 const TOOL_DISCOVERY_QUERY_PATTERN =
   /(?:能不能|可以|可不可以)?(?:帮我|帮忙|给我)?(?:看|查|列|说)(?:一下)?(?:你|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop)?.{0,16}(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能)|(?:你|我|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop).{0,24}(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能)|(?:有哪些|有什么|支持|可用|能用).{0,24}(?:tools?|skills?|能力|工具|技能).{0,16}(?:你|当前|本轮|这里|这个(?:runtime|agent)?|aliceloop)|(?:怎么|如何).{0,12}(?:测试|验证).{0,24}(?:你|当前|本轮|这里|aliceloop)?.{0,24}(?:tools?|skills?|能力|工具|技能)|(?:可用|支持).{0,12}(?:tools?|skills?|能力|工具|技能)|(?:tools?|skills?|能力|工具|技能).{0,12}(?:列表|清单|目录|catalog|list)|(?:what|which).{0,16}(?:tools?|skills?|capabilit(?:y|ies)).{0,16}(?:do you have|are available|can you use)|\b(?:available tools?|tool list|skill list|available skills?|runtime tools?|tool catalog|skill catalog)\b/iu;
 const DEEP_RESEARCH_FETCH_PATTERN =
@@ -88,7 +89,7 @@ export function needsEpisodicHistoryRecall(query: string) {
 }
 
 export function needsThreadManagement(query: string) {
-  return matches(query, THREAD_MANAGEMENT_QUERY_PATTERN);
+  return matches(query, THREAD_MANAGEMENT_QUERY_PATTERN) || matches(query, THREAD_INSPECTION_QUERY_PATTERN);
 }
 
 export function needsWebResearch(query: string) {
@@ -118,7 +119,7 @@ export function needsSystemInfo(query: string) {
 export function needsFileManagement(query: string) {
   return matches(
     query,
-    /文件管理|管理文件|管理文件夹|整理文件|整理文件夹|清理文件|清理文件夹|清空回收站|回收站|垃圾桶|清缓存|清理缓存|cache|缓存|大文件夹|大文件|占空间|磁盘清理|目录大小|folder size|disk usage|du -sh|下载目录|downloads|桌面整理|workspace.*大文件|找大文件|查大文件|move files|rename files|organize files|clean up files/iu,
+    /文件管理|管理文件|管理文件夹|整理文件|整理文件夹|清理文件|清理文件夹|清空回收站|回收站|垃圾桶|清缓存|清理缓存|cache|缓存|大文件夹|大文件|占空间|磁盘清理|目录大小|folder size|disk usage|du -sh|下载目录|downloads|桌面整理|workspace.*大文件|找大文件|查大文件|move files|rename files|organize files|clean up files|代码库|项目代码|代码里|源码里|repo|repository|codebase|grep|ripgrep|rg\b|(?:项目|代码|源码).{0,16}(?:看看|查看|检查|查|搜索|实现|在哪里|在哪)|(?:怎么|如何).{0,12}(?:实现|传给|渲染|调用).{0,16}(?:代码|项目|源码)/iu,
   );
 }
 

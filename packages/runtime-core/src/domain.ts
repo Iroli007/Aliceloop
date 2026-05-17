@@ -58,6 +58,8 @@ export type ProjectDirectoryKind = "workspace";
 export type SessionEventType =
   | "message.created"
   | "message.acked"
+  | "message.delta"
+  | "message.completed"
   | "message.updated"
   | "task.notification"
   | "job.updated"
@@ -75,6 +77,7 @@ export type SessionEventType =
   | "tool.call.completed"
   | "tool.state.change"
   | "plan_mode.updated"
+  | "context_usage.updated"
   | "session_memory.updated"
   | "compaction.updated";
 
@@ -311,6 +314,7 @@ export interface ProviderConfig {
   transport: ProviderTransportKind;
   baseUrl: string;
   model: string;
+  contextWindowTokens: number | null;
   enabled: boolean;
   hasApiKey: boolean;
   apiKeyMasked: string | null;
@@ -665,6 +669,20 @@ export interface SessionMemoryState {
   updatedAt: string | null;
 }
 
+export type ContextUsageSource = "frontend-estimate" | "backend-estimate" | "provider-usage";
+
+export interface SessionContextUsageState {
+  sessionId: string;
+  source: ContextUsageSource;
+  inputTokens: number;
+  outputTokens: number | null;
+  totalTokens: number;
+  contextWindowTokens: number;
+  compactTriggerTokens: number;
+  usagePercent: number;
+  updatedAt: string | null;
+}
+
 export interface SessionCompactionState {
   sessionId: string;
   checkpointSummary: string;
@@ -704,6 +722,7 @@ export interface SessionSnapshot {
   focusState: SessionFocusState;
   rollingSummary: SessionRollingSummary;
   sessionMemory: SessionMemoryState;
+  contextUsage: SessionContextUsageState;
   compactionState: SessionCompactionState;
   messages: SessionMessage[];
   attachments: Attachment[];

@@ -170,6 +170,17 @@ export const previewSessionSnapshot: SessionSnapshot = {
     lastUpdateReason: null,
     updatedAt: null,
   },
+  contextUsage: {
+    sessionId: primarySessionId,
+    source: "frontend-estimate",
+    inputTokens: 0,
+    outputTokens: null,
+    totalTokens: 0,
+    contextWindowTokens: 128_000,
+    compactTriggerTokens: 108_000,
+    usagePercent: 0,
+    updatedAt: null,
+  },
   compactionState: {
     sessionId: primarySessionId,
     checkpointSummary: "",

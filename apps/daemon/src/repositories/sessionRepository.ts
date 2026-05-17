@@ -11,6 +11,7 @@ import {
   type JobRunDetail,
   type ProjectDirectoryKind,
   type RuntimePresence,
+  type SessionContextUsageState,
   type Session,
   type SessionCompactionState,
   type SessionEvent,
@@ -322,6 +323,20 @@ export function createEmptySessionMemoryState(sessionId: string): SessionMemoryS
   };
 }
 
+export function createEmptySessionContextUsageState(sessionId: string): SessionContextUsageState {
+  return {
+    sessionId,
+    source: "frontend-estimate",
+    inputTokens: 0,
+    outputTokens: null,
+    totalTokens: 0,
+    contextWindowTokens: 0,
+    compactTriggerTokens: 0,
+    usagePercent: 0,
+    updatedAt: null,
+  };
+}
+
 export function createEmptySessionCompactionState(sessionId: string): SessionCompactionState {
   return {
     sessionId,
@@ -403,6 +418,31 @@ function isSessionMemoryState(value: unknown): value is SessionMemoryState {
     && (typeof memory.updatedAt === "string" || memory.updatedAt === null);
 }
 
+function isSessionContextUsageState(value: unknown): value is SessionContextUsageState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const usage = value as Partial<SessionContextUsageState>;
+  return typeof usage.sessionId === "string"
+    && (usage.source === "frontend-estimate" || usage.source === "backend-estimate" || usage.source === "provider-usage")
+    && typeof usage.inputTokens === "number"
+    && (typeof usage.outputTokens === "number" || usage.outputTokens === null)
+    && typeof usage.totalTokens === "number"
+    && typeof usage.contextWindowTokens === "number"
+    && typeof usage.compactTriggerTokens === "number"
+    && typeof usage.usagePercent === "number"
+    && (typeof usage.updatedAt === "string" || usage.updatedAt === null);
+}
+
+function normalizeSessionContextUsageState(sessionId: string, value: SessionContextUsageState): SessionContextUsageState {
+  return {
+    ...createEmptySessionContextUsageState(sessionId),
+    ...value,
+    sessionId,
+  };
+}
+
 function normalizeSessionMemoryState(sessionId: string, value: SessionMemoryState): SessionMemoryState {
   const empty = createEmptySessionMemoryState(sessionId);
   return {
@@ -479,6 +519,33 @@ export function getSessionMemoryState(sessionId: string): SessionMemoryState {
   }
 
   return createEmptySessionMemoryState(sessionId);
+}
+
+export function getSessionContextUsageState(sessionId: string): SessionContextUsageState {
+  const events = listSessionEventsSince(sessionId, 0);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== "context_usage.updated") {
+      continue;
+    }
+
+    const contextUsage = (event.payload as { contextUsage?: unknown }).contextUsage;
+    if (isSessionContextUsageState(contextUsage)) {
+      return normalizeSessionContextUsageState(sessionId, contextUsage);
+    }
+  }
+
+  return createEmptySessionContextUsageState(sessionId);
+}
+
+export function updateSessionContextUsageState(sessionId: string, contextUsage: SessionContextUsageState) {
+  const event = appendSessionEvent(
+    sessionId,
+    "context_usage.updated",
+    { contextUsage },
+    contextUsage.updatedAt ?? new Date().toISOString(),
+  );
+  return { contextUsage, event };
 }
 
 export function updateSessionMemoryState(sessionId: string, sessionMemory: SessionMemoryState) {
@@ -2059,6 +2126,7 @@ export function getSessionSnapshot(sessionId: string): SessionSnapshot {
     focusState: createEmptySessionFocusState(sessionId),
     rollingSummary: createEmptySessionRollingSummary(sessionId),
     sessionMemory: getSessionMemoryState(sessionId),
+    contextUsage: getSessionContextUsageState(sessionId),
     compactionState: getSessionCompactionState(sessionId),
     messages,
     attachments,
@@ -2229,6 +2297,7 @@ export function updateSessionMessage(input: {
   messageId: string;
   content: string;
   status?: SessionMessageStatus;
+  eventType?: "message.updated" | "message.delta" | "message.completed";
   eventPayload?: Record<string, unknown>;
 }): {
   message: SessionMessage;
@@ -2257,7 +2326,7 @@ export function updateSessionMessage(input: {
     ).run(nextMessage.content, nextMessage.status, now, input.messageId);
 
     touchSession(input.sessionId, now);
-    const event = recordEvent(input.sessionId, "message.updated", {
+    const event = recordEvent(input.sessionId, input.eventType ?? "message.updated", {
       message: nextMessage,
       ...(input.eventPayload ?? {}),
     }, now);

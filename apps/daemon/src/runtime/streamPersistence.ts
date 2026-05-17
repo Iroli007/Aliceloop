@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { ReasoningEffort } from "@aliceloop/runtime-core";
+import type { LanguageModelUsage } from "ai";
 import type { AgentContext } from "../context/index";
 import { publishSessionEvent } from "../realtime/sessionStreams";
 import {
   createSessionMessage,
   updateSessionMessage,
 } from "../repositories/sessionRepository";
+import { listProviderReasoningTracesForToolCalls } from "../repositories/providerReasoningRepository";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
 import { getRenderableAssistantText } from "./providerRuntimeAdapter";
 import { logPerfTrace, nowMs, roundMs } from "./perfTrace";
@@ -14,6 +16,31 @@ import { clearStreamCheckpoint, saveStreamCheckpoint } from "./streamCheckpoint"
 import type { ToolStateMachine } from "./toolStateMachine";
 
 const DEBOUNCE_MS = 80;
+
+function buildProcessedReasoningPayload(input: {
+  sessionId: string;
+  providerId: string;
+  stateMachine: ToolStateMachine;
+}) {
+  const toolCallIds = input.stateMachine.getAll().map((state) => state.toolCallId);
+  const traces = listProviderReasoningTracesForToolCalls({
+    sessionId: input.sessionId,
+    providerId: input.providerId,
+    toolCallIds,
+  });
+
+  if (traces.length === 0) {
+    return null;
+  }
+
+  return {
+    status: "processed",
+    kind: input.providerId === "deepseek" ? "deepseek-thinking" : "provider-thinking",
+    label: "已处理",
+    traceCount: traces.length,
+    summary: "思考内容已处理并用于后续工具调用。",
+  };
+}
 
 interface TextStreamLike {
   textStream: AsyncIterable<string>;
@@ -24,6 +51,7 @@ interface TextStreamLike {
       cacheReadInputTokens?: unknown;
     };
   } | undefined>;
+  totalUsage?: PromiseLike<LanguageModelUsage>;
 }
 
 interface TextFallbackResult {
@@ -33,6 +61,11 @@ interface TextFallbackResult {
 
 interface ToolResultSummaryResult {
   replacementText: string;
+}
+
+function mergeEventPayload(...parts: Array<Record<string, unknown> | undefined>) {
+  const merged = Object.assign({}, ...parts.filter(Boolean));
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 interface ConsumeTextStreamInput {
@@ -74,6 +107,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
   const assistantClientMessageId = `agent-assistant-${randomUUID()}`;
   let assistantMessageId: string | null = input.existingAssistantMessageId;
   let pendingFlush = false;
+  let pendingDelta = "";
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let firstTokenMs: number | null = null;
   let resolvedToolCalls: unknown[] = [];
@@ -84,62 +118,100 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
         skills: input.context.displaySkillIds,
       }
     : undefined;
+  const processingEventPayload = mergeEventPayload(assistantEventPayload, { displayMode: "processing" });
 
   function getChatContent(final = false) {
     return getRenderableAssistantText(input.providerId, text, final);
   }
 
+  let publishedContent = getChatContent() ?? "";
+
+  function ensureAssistantMessage(content: string, allowEmpty = false) {
+    if (assistantMessageId) {
+      return true;
+    }
+    if (!allowEmpty && !content && !publishedContent) {
+      return false;
+    }
+
+    if (content || publishedContent) {
+      firstTokenMs ??= roundMs(nowMs() - input.requestStartedAt);
+    }
+    const messageResult = createSessionMessage({
+      sessionId: input.sessionId,
+      clientMessageId: assistantClientMessageId,
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content: publishedContent,
+      attachmentIds: [],
+      eventPayload: processingEventPayload,
+    });
+
+    assistantMessageId = messageResult.message.id;
+    saveStreamCheckpoint(input.sessionId, assistantMessageId, text);
+    for (const event of messageResult.events) {
+      publishSessionEvent(event);
+    }
+    return true;
+  }
+
+  function queueContent(content: string) {
+    if (content === publishedContent) {
+      return false;
+    }
+
+    const delta = content.startsWith(publishedContent)
+      ? content.slice(publishedContent.length)
+      : content;
+    publishedContent = content;
+    pendingDelta += delta;
+    pendingFlush = true;
+    return true;
+  }
+
   function flush() {
     if (!assistantMessageId || !pendingFlush) return;
     pendingFlush = false;
-    const content = getChatContent();
-    if (content === null) {
-      return;
-    }
+    const delta = pendingDelta;
+    pendingDelta = "";
     const updateResult = updateSessionMessage({
       sessionId: input.sessionId,
       messageId: assistantMessageId,
-      content,
-      eventPayload: assistantEventPayload,
+      content: publishedContent,
+      eventType: "message.delta",
+      eventPayload: {
+        ...(processingEventPayload ?? {}),
+        delta,
+      },
     });
     publishSessionEvent(updateResult.event);
   }
+
+  ensureAssistantMessage("", true);
 
   for await (const delta of input.stream.textStream) {
     input.checkActive();
     if (!delta) continue;
 
     text += delta;
+    const content = getChatContent();
+    if (content === null || !content) {
+      continue;
+    }
+    firstTokenMs ??= roundMs(nowMs() - input.requestStartedAt);
+
+    if (!ensureAssistantMessage(content)) {
+      continue;
+    }
+
     if (assistantMessageId) {
       saveStreamCheckpoint(input.sessionId, assistantMessageId, text);
     }
 
-    if (!assistantMessageId) {
-      const content = getChatContent();
-      if (content === null || !content) {
-        continue;
-      }
-
-      firstTokenMs = roundMs(nowMs() - input.requestStartedAt);
-      const messageResult = createSessionMessage({
-        sessionId: input.sessionId,
-        clientMessageId: assistantClientMessageId,
-        deviceId: "runtime-agent",
-        role: "assistant",
-        content,
-        attachmentIds: [],
-        eventPayload: assistantEventPayload,
-      });
-
-      assistantMessageId = messageResult.message.id;
-      saveStreamCheckpoint(input.sessionId, assistantMessageId, text);
-      for (const event of messageResult.events) {
-        publishSessionEvent(event);
-      }
+    if (!queueContent(content)) {
       continue;
     }
 
-    pendingFlush = true;
     if (!flushTimer) {
       flushTimer = setTimeout(() => {
         flush();
@@ -155,6 +227,7 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
   if (pendingFlush) flush();
 
   resolvedToolCalls = await input.stream.toolCalls;
+  const streamedText = text;
 
   if (resolvedToolCalls.length === 0 && text.trim()) {
     const fallback = await input.resolveTextFallback({
@@ -169,48 +242,72 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     }
   }
 
-  if (!text.trim() && resolvedToolCalls.length > 0) {
+  const resolvedToolCallCount = Array.isArray(resolvedToolCalls)
+    ? resolvedToolCalls.length + fallbackToolCallCount
+    : fallbackToolCallCount;
+  const hasToolWork = resolvedToolCallCount > 0 || input.stateMachine.getAll().length > 0;
+
+  if (hasToolWork) {
     const summary = await input.resolveToolResultSummary({
-      assistantText: text,
+      assistantText: streamedText,
       resolvedToolCalls,
       stateMachine: input.stateMachine,
       reasoningEffort: input.reasoningEffort,
     });
-    text = summary?.replacementText.trim() || `已完成 ${resolvedToolCalls.length} 次工具调用。`;
+    text = summary?.replacementText.trim() || text.trim() || `已完成 ${resolvedToolCallCount} 次工具调用。`;
   }
 
   const finalContent = getChatContent(true);
+  const reasoning = buildProcessedReasoningPayload({
+    sessionId: input.sessionId,
+    providerId: input.providerId,
+    stateMachine: input.stateMachine,
+  });
 
-  if (assistantMessageId && typeof finalContent === "string") {
-    const updateResult = updateSessionMessage({
+  if (assistantMessageId) {
+    const processingCompleted = updateSessionMessage({
       sessionId: input.sessionId,
       messageId: assistantMessageId,
-      content: finalContent,
-      eventPayload: assistantEventPayload,
+      content: publishedContent,
+      eventType: "message.completed",
+      eventPayload: mergeEventPayload(processingEventPayload, reasoning ? { reasoning } : undefined),
     });
-    publishSessionEvent(updateResult.event);
-  }
+    publishSessionEvent(processingCompleted.event);
 
-  if (!assistantMessageId && finalContent) {
-    const messageResult = createSessionMessage({
-      sessionId: input.sessionId,
-      clientMessageId: assistantClientMessageId,
-      deviceId: "runtime-agent",
-      role: "assistant",
-      content: finalContent,
-      attachmentIds: [],
-      eventPayload: assistantEventPayload,
-    });
-    assistantMessageId = messageResult.message.id;
-    for (const event of messageResult.events) {
-      publishSessionEvent(event);
+    if (typeof finalContent === "string" && finalContent.trim()) {
+      const messageResult = createSessionMessage({
+        sessionId: input.sessionId,
+        clientMessageId: `agent-final-${randomUUID()}`,
+        deviceId: "runtime-agent",
+        role: "assistant",
+        content: finalContent,
+        attachmentIds: [],
+        eventPayload: assistantEventPayload,
+      });
+
+      assistantMessageId = messageResult.message.id;
+      for (const event of messageResult.events) {
+        publishSessionEvent(event);
+      }
+
+      const completedResult = updateSessionMessage({
+        sessionId: input.sessionId,
+        messageId: assistantMessageId,
+        content: finalContent,
+        eventType: "message.completed",
+        eventPayload: mergeEventPayload(assistantEventPayload, { displayMode: "final" }, reasoning ? { reasoning } : undefined),
+      });
+      publishSessionEvent(completedResult.event);
     }
-  }
 
-  await syncSessionProjectHistory(input.sessionId);
-  clearStreamCheckpoint(input.sessionId);
+    await syncSessionProjectHistory(input.sessionId);
+    clearStreamCheckpoint(input.sessionId);
+  }
 
   const metadata = await input.stream.providerMetadata;
+  const totalUsage = input.stream.totalUsage
+    ? await Promise.resolve(input.stream.totalUsage).catch(() => undefined)
+    : undefined;
   let cacheCreationInputTokens: number | null = null;
   let cacheReadInputTokens: number | null = null;
   if (metadata?.anthropic) {
@@ -261,13 +358,14 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     timings: {
       firstTokenMs,
       streamTotalMs: roundMs(nowMs() - input.requestStartedAt),
+      inputTokens: typeof totalUsage?.inputTokens === "number" ? totalUsage.inputTokens : null,
+      outputTokens: typeof totalUsage?.outputTokens === "number" ? totalUsage.outputTokens : null,
+      totalTokens: typeof totalUsage?.totalTokens === "number" ? totalUsage.totalTokens : null,
       cacheCreationInputTokens,
       cacheReadInputTokens,
     },
     diagnostics: {
-      resolvedToolCallCount: Array.isArray(resolvedToolCalls)
-        ? resolvedToolCalls.length + fallbackToolCallCount
-        : fallbackToolCallCount,
+      resolvedToolCallCount,
       providerMetadataPreview: input.summarizeUnknown(metadata),
       promptCache,
     },

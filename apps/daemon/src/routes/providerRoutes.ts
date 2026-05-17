@@ -11,6 +11,7 @@ interface UpdateProviderBody {
   transport?: ProviderTransportKind;
   baseUrl?: string;
   model?: string;
+  contextWindowTokens?: number | null;
   apiKey?: string;
   enabled?: boolean;
 }

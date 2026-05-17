@@ -14,6 +14,7 @@ interface ProviderConfigRow {
   transport: ProviderTransportKind | null;
   baseUrl: string;
   model: string;
+  contextWindowTokens: number | null;
   legacyApiKey: string | null;
   enabled: number;
   updatedAt: string;
@@ -24,6 +25,7 @@ interface UpdateProviderInput {
   transport?: ProviderTransportKind;
   baseUrl?: string;
   model?: string;
+  contextWindowTokens?: number | null;
   apiKey?: string;
   enabled?: boolean;
 }
@@ -34,6 +36,7 @@ export interface StoredProviderConfig {
   transport: ProviderTransportKind;
   baseUrl: string;
   model: string;
+  contextWindowTokens: number | null;
   apiKey: string | null;
   enabled: boolean;
   updatedAt: string | null;
@@ -127,6 +130,7 @@ function toStoredProviderConfig(row: ProviderConfigRow | undefined, providerId: 
     transport: row?.transport ?? definition.transport,
     baseUrl,
     model: row?.model ?? defaultConfig.model,
+    contextWindowTokens: row?.contextWindowTokens ?? defaultConfig.contextWindowTokens,
     apiKey: resolveProviderApiKey(providerId, row?.legacyApiKey ?? null),
     enabled: Boolean(row?.enabled ?? defaultConfig.enabled),
     updatedAt: row?.updatedAt ?? defaultConfig.updatedAt,
@@ -140,6 +144,7 @@ function toPublicProviderConfig(config: StoredProviderConfig): ProviderConfig {
     transport: config.transport,
     baseUrl: config.baseUrl,
     model: config.model,
+    contextWindowTokens: config.contextWindowTokens,
     enabled: config.enabled,
     hasApiKey: Boolean(config.apiKey),
     apiKeyMasked: maskApiKey(config.apiKey),
@@ -157,6 +162,7 @@ function getProviderRow(providerId: ProviderKind) {
           transport,
           base_url AS baseUrl,
           model,
+          context_window_tokens AS contextWindowTokens,
           api_key AS legacyApiKey,
           enabled,
           updated_at AS updatedAt
@@ -195,6 +201,7 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
     transport: input.transport ?? current.transport,
     baseUrl: input.baseUrl !== undefined ? normalizeGatewayBaseUrl(input.baseUrl, input.transport ?? current.transport) || current.baseUrl : current.baseUrl,
     model: input.model !== undefined ? normalizeConfigText(input.model) || current.model : current.model,
+    contextWindowTokens: input.contextWindowTokens !== undefined ? input.contextWindowTokens : current.contextWindowTokens,
     apiKey: current.apiKey,
     enabled: input.enabled ?? current.enabled,
     updatedAt: now,
@@ -212,15 +219,16 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
   db.prepare(
     `
       INSERT INTO provider_configs (
-        provider_id, label, transport, base_url, model, api_key, enabled, updated_at
+        provider_id, label, transport, base_url, model, context_window_tokens, api_key, enabled, updated_at
       ) VALUES (
-        @providerId, @label, @transport, @baseUrl, @model, NULL, @enabled, @updatedAt
+        @providerId, @label, @transport, @baseUrl, @model, @contextWindowTokens, NULL, @enabled, @updatedAt
       )
       ON CONFLICT(provider_id) DO UPDATE SET
         label = excluded.label,
         transport = excluded.transport,
         base_url = excluded.base_url,
         model = excluded.model,
+        context_window_tokens = excluded.context_window_tokens,
         api_key = NULL,
         enabled = excluded.enabled,
         updated_at = excluded.updated_at
@@ -231,6 +239,7 @@ export function updateProviderConfig(input: UpdateProviderInput): ProviderConfig
     transport: next.transport,
     baseUrl: next.baseUrl,
     model: next.model,
+    contextWindowTokens: next.contextWindowTokens,
     enabled: next.enabled ? 1 : 0,
     updatedAt: next.updatedAt,
   });

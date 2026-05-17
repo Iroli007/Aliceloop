@@ -344,6 +344,7 @@ function SettingsApp() {
   const [providerApiKeyInput, setProviderApiKeyInput] = useState("");
   const [providerBaseUrlInput, setProviderBaseUrlInput] = useState("");
   const [providerModelInput, setProviderModelInput] = useState("");
+  const [providerContextWindowInput, setProviderContextWindowInput] = useState("");
   const [providerEnabled, setProviderEnabled] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
   const [providerSearchQuery, setProviderSearchQuery] = useState("");
@@ -577,6 +578,7 @@ function SettingsApp() {
 
     setProviderBaseUrlInput(activeProvider.baseUrl);
     setProviderModelInput(activeProvider.model);
+    setProviderContextWindowInput(activeProvider.contextWindowTokens ? String(activeProvider.contextWindowTokens) : "");
     setProviderEnabled(activeProvider.enabled);
   }, [activeProvider]);
 
@@ -774,6 +776,7 @@ function SettingsApp() {
       providerId: activeProvider.id,
       baseUrl: providerBaseUrlInput,
       model: providerModelInput,
+      contextWindowTokens: providerContextWindowInput.trim() ? Number(providerContextWindowInput.trim()) : null,
       apiKey: providerApiKeyInput.trim() ? providerApiKeyInput.trim() : undefined,
       enabled: providerEnabled,
     });
@@ -789,6 +792,7 @@ function SettingsApp() {
         providerId: provider.id,
         baseUrl: provider.baseUrl,
         model: provider.model,
+        contextWindowTokens: provider.contextWindowTokens,
         enabled: false,
       })));
       if (disableResults.some((item) => !item.ok)) {
@@ -1222,6 +1226,18 @@ function SettingsApp() {
                         />
                       </div>
 
+                      <div className="provider-field">
+                        <label>上下文窗口 tokens</label>
+                        <input
+                          className="provider-field__input"
+                          type="number"
+                          min={8000}
+                          step={1000}
+                          value={providerContextWindowInput}
+                          onChange={(event) => setProviderContextWindowInput(event.target.value)}
+                        />
+                      </div>
+
                       <div className="provider-inline-actions">
                         <button
                           type="button"
@@ -1276,6 +1292,7 @@ function SettingsApp() {
                           setProviderApiKeyInput("");
                           setProviderBaseUrlInput(activeProvider.baseUrl);
                           setProviderModelInput(activeProvider.model);
+                          setProviderContextWindowInput(activeProvider.contextWindowTokens ? String(activeProvider.contextWindowTokens) : "");
                           setProviderEnabled(activeProvider.enabled);
                           setProviderNotice(null);
                         }}

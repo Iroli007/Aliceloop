@@ -19,16 +19,36 @@ export function resolveProviderTransport(config: StoredProviderConfig) {
   return "openai-compatible" as const;
 }
 
-function supportsReasoningEffort(config: StoredProviderConfig) {
+export type ProviderThinkingKind = "none" | "openai-reasoning" | "deepseek-thinking";
+
+export function resolveProviderThinkingKind(config: StoredProviderConfig): ProviderThinkingKind {
   if (resolveProviderTransport(config) !== "openai-compatible") {
-    return false;
+    return "none";
   }
 
   const modelId = normalizeReasoningModelId(config.model);
-  return modelId.startsWith("o1")
+  if (config.id === "deepseek" && modelId.startsWith("deepseek-v4-")) {
+    return "deepseek-thinking";
+  }
+
+  if (
+    modelId.startsWith("o1")
     || modelId.startsWith("o3")
     || modelId.startsWith("o4-mini")
-    || (modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat"));
+    || (modelId.startsWith("gpt-5") && !modelId.startsWith("gpt-5-chat"))
+  ) {
+    return "openai-reasoning";
+  }
+
+  return "none";
+}
+
+export function shouldEnableProviderThinking(config: StoredProviderConfig, reasoningEffort: ReasoningEffort) {
+  return resolveProviderThinkingKind(config) !== "none" && reasoningEffort !== "off";
+}
+
+export function supportsReasoningEffort(config: StoredProviderConfig) {
+  return resolveProviderThinkingKind(config) !== "none";
 }
 
 function mapReasoningEffortToOpenAI(effort: ReasoningEffort) {
@@ -36,6 +56,20 @@ function mapReasoningEffortToOpenAI(effort: ReasoningEffort) {
 }
 
 export function buildAgentProviderOptions(config: StoredProviderConfig, reasoningEffort: ReasoningEffort) {
+  if (resolveProviderThinkingKind(config) === "deepseek-thinking") {
+    return {
+      openai: {
+        systemMessageMode: "system" as const,
+        ...(reasoningEffort === "off"
+          ? {}
+          : {
+              reasoningEffort: mapReasoningEffortToOpenAI(reasoningEffort),
+              forceReasoning: true,
+            }),
+      },
+    };
+  }
+
   if (!supportsReasoningEffort(config)) {
     return undefined;
   }

@@ -211,6 +211,7 @@ export const schemaStatements = [
       transport TEXT,
       base_url TEXT NOT NULL,
       model TEXT NOT NULL,
+      context_window_tokens INTEGER,
       api_key TEXT,
       enabled INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
@@ -520,6 +521,25 @@ export const schemaStatements = [
   `
     CREATE INDEX IF NOT EXISTS session_generated_files_path_deleted_idx
     ON session_generated_files (path, deleted_at)
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS provider_reasoning_traces (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      reasoning_content TEXT NOT NULL,
+      reasoning_summary TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(session_id, provider_id, tool_call_id),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )
+  `,
+  `
+    CREATE INDEX IF NOT EXISTS provider_reasoning_traces_session_idx
+    ON provider_reasoning_traces (session_id, provider_id, updated_at DESC)
   `,
   `
     CREATE TABLE IF NOT EXISTS runtime_settings (

@@ -96,6 +96,7 @@ type SeedProviderConfig = {
   transport: ProviderTransportKind;
   baseUrl: string;
   model: string;
+  contextWindowTokens: number;
   enabled: number;
   updatedAt: string;
 };
@@ -224,6 +225,7 @@ const seedProviderConfigs: SeedProviderConfig[] = listProviderDefinitions().map(
   transport: provider.transport,
   baseUrl: provider.defaultBaseUrl,
   model: provider.defaultModel,
+  contextWindowTokens: provider.defaultContextWindowTokens,
   enabled: 0,
   updatedAt: previewSessionSnapshot.session.updatedAt,
 }));
@@ -448,9 +450,9 @@ function seedProviderConfig(db: Database.Database, config: SeedProviderConfig) {
   db.prepare(
     `
       INSERT OR IGNORE INTO provider_configs (
-        provider_id, label, transport, base_url, model, api_key, enabled, updated_at
+        provider_id, label, transport, base_url, model, context_window_tokens, api_key, enabled, updated_at
       ) VALUES (
-        @providerId, @label, @transport, @baseUrl, @model, NULL, @enabled, @updatedAt
+        @providerId, @label, @transport, @baseUrl, @model, @contextWindowTokens, NULL, @enabled, @updatedAt
       )
     `,
   ).run(config);
@@ -560,6 +562,7 @@ function runMigrations(db: Database.Database) {
   ensureColumn(db, "attachments", "original_path", "TEXT");
   ensureColumn(db, "study_artifacts", "body", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "provider_configs", "transport", "TEXT");
+  ensureColumn(db, "provider_configs", "context_window_tokens", "INTEGER");
   db.prepare("UPDATE study_artifacts SET body = summary WHERE COALESCE(body, '') = ''").run();
   ensureColumn(db, "task_runs", "session_id", "TEXT");
   ensureColumn(db, "task_runs", "detail", "TEXT NOT NULL DEFAULT ''");

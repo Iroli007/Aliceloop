@@ -1,4 +1,5 @@
-import { extractStructuredPlanDraft } from "@aliceloop/runtime-core";
+import { extractStructuredPlanDraft, isToolWorkflowTerminalStatus } from "@aliceloop/runtime-core";
+import { useEffect, useState } from "react";
 
 import { MessageContent } from "./MessageContent";
 import { SourceLinksSection, type SourceLink } from "./SourceLinks";
@@ -1224,9 +1225,12 @@ function getStatusMeta(entry: ToolWorkflowEntry) {
   };
 }
 
-function formatDurationLabel(entry: ToolWorkflowEntry) {
+function formatDurationLabel(entry: ToolWorkflowEntry, nowMs = Date.now()) {
+  const createdAtMs = new Date(entry.createdAt).getTime();
+  const updatedAtMs = new Date(entry.updatedAt).getTime();
+  const endAtMs = isToolWorkflowTerminalStatus(entry.status) ? updatedAtMs : nowMs;
   const measuredDuration = entry.durationMs
-    ?? Math.max(0, new Date(entry.updatedAt).getTime() - new Date(entry.createdAt).getTime());
+    ?? Math.max(0, endAtMs - createdAtMs);
 
   if (!Number.isFinite(measuredDuration) || measuredDuration <= 0) {
     return null;
@@ -1360,6 +1364,16 @@ function ToolWorkflowDurationGlyph() {
 }
 
 export function ToolWorkflowCard({ entry, planModeActive = false }: ToolWorkflowCardProps) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (isToolWorkflowTerminalStatus(entry.status)) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [entry.status]);
+
   const status = getStatusMeta(entry);
   const summaryTitle = buildSummaryTitle(entry);
   const argumentsBlock = formatArgumentsBlock(entry);
@@ -1370,7 +1384,7 @@ export function ToolWorkflowCard({ entry, planModeActive = false }: ToolWorkflow
     ? extractStructuredPlanDraft(resultBlock)
     : null;
   const sourceLinks = buildToolSourceLinks(entry);
-  const durationLabel = formatDurationLabel(entry);
+  const durationLabel = formatDurationLabel(entry, nowMs);
   const primaryDetailLabel = getPrimaryDetailLabel(entry.toolName);
   const bashDisplay = entry.toolName === "bash" ? buildBashDisplay(resolveEntryInput(entry)) : null;
   const hasDetails = !isToolDiscoveryCard && Boolean(isAgentTool || argumentsBlock || resultBlock || entry.error || entry.backend || sourceLinks.length > 0);

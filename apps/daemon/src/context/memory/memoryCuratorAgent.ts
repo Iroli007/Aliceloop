@@ -95,6 +95,9 @@ export async function planMemoryUpdatesFromConversation(
   if (!provider?.apiKey) {
     return [] as CuratedMemoryCandidate[];
   }
+  if (provider.id === "deepseek") {
+    return [] as CuratedMemoryCandidate[];
+  }
 
   const trimmedUserMessage = userMessage.trim();
   const trimmedAssistantMessage = assistantMessage.trim();

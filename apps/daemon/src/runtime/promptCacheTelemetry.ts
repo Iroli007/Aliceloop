@@ -31,6 +31,8 @@ export interface PromptCacheRequestTrace {
   systemPartCount: number;
   toolCount: number;
   messageCount: number;
+  serializedRequestChars: number;
+  estimatedInputTokens: number;
 }
 
 export interface PromptCacheRunTrace extends PromptCacheRequestTrace {
@@ -59,6 +61,7 @@ interface FinalizePromptCacheRunTraceInput {
 
 const lastPromptCacheTraceBySession = new Map<string, PromptCacheRequestTrace>();
 const PART_SEPARATOR = "\n<cache-part>\n";
+const cjkTokenEstimatePattern = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/gu;
 
 function shortHash(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
@@ -89,6 +92,15 @@ function hasAnthropicDeferredLoading(providerOptions: SharedV3ProviderOptions | 
 
 function stableSerialize(value: unknown): string {
   return JSON.stringify(normalizeForTelemetry(value));
+}
+
+function estimateTokensFromText(value: string) {
+  const cjkCharCount = value.match(cjkTokenEstimatePattern)?.length ?? 0;
+  const nonCjkText = value.replace(cjkTokenEstimatePattern, "");
+  const nonCjkChars = Array.from(nonCjkText);
+  const nonAsciiCharCount = nonCjkChars.filter((char) => char.charCodeAt(0) > 127).length;
+  const asciiLength = Math.max(0, nonCjkText.length - nonAsciiCharCount);
+  return Math.ceil(cjkCharCount * 1.05 + nonAsciiCharCount * 1.2 + asciiLength / 4);
 }
 
 function normalizeForTelemetry(value: unknown, seen = new WeakSet<object>()): unknown {
@@ -293,7 +305,8 @@ export async function buildPromptCacheRequestTrace(
     });
   }
 
-  const requestHash = shortHash(prefixParts.join(PART_SEPARATOR));
+  const serializedRequest = prefixParts.join(PART_SEPARATOR);
+  const requestHash = shortHash(serializedRequest);
   return {
     requestHash,
     breakpointCount: breakpoints.length,
@@ -302,6 +315,8 @@ export async function buildPromptCacheRequestTrace(
     systemPartCount: typeof input.systemPrompt === "string" ? 1 : input.systemPrompt.length,
     toolCount: Object.keys(input.tools).length,
     messageCount: input.messages.length,
+    serializedRequestChars: serializedRequest.length,
+    estimatedInputTokens: estimateTokensFromText(serializedRequest),
   };
 }
 

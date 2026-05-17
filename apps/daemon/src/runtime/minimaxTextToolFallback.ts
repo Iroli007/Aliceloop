@@ -141,7 +141,10 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
 
     try {
       const followup = await generateText({
-        model: createProviderModel(input.provider),
+        model: createProviderModel(input.provider, {
+          sessionId: input.sessionId,
+          reasoningEffort: input.reasoningEffort,
+        }),
         system: input.context.systemPrompt,
         messages: [
           ...input.context.messages,

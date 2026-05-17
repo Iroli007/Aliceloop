@@ -7,6 +7,7 @@ import {
   type JobRunDetail,
   type RuntimePresence,
   type SessionCompactionState,
+  type SessionContextUsageState,
   type SessionEvent,
   type SessionFocusState,
   type SessionMemoryState,
@@ -68,6 +69,20 @@ function createEmptySessionMemoryState(sessionId: string): SessionMemoryState {
     lastTokenEstimate: 0,
     lastToolCallCount: 0,
     lastUpdateReason: null,
+    updatedAt: null,
+  };
+}
+
+function createEmptySessionContextUsageState(sessionId: string): SessionContextUsageState {
+  return {
+    sessionId,
+    source: "frontend-estimate",
+    inputTokens: 0,
+    outputTokens: null,
+    totalTokens: 0,
+    contextWindowTokens: 0,
+    compactTriggerTokens: 0,
+    usagePercent: 0,
     updatedAt: null,
   };
 }
@@ -136,6 +151,7 @@ export interface ShellConversationState {
   focusState: SessionFocusState;
   rollingSummary: SessionRollingSummary;
   sessionMemory: SessionMemoryState;
+  contextUsage: SessionContextUsageState;
   compactionState: SessionCompactionState;
   threads: SessionThreadSummary[];
   messages: SessionMessage[];
@@ -349,6 +365,7 @@ function normalizeSnapshot(snapshot: SessionSnapshot): SessionSnapshot {
     focusState: snapshot.focusState ?? createEmptyFocusState(snapshot.session.id),
     rollingSummary: snapshot.rollingSummary ?? createEmptyRollingSummary(snapshot.session.id),
     sessionMemory: snapshot.sessionMemory ?? createEmptySessionMemoryState(snapshot.session.id),
+    contextUsage: snapshot.contextUsage ?? createEmptySessionContextUsageState(snapshot.session.id),
     compactionState: snapshot.compactionState ?? createEmptyCompactionState(snapshot.session.id),
     toolWorkflowEntries: snapshot.toolWorkflowEntries ?? [],
   };
@@ -429,6 +446,7 @@ function createLocalDraftSnapshot(current: SessionSnapshot): SessionSnapshot {
     focusState: createEmptyFocusState(localDraftSessionId),
     rollingSummary: createEmptyRollingSummary(localDraftSessionId),
     sessionMemory: createEmptySessionMemoryState(localDraftSessionId),
+    contextUsage: createEmptySessionContextUsageState(localDraftSessionId),
     compactionState: createEmptyCompactionState(localDraftSessionId),
     messages: [],
     attachments: [],
@@ -454,6 +472,7 @@ function createEmptySnapshotFromThread(thread: SessionThreadSummary, current: Se
     focusState: createEmptyFocusState(thread.id),
     rollingSummary: createEmptyRollingSummary(thread.id),
     sessionMemory: createEmptySessionMemoryState(thread.id),
+    contextUsage: createEmptySessionContextUsageState(thread.id),
     compactionState: createEmptyCompactionState(thread.id),
     messages: [],
     attachments: [],
@@ -477,6 +496,8 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
       };
     case "message.created":
     case "message.acked":
+    case "message.delta":
+    case "message.completed":
     case "message.updated": {
       const message = (event.payload as { message?: SessionMessage }).message;
       if (!message) {
@@ -587,6 +608,17 @@ function applySessionEvent(snapshot: SessionSnapshot, event: SessionEvent): Sess
           updatedAt: event.createdAt,
         },
         sessionMemory,
+      };
+    }
+    case "context_usage.updated": {
+      const contextUsage = (event.payload as { contextUsage?: SessionContextUsageState }).contextUsage;
+      if (!contextUsage) {
+        return snapshot;
+      }
+
+      return {
+        ...snapshot,
+        contextUsage,
       };
     }
     case "presence.updated":
@@ -951,6 +983,7 @@ export function useShellConversation(): ShellConversationState {
         if (
           sessionEvent.type === "message.created" ||
           sessionEvent.type === "message.acked" ||
+          sessionEvent.type === "message.completed" ||
           sessionEvent.type === "plan_mode.updated"
         ) {
           void refreshThreads();
@@ -1677,6 +1710,7 @@ export function useShellConversation(): ShellConversationState {
     focusState: snapshot.focusState,
     rollingSummary: snapshot.rollingSummary,
     sessionMemory: snapshot.sessionMemory,
+    contextUsage: snapshot.contextUsage,
     compactionState: snapshot.compactionState,
     threads,
     messages: snapshot.messages,

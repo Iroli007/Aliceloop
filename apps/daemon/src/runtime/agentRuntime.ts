@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
 import { generateText, stepCountIs, streamText } from "ai";
+import { resolveModelContextBudget, type SessionContextUsageState } from "@aliceloop/runtime-core";
 import { type AgentContext, loadContext } from "../context/index";
 import { getLatestUserMessage } from "../context/session/sessionContext";
 import { getBrowserToolRuntime } from "../context/tools/browserTool";
@@ -15,6 +16,7 @@ import {
   appendSessionEvent,
   createAttachment,
   createSessionMessage,
+  updateSessionContextUsageState,
   upsertSessionJob,
 } from "../repositories/sessionRepository";
 import { syncSessionProjectHistory } from "../services/sessionProjectService";
@@ -26,6 +28,7 @@ import { ToolStateMachine } from "./toolStateMachine";
 import {
   buildAgentProviderOptions,
   resolveProviderTransport,
+  supportsReasoningEffort,
 } from "./providerRuntimeAdapter";
 import { executeMiniMaxTextToolCallFallback } from "./minimaxTextToolFallback";
 import { consumeTextStream } from "./streamPersistence";
@@ -48,6 +51,40 @@ function publishJob(input: Parameters<typeof upsertSessionJob>[0]) {
   const result = upsertSessionJob(input);
   publishSessionEvent(result.event);
   return result.job;
+}
+
+function publishContextUsage(input: {
+  sessionId: string;
+  provider: StoredProviderConfig;
+  source: SessionContextUsageState["source"];
+  inputTokens: number;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+}) {
+  const contextBudget = resolveModelContextBudget({
+    providerId: input.provider.id,
+    model: input.provider.model,
+    contextWindowTokens: input.provider.contextWindowTokens,
+  });
+  const inputTokens = Math.max(0, Math.round(input.inputTokens));
+  const outputTokens = typeof input.outputTokens === "number" ? Math.max(0, Math.round(input.outputTokens)) : null;
+  const totalTokens = typeof input.totalTokens === "number"
+    ? Math.max(0, Math.round(input.totalTokens))
+    : inputTokens + (outputTokens ?? 0);
+  const contextUsage: SessionContextUsageState = {
+    sessionId: input.sessionId,
+    source: input.source,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    contextWindowTokens: contextBudget.contextWindowTokens,
+    compactTriggerTokens: contextBudget.compactTriggerTokens,
+    usagePercent: Math.min(100, Math.round((inputTokens / contextBudget.contextWindowTokens) * 100)),
+    updatedAt: new Date().toISOString(),
+  };
+  const result = updateSessionContextUsageState(input.sessionId, contextUsage);
+  publishSessionEvent(result.event);
+  return contextUsage;
 }
 
 function publishRuntimeNotice(sessionId: string, content: string) {
@@ -433,6 +470,8 @@ function buildDisconnectedResumePrompt(checkpoint: StreamCheckpoint | null) {
   const lines = [
     "The previous assistant response was interrupted because the client disconnected.",
     "Continue the same response from the exact point where it stopped.",
+    "Your next tokens will be appended directly after the visible text.",
+    "Start with the next missing character only, even if the visible text ends mid-sentence.",
     "Do not repeat text that is already visible in the assistant message.",
   ];
 
@@ -498,6 +537,17 @@ async function createAgentRun(
     throw error;
   }
   const contextLoadMs = roundMs(nowMs() - contextStartedAt);
+  const contextTokenEstimate = typeof context.timings.contextTokenEstimate === "number"
+    ? context.timings.contextTokenEstimate
+    : context.promptCacheTrace.estimatedInputTokens;
+  if (contextTokenEstimate > 0) {
+    publishContextUsage({
+      sessionId,
+      provider: activeProvider,
+      source: "backend-estimate",
+      inputTokens: contextTokenEstimate,
+    });
+  }
 
   const resumeCheckpoint = options?.resumeAfterDisconnect ? getStreamCheckpoint(sessionId) : null;
   if (options?.resumeAfterDisconnect) {
@@ -642,6 +692,7 @@ interface StreamResult {
 function buildToolResultSummaryPrompt(
   stateMachine: ToolStateMachine,
   summarizeUnknown: (value: unknown, maxLength?: number) => string | null,
+  assistantText: string,
 ) {
   const toolStates = stateMachine.getAll();
   const toolLines = toolStates.map((state, index) => {
@@ -665,9 +716,11 @@ function buildToolResultSummaryPrompt(
   });
 
   return [
-    "你刚刚已经执行完工具。请基于下面的工具结果，直接回答用户最初的请求。",
+    "你刚刚已经完成一段工作流。请把工作过程和工具结果压缩成最终回复，直接回答用户最初的请求。",
+    "要求：简洁、易懂、关键事实不漏。保留结论、重要数据、文件/命令结果、失败点和下一步；不要复述思考过程。",
+    "不要照抄工作过程；工作过程只用于理解你做了什么，最终回复必须面向用户重新组织。",
     "不要输出新的工具调用、JSON、XML 或命令文本。不要只说工具已经完成。",
-    "如果工具结果足以回答，就给出最终答案；如果工具失败或信息不足，简短说明失败点和下一步。",
+    assistantText.trim() ? ["", "<work_transcript>", assistantText.trim(), "</work_transcript>"].join("\n") : "",
     "",
     "<tool_results>",
     toolLines.join("\n\n"),
@@ -677,6 +730,7 @@ function buildToolResultSummaryPrompt(
 
 async function synthesizeToolResultReply(input: {
   run: AgentRun;
+  assistantText: string;
   stateMachine: ToolStateMachine;
   reasoningEffort: ReturnType<typeof getRuntimeSettings>["reasoningEffort"];
   summarizeUnknown(value: unknown, maxLength?: number): string | null;
@@ -690,13 +744,14 @@ async function synthesizeToolResultReply(input: {
       model: createProviderModel(input.run.provider, {
         sessionId: input.run.sessionId,
         enablePromptCacheEditing: true,
+        reasoningEffort: input.reasoningEffort,
       }),
       system: input.run.context.systemPrompt,
       messages: [
         ...input.run.context.messages,
         {
           role: "user",
-          content: buildToolResultSummaryPrompt(input.stateMachine, input.summarizeUnknown),
+          content: buildToolResultSummaryPrompt(input.stateMachine, input.summarizeUnknown, input.assistantText),
         },
       ],
       providerOptions: buildAgentProviderOptions(input.run.provider, input.reasoningEffort),
@@ -734,6 +789,7 @@ async function executeStreamAttempt(
     model: createProviderModel(run.provider, {
       sessionId: run.sessionId,
       enablePromptCacheEditing: true,
+      reasoningEffort: runtimeSettings.reasoningEffort,
     }),
     system: run.context.systemPrompt,
     messages: run.context.messages,
@@ -743,6 +799,10 @@ async function executeStreamAttempt(
     abortSignal: run.abortController.signal,
     prepareStep({ steps }) {
       if (steps.length !== 0 || !run.context.firstStepToolChoice) {
+        return undefined;
+      }
+
+      if (supportsReasoningEffort(run.provider)) {
         return undefined;
       }
 
@@ -785,9 +845,10 @@ async function executeStreamAttempt(
         maybePublishToolImageAttachment,
       });
     },
-    resolveToolResultSummary: ({ stateMachine: summaryStateMachine, reasoningEffort }) => {
+    resolveToolResultSummary: ({ assistantText, stateMachine: summaryStateMachine, reasoningEffort }) => {
       return synthesizeToolResultReply({
         run,
+        assistantText,
         stateMachine: summaryStateMachine,
         reasoningEffort,
         summarizeUnknown,
@@ -923,11 +984,21 @@ export async function runAgent(sessionId: string, options?: RunAgentOptions) {
         ...timings,
         resolvedToolCallCount: diagnostics?.resolvedToolCallCount ?? null,
       });
+      if (typeof timings.inputTokens === "number" && timings.inputTokens > 0) {
+        publishContextUsage({
+          sessionId: run.sessionId,
+          provider: run.provider,
+          source: "provider-usage",
+          inputTokens: timings.inputTokens,
+          outputTokens: typeof timings.outputTokens === "number" ? timings.outputTokens : null,
+          totalTokens: typeof timings.totalTokens === "number" ? timings.totalTokens : null,
+        });
+      }
       schedulePostProcessing({
         sessionId: run.sessionId,
         messages: run.context.messages,
         assistantText: text,
-        contextTokenEstimate: estimateContextTokens(run.context),
+        contextTokenEstimate: run.context.promptCacheTrace.estimatedInputTokens || estimateContextTokens(run.context),
         publishRuntimeNotice,
       });
     } catch (error) {

@@ -1,8 +1,11 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { AnthropicMessagesLanguageModel } from "@ai-sdk/anthropic/internal";
 import { createOpenAI } from "@ai-sdk/openai";
+import type { ReasoningEffort } from "@aliceloop/runtime-core";
 import type { StoredProviderConfig } from "../repositories/providerRepository";
+import { shouldEnableProviderThinking } from "../runtime/providerRuntimeAdapter";
 import { createAnthropicCacheEditingTransform } from "./anthropicCacheEditing";
+import { createDeepSeekThinkingFetch } from "./deepseekThinkingBridge";
 
 function normalizeGatewayBaseUrl(baseUrl: string, useAnthropicTransport: boolean) {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
@@ -42,6 +45,7 @@ export function createProviderModel(
   options?: {
     sessionId?: string;
     enablePromptCacheEditing?: boolean;
+    reasoningEffort?: ReasoningEffort;
   },
 ) {
   const effectiveTransport = resolveEffectiveTransport(config);
@@ -77,8 +81,17 @@ export function createProviderModel(
       const provider = createOpenAI({
         baseURL: baseUrl,
         apiKey: config.apiKey ?? "",
+        fetch: config.id === "deepseek"
+          ? createDeepSeekThinkingFetch({
+              sessionId: options?.sessionId,
+              providerId: config.id,
+              model: config.model,
+              reasoningEffort: options?.reasoningEffort,
+              thinkingEnabled: shouldEnableProviderThinking(config, options?.reasoningEffort ?? "off"),
+            })
+          : undefined,
       });
-      return provider(config.model);
+      return config.id === "openai" ? provider(config.model) : provider.chat(config.model);
     }
   }
 }
