@@ -245,7 +245,7 @@ function resolveSkillToolSelection(requestedNames: Set<string>, options?: SkillT
 
 /**
  * Resolve tool-router-selected tool names into concrete ToolSet entries.
- * Base tools (grep/glob/read/write/edit/bash) are skipped — they are always loaded.
+ * Base tools (grep/glob/read/write/edit/bash) are attached by toolRegistry.
  * runtime_script_* names use prefix matching against managedTaskTools.
  */
 export function resolveSkillTools(requestedNames: Set<string>, options?: SkillToolFactoryOptions): ToolSet {

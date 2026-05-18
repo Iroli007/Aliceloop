@@ -82,6 +82,13 @@ export type ToolSchemaLifecycle = "base" | "session-stable" | "dynamic" | "volat
 
 const SPECIAL_TOOL_NAMES = new Set(["tool_search"]);
 
+function getDefaultAttachedToolNames() {
+  return [...new Set([
+    ...BASE_TOOL_ORDER,
+    ...listAvailableToolAdapterNames().filter((toolName) => toolName !== "tool_search_tool_bm25"),
+  ])];
+}
+
 function isVolatileToolName(toolName: string) {
   return VOLATILE_TOOL_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 }
@@ -251,12 +258,13 @@ export function buildToolSet(
   options?: BuildToolSetOptions,
 ): ToolSet {
   // Architecture rule:
-  // 1. No tool is always on by default.
-  // 2. Final tool set = direct tool hits ∪ allowed-tools from routed skills.
+  // 1. Runtime tools are attached by default for a stable provider-side tool surface.
+  // 2. Frontend turn metadata is still driven by actual tool events, not this full backend set.
   // 3. Skills provide workflow guidance and may also opt into a minimal tool surface.
   const allSandboxTools = createSandboxTools(sandbox);
 
   const requested = new Set([
+    ...getDefaultAttachedToolNames(),
     ...routeToolNamesForTurn(options?.query, options?.routeHints, {
       hasImageAttachment: options?.hasImageAttachment,
     }),

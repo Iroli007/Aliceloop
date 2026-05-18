@@ -386,8 +386,8 @@ export async function loadContext(
                   "- A BM25 tool search tool is also available for this turn: use `tool_search_tool_bm25` when you need a more specialized tool that is not currently visible in the loaded tool set.",
                 ]
               : []),
-            "- Many less-common tools are intentionally deferred to preserve context and prompt caching. Search with natural language, then use the discovered tool references instead of assuming the capability is missing.",
-            "- Keep using already loaded core tools directly for common work: file editing, bash, web search/fetch, image viewing, and the basic browser entry tools.",
+            "- Runtime tools are attached by default for a stable tool surface. Search with natural language when you need to inspect the catalog or find the right specialized tool name.",
+            "- Keep using visible core tools directly for common work: file editing, bash, web search/fetch, image viewing, and browser operations.",
           ].join("\n")
         : "",
     ),

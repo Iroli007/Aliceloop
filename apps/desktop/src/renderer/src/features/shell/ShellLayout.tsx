@@ -856,6 +856,110 @@ type TimelineBlock =
   };
 
 type AssistantTurnItem = Extract<TimelineBlock, { kind: "assistant-turn" }>["items"][number];
+type AssistantMessageTurnItem = Extract<AssistantTurnItem, { kind: "message" }>;
+type AssistantToolTurnItem = Extract<AssistantTurnItem, { kind: "tool" }>;
+type AssistantMessageSegmentItem = {
+  kind: "message-segment";
+  message: SessionMessage;
+  content: string;
+  sourceLinks: ToolSourceLink[];
+  displayMode: string | null;
+};
+type ProcessedTurnFlowItem = AssistantTurnItem | AssistantMessageSegmentItem;
+
+function buildProcessingFlowItems(
+  processingMessageItems: AssistantMessageTurnItem[],
+  toolItems: AssistantToolTurnItem[],
+  sessionEvents: SessionEvent[],
+): ProcessedTurnFlowItem[] {
+  if (processingMessageItems.length === 0 || toolItems.length === 0) {
+    return [...processingMessageItems, ...toolItems];
+  }
+
+  const messageItemsById = new Map(processingMessageItems.map((item) => [item.message.id, item] as const));
+  const toolsByCreatedSeq = new Map<number, AssistantToolTurnItem[]>();
+  const insertedToolCallIds = new Set<string>();
+
+  for (const item of toolItems) {
+    if (typeof item.tool.createdSeq !== "number") {
+      continue;
+    }
+
+    const existing = toolsByCreatedSeq.get(item.tool.createdSeq) ?? [];
+    existing.push(item);
+    toolsByCreatedSeq.set(item.tool.createdSeq, existing);
+  }
+
+  const flowItems: ProcessedTurnFlowItem[] = [];
+  let currentMessageItem: AssistantMessageTurnItem | null = null;
+  let currentContent = "";
+
+  function flushMessageSegment() {
+    if (!currentMessageItem || !currentContent.trim()) {
+      currentContent = "";
+      return;
+    }
+
+    flowItems.push({
+      kind: "message-segment",
+      message: currentMessageItem.message,
+      content: currentContent,
+      sourceLinks: currentMessageItem.sourceLinks,
+      displayMode: currentMessageItem.displayMode,
+    });
+    currentContent = "";
+  }
+
+  for (const event of sessionEvents) {
+    const toolsAtSeq = toolsByCreatedSeq.get(event.seq);
+    if (toolsAtSeq?.length) {
+      flushMessageSegment();
+      for (const toolItem of toolsAtSeq) {
+        insertedToolCallIds.add(toolItem.tool.toolCallId);
+        flowItems.push(toolItem);
+      }
+    }
+
+    if (event.type !== "message.delta") {
+      continue;
+    }
+
+    const payload = event.payload as {
+      message?: { id?: unknown };
+      delta?: unknown;
+    };
+    const messageId = typeof payload.message?.id === "string" ? payload.message.id : null;
+    const messageItem = messageId ? messageItemsById.get(messageId) : null;
+    if (!messageItem || typeof payload.delta !== "string" || !payload.delta) {
+      continue;
+    }
+
+    if (currentMessageItem && currentMessageItem.message.id !== messageItem.message.id) {
+      flushMessageSegment();
+    }
+    currentMessageItem = messageItem;
+    currentContent += payload.delta;
+  }
+
+  flushMessageSegment();
+
+  for (const item of toolItems) {
+    if (!insertedToolCallIds.has(item.tool.toolCallId)) {
+      flowItems.push(item);
+    }
+  }
+
+  const hasMessageSegment = flowItems.some((item) => item.kind === "message-segment");
+  return hasMessageSegment ? flowItems : [...processingMessageItems, ...toolItems];
+}
+
+function stripProcessingProtocolMarkup(content: string) {
+  return content
+    .replace(/<tool_calls>\s*[\s\S]*?\s*<\/tool_calls>/giu, "")
+    .replace(/<tool_call\b[^>]*>\s*[\s\S]*?\s*<\/tool_call>/giu, "")
+    .replace(/<(grep|glob|read|bash|search|web_search|fetch|web_fetch)\b[^>]*>\s*[\s\S]*?\s*<\/\1>/giu, "")
+    .trim();
+}
 
 function buildTimeline(
   messages: import("@aliceloop/runtime-core").SessionMessage[],
@@ -1218,12 +1322,14 @@ function ProcessedTurnSummary({
   planModeActive,
   completed,
   completedAt,
+  interrupted,
 }: {
-  items: AssistantTurnItem[];
+  items: ProcessedTurnFlowItem[];
   reasoning: TurnReasoningMeta | null;
   planModeActive: boolean;
   completed: boolean;
   completedAt: string | null;
+  interrupted: boolean;
 }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
@@ -1236,13 +1342,18 @@ function ProcessedTurnSummary({
   }, [completed]);
 
   const tools = items.flatMap((item) => item.kind === "tool" ? [item.tool] : []);
-  const processingMessages = items.flatMap((item) => item.kind === "message" ? [item.message] : []);
+  const processingMessages = [...new Map(items.flatMap((item) => (
+    item.kind === "message" || item.kind === "message-segment" ? [[item.message.id, item.message] as const] : []
+  )).map(([messageId, message]) => [messageId, message] as const)).values()];
   const hasError = tools.some((tool) => tool.success === false || tool.status === "output-error" || tool.status === "permission-denied");
   const durationLabel = formatProcessedDuration(getProcessedDurationMs(tools, processingMessages, completed, completedAt, nowMs));
   const label = completed
-    ? (hasError ? "已处理，含错误" : (reasoning?.label ?? "已处理"))
+    ? (interrupted ? "已中止" : (hasError ? "已处理，含错误" : (reasoning?.label ?? "已处理")))
     : "思考中";
-  const visibleItems = items.filter((item) => item.kind === "tool" || item.message.content.trim());
+  const visibleItems = items.filter((item) => (
+    item.kind === "tool"
+    || stripProcessingProtocolMarkup(item.kind === "message-segment" ? item.content : item.message.content)
+  ));
 
   return (
     <details className={`workspace__processed-turn${hasError ? " workspace__processed-turn--error" : ""}`} open={completed ? undefined : true}>
@@ -1259,10 +1370,11 @@ function ProcessedTurnSummary({
                 return <ToolWorkflowCard key={`tool-${item.tool.toolCallId}`} entry={item.tool} planModeActive={planModeActive} />;
               }
 
+              const content = stripProcessingProtocolMarkup(item.kind === "message-segment" ? item.content : item.message.content);
               return (
                 <article key={`processing-${item.message.id}-${index}`} className="workspace__message workspace__message--assistant workspace__processed-turn-message">
                   <div className="workspace__message-body">
-                    <MessageContent content={item.message.content} renderMarkdown />
+                    <MessageContent content={content} />
                   </div>
                 </article>
               );
@@ -2641,29 +2753,28 @@ export function ShellLayout({ state }: ShellLayoutProps) {
               <div ref={messagesContentRef} className="workspace__messages">
                 {timelineBlocks.map((entry) => {
                   if (entry.kind === "assistant-turn") {
-                    const toolItems = entry.items.filter((item) => item.kind === "tool");
-                    const messageItems = entry.items.filter((item) => item.kind === "message");
-                    const finalMessageItems = conversation.isResponding
+                    const toolItems = entry.items.filter((item): item is AssistantToolTurnItem => item.kind === "tool");
+                    const messageItems = entry.items.filter((item): item is AssistantMessageTurnItem => item.kind === "message");
+                    const interrupted = conversation.stoppingResponse;
+                    const finalMessageItems = conversation.isResponding && !interrupted
                       ? []
                       : messageItems.filter((item) => item.displayMode === "final");
                     const hasExplicitProcessingMessage = messageItems.some((item) => item.displayMode === "processing");
                     const finalMessageIds = new Set(finalMessageItems.map((item) => item.message.id));
                     const processingMessageItems = finalMessageItems.length > 0
                       ? messageItems.filter((item) => !finalMessageIds.has(item.message.id))
-                      : hasExplicitProcessingMessage || conversation.isResponding
-                        ? messageItems.filter((item) => item.displayMode === "processing" || conversation.isResponding)
-                        : [];
+                        : hasExplicitProcessingMessage || conversation.isResponding
+                          ? messageItems.filter((item) => item.displayMode === "processing" || (conversation.isResponding && !interrupted))
+                          : [];
                     const processingMessageIds = new Set(processingMessageItems.map((item) => item.message.id));
-                    const processingItems = entry.items.filter((item) => (
-                      item.kind === "tool"
-                      || processingMessageIds.has(item.message.id)
-                    ));
+                    const processingItems = buildProcessingFlowItems(processingMessageItems, toolItems, conversation.sessionEvents);
                     const toolsAreComplete = toolItems.length === 0
                       || toolItems.every((item) => isToolWorkflowTerminalStatus(item.tool.status));
-                    const processingCompleted = !conversation.isResponding
-                      && processingItems.length > 0
-                      && (finalMessageItems.length > 0 || !hasExplicitProcessingMessage)
-                      && toolsAreComplete;
+                    const processingCompleted = processingItems.length > 0
+                      && (
+                        interrupted
+                        || (!conversation.isResponding && (finalMessageItems.length > 0 || !hasExplicitProcessingMessage) && toolsAreComplete)
+                      );
                     const shouldShowProcessingSummary = processingItems.length > 0;
                     const renderedMessageItems = finalMessageItems.length > 0
                       ? finalMessageItems
@@ -2683,6 +2794,7 @@ export function ShellLayout({ state }: ShellLayoutProps) {
                             planModeActive={conversation.planMode.active}
                             completed={processingCompleted}
                             completedAt={processingCompletedAt}
+                            interrupted={interrupted}
                           />
                         ) : null}
                         {renderedMessageItems.length > 0 ? (

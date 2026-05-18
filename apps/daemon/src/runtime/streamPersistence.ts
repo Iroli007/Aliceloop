@@ -60,7 +60,8 @@ interface TextFallbackResult {
 }
 
 interface ToolResultSummaryResult {
-  replacementText: string;
+  replacementText?: string;
+  textStream?: AsyncIterable<string>;
 }
 
 function mergeEventPayload(...parts: Array<Record<string, unknown> | undefined>) {
@@ -187,6 +188,120 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     publishSessionEvent(updateResult.event);
   }
 
+  async function createFinalMessageFromText(
+    content: string,
+    eventPayload?: Record<string, unknown>,
+  ) {
+    if (!content.trim()) {
+      return null;
+    }
+
+    const finalEventPayload = mergeEventPayload(eventPayload, { displayMode: "final" });
+    const messageResult = createSessionMessage({
+      sessionId: input.sessionId,
+      clientMessageId: `agent-final-${randomUUID()}`,
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content,
+      attachmentIds: [],
+      eventPayload: finalEventPayload,
+    });
+
+    for (const event of messageResult.events) {
+      publishSessionEvent(event);
+    }
+
+    const completedResult = updateSessionMessage({
+      sessionId: input.sessionId,
+      messageId: messageResult.message.id,
+      content,
+      eventType: "message.completed",
+      eventPayload: finalEventPayload,
+    });
+    publishSessionEvent(completedResult.event);
+    return messageResult.message.id;
+  }
+
+  async function streamFinalMessage(
+    textStream: AsyncIterable<string>,
+    fallbackText: string,
+    eventPayload?: Record<string, unknown>,
+  ) {
+    const finalEventPayload = mergeEventPayload(eventPayload, { displayMode: "final" });
+    const messageResult = createSessionMessage({
+      sessionId: input.sessionId,
+      clientMessageId: `agent-final-${randomUUID()}`,
+      deviceId: "runtime-agent",
+      role: "assistant",
+      content: "",
+      attachmentIds: [],
+      eventPayload: finalEventPayload,
+    });
+
+    let finalMessageId = messageResult.message.id;
+    for (const event of messageResult.events) {
+      publishSessionEvent(event);
+    }
+
+    let finalText = "";
+    let finalPendingDelta = "";
+    let finalPendingFlush = false;
+
+    function flushFinalDelta() {
+      if (!finalPendingFlush) {
+        return;
+      }
+
+      finalPendingFlush = false;
+      const delta = finalPendingDelta;
+      finalPendingDelta = "";
+      const updateResult = updateSessionMessage({
+        sessionId: input.sessionId,
+        messageId: finalMessageId,
+        content: finalText,
+        eventType: "message.delta",
+        eventPayload: mergeEventPayload(finalEventPayload, { delta }),
+      });
+      publishSessionEvent(updateResult.event);
+    }
+
+    try {
+      for await (const delta of textStream) {
+        input.checkActive();
+        if (!delta) {
+          continue;
+        }
+
+        finalText += delta;
+        finalPendingDelta += delta;
+        finalPendingFlush = true;
+        flushFinalDelta();
+      }
+    } catch (error) {
+      console.warn("[agent-post-tool-summary] stream failed", error);
+    }
+
+    if (!finalText.trim() && fallbackText.trim()) {
+      finalText = fallbackText.trim();
+      finalPendingDelta = finalText;
+      finalPendingFlush = true;
+      flushFinalDelta();
+    }
+
+    const completedResult = updateSessionMessage({
+      sessionId: input.sessionId,
+      messageId: finalMessageId,
+      content: finalText,
+      eventType: "message.completed",
+      eventPayload: finalEventPayload,
+    });
+    publishSessionEvent(completedResult.event);
+    return {
+      messageId: finalMessageId,
+      text: finalText,
+    };
+  }
+
   ensureAssistantMessage("", true);
 
   for await (const delta of input.stream.textStream) {
@@ -194,6 +309,13 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     if (!delta) continue;
 
     text += delta;
+    if (input.stateMachine.getAll().length > 0) {
+      if (assistantMessageId) {
+        saveStreamCheckpoint(input.sessionId, assistantMessageId, text);
+      }
+      continue;
+    }
+
     const content = getChatContent();
     if (content === null || !content) {
       continue;
@@ -246,18 +368,6 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     ? resolvedToolCalls.length + fallbackToolCallCount
     : fallbackToolCallCount;
   const hasToolWork = resolvedToolCallCount > 0 || input.stateMachine.getAll().length > 0;
-
-  if (hasToolWork) {
-    const summary = await input.resolveToolResultSummary({
-      assistantText: streamedText,
-      resolvedToolCalls,
-      stateMachine: input.stateMachine,
-      reasoningEffort: input.reasoningEffort,
-    });
-    text = summary?.replacementText.trim() || text.trim() || `已完成 ${resolvedToolCallCount} 次工具调用。`;
-  }
-
-  const finalContent = getChatContent(true);
   const reasoning = buildProcessedReasoningPayload({
     sessionId: input.sessionId,
     providerId: input.providerId,
@@ -274,30 +384,43 @@ export async function consumeTextStream(input: ConsumeTextStreamInput): Promise<
     });
     publishSessionEvent(processingCompleted.event);
 
-    if (typeof finalContent === "string" && finalContent.trim()) {
-      const messageResult = createSessionMessage({
-        sessionId: input.sessionId,
-        clientMessageId: `agent-final-${randomUUID()}`,
-        deviceId: "runtime-agent",
-        role: "assistant",
-        content: finalContent,
-        attachmentIds: [],
-        eventPayload: assistantEventPayload,
+    if (hasToolWork) {
+      const fallbackSummaryText = text.trim() || `已完成 ${resolvedToolCallCount} 次工具调用。`;
+      const summary = await input.resolveToolResultSummary({
+        assistantText: streamedText,
+        resolvedToolCalls,
+        stateMachine: input.stateMachine,
+        reasoningEffort: input.reasoningEffort,
       });
 
-      assistantMessageId = messageResult.message.id;
-      for (const event of messageResult.events) {
-        publishSessionEvent(event);
+      if (summary?.textStream) {
+        const finalResult = await streamFinalMessage(
+          summary.textStream,
+          summary.replacementText ?? fallbackSummaryText,
+          mergeEventPayload(assistantEventPayload, reasoning ? { reasoning } : undefined),
+        );
+        assistantMessageId = finalResult.messageId;
+        text = finalResult.text;
+      } else {
+        text = summary?.replacementText?.trim() || fallbackSummaryText;
+        const finalContent = getChatContent(true);
+        const finalMessageId = typeof finalContent === "string"
+          ? await createFinalMessageFromText(
+            finalContent,
+            mergeEventPayload(assistantEventPayload, reasoning ? { reasoning } : undefined),
+          )
+          : null;
+        assistantMessageId = finalMessageId ?? assistantMessageId;
       }
-
-      const completedResult = updateSessionMessage({
-        sessionId: input.sessionId,
-        messageId: assistantMessageId,
-        content: finalContent,
-        eventType: "message.completed",
-        eventPayload: mergeEventPayload(assistantEventPayload, { displayMode: "final" }, reasoning ? { reasoning } : undefined),
-      });
-      publishSessionEvent(completedResult.event);
+    } else {
+      const finalContent = getChatContent(true);
+      const finalMessageId = typeof finalContent === "string"
+        ? await createFinalMessageFromText(
+          finalContent,
+          mergeEventPayload(assistantEventPayload, reasoning ? { reasoning } : undefined),
+        )
+        : null;
+      assistantMessageId = finalMessageId ?? assistantMessageId;
     }
 
     await syncSessionProjectHistory(input.sessionId);

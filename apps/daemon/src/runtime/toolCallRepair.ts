@@ -1,5 +1,5 @@
 export interface RepairedToolCall {
-  source: "minimax_text_tool_call" | "tool_call_json" | "named_tool_call_tag" | "inline_tool_json" | "wrapped_command_tag";
+  source: "minimax_text_tool_call" | "tool_call_json" | "standalone_tool_json" | "named_tool_call_tag" | "inline_tool_json" | "wrapped_command_tag" | "fenced_command_block" | "wrapped_query_tag" | "wrapped_tool_tag";
   rawToolName: string;
   toolName: string;
   input: Record<string, unknown>;
@@ -265,6 +265,47 @@ function decodeHtmlEntities(value: string) {
     .replace(/&amp;/gu, "&");
 }
 
+function pickJsonToolName(parsed: Record<string, unknown>) {
+  if (typeof parsed.name === "string") {
+    return parsed.name;
+  }
+
+  if (typeof parsed.toolName === "string") {
+    return parsed.toolName;
+  }
+
+  if (typeof parsed.tool === "string") {
+    return parsed.tool;
+  }
+
+  return "";
+}
+
+function buildJsonToolCall(
+  parsed: Record<string, unknown>,
+  markup: string,
+  source: RepairedToolCall["source"],
+): RepairedToolCall | null {
+  const rawToolName = pickJsonToolName(parsed);
+  const toolName = normalizeToolName(rawToolName);
+  if (!toolName) {
+    return null;
+  }
+
+  const input = buildNormalizedInput(toolName, getJsonToolInput(parsed, true));
+  if (!input) {
+    return null;
+  }
+
+  return {
+    source,
+    rawToolName,
+    toolName,
+    input,
+    markup,
+  };
+}
+
 function parseJsonToolCall(text: string): RepairedToolCall | null {
   const match = text.match(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/u);
   if (!match) {
@@ -278,45 +319,19 @@ function parseJsonToolCall(text: string): RepairedToolCall | null {
   }
 
   try {
-    const parsed = JSON.parse(decoded) as {
-      name?: unknown;
-      toolName?: unknown;
-      tool?: unknown;
-      parameters?: unknown;
-      input?: unknown;
-      args?: unknown;
-    };
-    const rawToolName = typeof parsed.name === "string"
-      ? parsed.name
-      : typeof parsed.toolName === "string"
-        ? parsed.toolName
-        : typeof parsed.tool === "string"
-          ? parsed.tool
-          : "";
-    const toolName = normalizeToolName(rawToolName);
-    if (!toolName) {
+    const parsed = JSON.parse(decoded) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return null;
     }
 
-    const inputCandidate = parsed.parameters ?? parsed.input ?? parsed.args;
-    const input = inputCandidate && typeof inputCandidate === "object"
-      ? inputCandidate as Record<string, unknown>
-      : {};
-
-    return {
-      source: "tool_call_json",
-      rawToolName,
-      toolName,
-      input,
-      markup,
-    };
+    return buildJsonToolCall(parsed as Record<string, unknown>, markup, "tool_call_json");
   } catch {
     return null;
   }
 }
 
 function getJsonToolInput(parsed: Record<string, unknown>, hasExternalToolName: boolean) {
-  const inputCandidate = parsed.parameters ?? parsed.input ?? parsed.args;
+  const inputCandidate = parsed.arguments ?? parsed.parameters ?? parsed.input ?? parsed.args;
   if (inputCandidate && typeof inputCandidate === "object" && !Array.isArray(inputCandidate)) {
     return inputCandidate as Record<string, unknown>;
   }
@@ -328,16 +343,66 @@ function getJsonToolInput(parsed: Record<string, unknown>, hasExternalToolName: 
   return {};
 }
 
-function parseNamedToolCallTag(text: string): RepairedToolCall | null {
-  const match = text.match(/<tool_call\b([^>]*)>\s*([\s\S]*?)\s*<\/tool_call>/u);
-  if (!match) {
+function getPlainTextToolInput(toolName: string, text: string, attributes: Record<string, unknown>) {
+  if (!text) {
+    return attributes;
+  }
+
+  if (toolName === "web_search") {
+    return { ...attributes, query: pickStringAttribute(attributes, "query") ?? text };
+  }
+
+  if (toolName === "web_fetch") {
+    return { ...attributes, url: pickStringAttribute(attributes, "url") ?? text };
+  }
+
+  if (toolName === "bash") {
+    return { ...attributes, script: pickStringAttribute(attributes, "script", "command") ?? text };
+  }
+
+  return attributes;
+}
+
+function parseStandaloneToolJsonCall(text: string): RepairedToolCall | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
     return null;
   }
 
-  const markup = match[0];
-  const attributes = parseXmlAttributes(match[1] ?? "");
+  const fencedMatch = trimmed.match(/^```(?:json|tool|tool_call)?\s*([\s\S]*?)\s*```$/iu);
+  const rawJson = fencedMatch ? fencedMatch[1]?.trim() : (() => {
+    if (!trimmed.startsWith("{")) {
+      return null;
+    }
+
+    const extracted = extractBalancedJsonObject(trimmed, 0);
+    if (!extracted || extracted.endIndex !== trimmed.length) {
+      return null;
+    }
+
+    return extracted.json;
+  })();
+
+  if (!rawJson) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(decodeHtmlEntities(rawJson)) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    return buildJsonToolCall(parsed as Record<string, unknown>, trimmed, "standalone_tool_json");
+  } catch {
+    return null;
+  }
+}
+
+function parseNamedToolCallTagMatch(markup: string, rawAttributes: string, body: string): RepairedToolCall | null {
+  const attributes = parseXmlAttributes(rawAttributes);
   const attributeToolName = pickStringAttribute(attributes, "name", "tool", "toolName");
-  const decoded = decodeHtmlEntities(match[2] ?? "").trim();
+  const decoded = decodeHtmlEntities(body).trim();
   if (!attributeToolName && !decoded) {
     return null;
   }
@@ -389,7 +454,7 @@ function parseNamedToolCallTag(text: string): RepairedToolCall | null {
       return null;
     }
 
-    const input = buildNormalizedInput(toolName, attributeInput);
+    const input = buildNormalizedInput(toolName, getPlainTextToolInput(toolName, decoded, attributeInput));
     if (!input) {
       return null;
     }
@@ -402,6 +467,20 @@ function parseNamedToolCallTag(text: string): RepairedToolCall | null {
       markup,
     };
   }
+}
+
+function parseNamedToolCallTags(text: string): RepairedToolCall[] {
+  const calls: RepairedToolCall[] = [];
+  const tagPattern = /<tool_call\b([^>]*)>\s*([\s\S]*?)\s*<\/tool_call>/giu;
+
+  for (const match of text.matchAll(tagPattern)) {
+    const call = parseNamedToolCallTagMatch(match[0], match[1] ?? "", match[2] ?? "");
+    if (call) {
+      calls.push(call);
+    }
+  }
+
+  return calls;
 }
 
 function extractBalancedJsonObject(text: string, startIndex: number) {
@@ -516,10 +595,134 @@ function parseWrappedCommandTag(text: string): RepairedToolCall | null {
   };
 }
 
-export function repairTextToolCall(text: string): RepairedToolCall | null {
-  return parseJsonToolCall(text)
-    ?? parseNamedToolCallTag(text)
+function parseFencedCommandBlock(text: string): RepairedToolCall | null {
+  const match = text.trim().match(/^```(?:bash|sh|shell|zsh)\s*\n([\s\S]*?)\n?```$/iu);
+  if (!match) {
+    return null;
+  }
+
+  const script = (match[1] ?? "").trim();
+  if (!script) {
+    return null;
+  }
+
+  return {
+    source: "fenced_command_block",
+    rawToolName: "bash",
+    toolName: "bash",
+    input: { script },
+    markup: match[0],
+  };
+}
+
+function parseWrappedQueryTags(text: string): RepairedToolCall[] {
+  const calls: RepairedToolCall[] = [];
+  const tagPattern = /<(search|web_search|fetch|web_fetch)\b([^>]*)>\s*([\s\S]*?)\s*<\/\1>/giu;
+
+  for (const match of text.matchAll(tagPattern)) {
+    const rawToolName = match[1] ?? "";
+    const toolName = normalizeToolName(rawToolName);
+    const body = decodeHtmlEntities(match[3] ?? "").trim();
+    const bodyTagName = toolName === "web_fetch" ? "url" : "query";
+    const nestedBodyMatch = body.match(new RegExp(`<${bodyTagName}\\b[^>]*>\\s*([\\s\\S]*?)\\s*<\\/${bodyTagName}>`, "iu"));
+    const bodyValue = (nestedBodyMatch?.[1] ?? body).trim();
+    const attributes = parseXmlAttributes(match[2] ?? "");
+    const bodyKey = toolName === "web_fetch" ? "url" : "query";
+    const input = buildNormalizedInput(toolName, {
+      ...attributes,
+      [bodyKey]: pickStringAttribute(attributes, bodyKey) ?? bodyValue,
+    });
+    if (!input) {
+      continue;
+    }
+
+    calls.push({
+      source: "wrapped_query_tag",
+      rawToolName,
+      toolName,
+      input,
+      markup: match[0] ?? "",
+    });
+  }
+
+  return calls;
+}
+
+function parseXmlChildTags(body: string) {
+  const attributes: Record<string, unknown> = {};
+  const childPattern = /<([a-zA-Z_][\w-]*)\b[^>]*>\s*([\s\S]*?)\s*<\/\1>/gu;
+
+  for (const match of body.matchAll(childPattern)) {
+    const rawKey = match[1];
+    if (!rawKey) {
+      continue;
+    }
+
+    attributes[rawKey] = decodeHtmlEntities(match[2] ?? "").trim();
+  }
+
+  return attributes;
+}
+
+function parseWrappedToolTags(text: string): RepairedToolCall[] {
+  const calls: RepairedToolCall[] = [];
+  const tagPattern = /<(grep|glob|read|bash|search|web_search|fetch|web_fetch)\b([^>]*)>\s*([\s\S]*?)\s*<\/\1>/giu;
+
+  for (const match of text.matchAll(tagPattern)) {
+    const rawToolName = match[1] ?? "";
+    const toolName = normalizeToolName(rawToolName);
+    const attributes = {
+      ...parseXmlAttributes(match[2] ?? ""),
+      ...parseXmlChildTags(match[3] ?? ""),
+    };
+    const body = decodeHtmlEntities(match[3] ?? "").trim();
+    const input = buildNormalizedInput(toolName, getPlainTextToolInput(toolName, body, attributes));
+    if (!input) {
+      continue;
+    }
+
+    calls.push({
+      source: "wrapped_tool_tag",
+      rawToolName,
+      toolName,
+      input,
+      markup: match[0] ?? "",
+    });
+  }
+
+  return calls;
+}
+
+export function repairTextToolCalls(text: string): RepairedToolCall[] {
+  const wrappedToolCalls = parseWrappedToolTags(text);
+  if (wrappedToolCalls.length > 0) {
+    return wrappedToolCalls;
+  }
+
+  const wrappedQueryCalls = parseWrappedQueryTags(text);
+  if (wrappedQueryCalls.length > 0) {
+    return wrappedQueryCalls;
+  }
+
+  const jsonToolCall = parseJsonToolCall(text);
+  if (jsonToolCall) {
+    return [jsonToolCall];
+  }
+
+  const namedToolCallTags = parseNamedToolCallTags(text);
+  if (namedToolCallTags.length > 0) {
+    return namedToolCallTags;
+  }
+
+  const singleCall = parseStandaloneToolJsonCall(text)
     ?? parseInlineToolJsonCall(text)
     ?? parseWrappedCommandTag(text)
+    ?? parseFencedCommandBlock(text)
     ?? parseMiniMaxTextToolCall(text);
+
+  return singleCall ? [singleCall] : [];
+}
+
+export function repairTextToolCall(text: string): RepairedToolCall | null {
+  return repairTextToolCalls(text)[0] ?? null;
 }

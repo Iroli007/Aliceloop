@@ -1,5 +1,5 @@
 import { buildTurnIntentDecision } from "../context/skills/skillRouting";
-import { repairTextToolCall } from "./toolCallRepair";
+import { repairTextToolCalls } from "./toolCallRepair";
 
 export interface CapabilityRecoveryRequest {
   additionalStickySkillIds: string[];
@@ -27,6 +27,9 @@ function isRecoverableToolName(toolName: string) {
   return toolName === "tool_search"
     || toolName === "agent"
     || toolName === "bash"
+    || toolName === "grep"
+    || toolName === "glob"
+    || toolName === "read"
     || toolName === "web_search"
     || toolName === "web_fetch"
     || toolName.startsWith("browser_")
@@ -52,6 +55,10 @@ function inferStickySkillsForToolName(toolName: string) {
 
   if (toolName.startsWith("browser_") || toolName.startsWith("chrome_relay_")) {
     return ["browser"];
+  }
+
+  if (toolName === "grep" || toolName === "glob" || toolName === "read") {
+    return ["file-manager"];
   }
 
   return [];
@@ -130,7 +137,7 @@ function inferIntentDrivenRecoveryRequest(
 }
 
 export function looksLikeCapabilitySeekingReply(text: string) {
-  return /我需要先(?:查看|查询|看看|搜索)|让我先(?:查看|查询|看看|搜索)|可用的 skill|需要通过 skill 路由|不是直接挂载的基座工具|工具集|没加载|未挂载|unavailable|not available/u.test(text);
+  return /我需要先(?:查看|查询|看看|搜索)|让我先(?:查看|查询|看看|搜索)|可用的 skill|需要通过 skill 路由|不是直接挂载的基座工具|工具集|没加载|没挂载|未挂载|没有挂载|没有把.*工具.*加入工具集|unavailable|not available/u.test(text);
 }
 
 export function buildCapabilityFailureReply(
@@ -169,15 +176,13 @@ export function inferCapabilityRecoveryRequest(
   }
 
   const attached = new Set(attachedToolNames);
-  const repairedToolCall = repairTextToolCall(assistantText);
-  if (
-    repairedToolCall
-    && isRecoverableToolName(repairedToolCall.toolName)
-    && !attached.has(repairedToolCall.toolName)
-  ) {
-    return buildCapabilityRecoveryRequest(`missing_tool:${repairedToolCall.toolName}`, {
-      skillIds: inferStickySkillsForToolName(repairedToolCall.toolName),
-      toolNames: [repairedToolCall.toolName],
+  const missingRepairedToolNames = [...new Set(repairTextToolCalls(assistantText)
+    .map((toolCall) => toolCall.toolName)
+    .filter((toolName) => isRecoverableToolName(toolName) && !attached.has(toolName)))];
+  if (missingRepairedToolNames.length > 0) {
+    return buildCapabilityRecoveryRequest(`missing_tool:${missingRepairedToolNames.join(",")}`, {
+      skillIds: missingRepairedToolNames.flatMap((toolName) => inferStickySkillsForToolName(toolName)),
+      toolNames: missingRepairedToolNames,
     });
   }
 
@@ -186,7 +191,7 @@ export function inferCapabilityRecoveryRequest(
     referencedToolName
     && isRecoverableToolName(referencedToolName)
     && !attached.has(referencedToolName)
-    && /未挂载|没加载|不可用|unavailable|not available|skill 路由|通过 skill/u.test(assistantText)
+    && /未挂载|没挂载|没有挂载|没有把.*工具.*加入工具集|没加载|不可用|unavailable|not available|skill 路由|通过 skill/u.test(assistantText)
   ) {
     return buildCapabilityRecoveryRequest(`referenced_missing_tool:${referencedToolName}`, {
       skillIds: inferStickySkillsForToolName(referencedToolName),

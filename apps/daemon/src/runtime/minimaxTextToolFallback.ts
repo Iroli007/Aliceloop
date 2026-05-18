@@ -9,7 +9,7 @@ import {
   recordToolCallStarted,
 } from "../repositories/sessionOpenTaskRepository";
 import { buildAgentProviderOptions } from "./providerRuntimeAdapter";
-import { repairTextToolCall } from "./toolCallRepair";
+import { repairTextToolCalls, type RepairedToolCall } from "./toolCallRepair";
 import type { ToolStateMachine } from "./toolStateMachine";
 import { nowMs, roundMs } from "./perfTrace";
 
@@ -52,27 +52,37 @@ interface ExecuteMiniMaxTextToolCallFallbackInput {
 }
 
 function buildMiniMaxToolFallbackPrompt(
-  toolName: string,
-  input: Record<string, unknown>,
-  output: unknown,
+  toolResults: Array<{
+    toolName: string;
+    input: Record<string, unknown>;
+    output: unknown;
+  }>,
   summarizeUnknown: ExecuteMiniMaxTextToolCallFallbackInput["summarizeUnknown"],
 ) {
   return [
-    `You previously attempted to call the tool "${toolName}" with input: ${summarizeUnknown(input, 400) ?? "{}"}`,
-    `The tool returned: ${summarizeUnknown(output, 4000) ?? ""}`,
+    "You previously attempted text-form tool calls. They have now been executed.",
+    ...toolResults.map((result, index) => [
+      `Tool ${index + 1}: ${result.toolName}`,
+      `Input: ${summarizeUnknown(result.input, 400) ?? "{}"}`,
+      `Output: ${summarizeUnknown(result.output, 4000) ?? ""}`,
+    ].join("\n")),
     "Answer the user's original request directly in normal prose.",
     "Do not emit XML, <tool> tags, or tool_call markup.",
   ].join("\n\n");
 }
 
 export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTextToolCallFallbackInput) {
-  const parsed = repairTextToolCall(input.assistantText);
-  if (!parsed) {
+  const parsedCalls = repairTextToolCalls(input.assistantText);
+  if (parsedCalls.length === 0) {
     return null;
   }
 
-  const tool = input.context.tools[parsed.toolName] as { execute?: (toolInput: unknown) => Promise<unknown> } | undefined;
-  if (!tool || typeof tool.execute !== "function") {
+  for (const parsed of parsedCalls) {
+    const tool = input.context.tools[parsed.toolName] as { execute?: (toolInput: unknown) => Promise<unknown> } | undefined;
+    if (tool && typeof tool.execute === "function") {
+      continue;
+    }
+
     const availableTools = Object.keys(input.context.tools);
     const availablePreview = availableTools.slice(0, 12).join(", ");
     return {
@@ -87,131 +97,143 @@ export async function executeMiniMaxTextToolCallFallback(input: ExecuteMiniMaxTe
     };
   }
 
-  const toolCallId = `minimax-fallback-${randomUUID()}`;
-  recordToolCallStarted(input.sessionId, parsed.toolName, toolCallId, parsed.input);
-  input.stateMachine.start(toolCallId, parsed.toolName, parsed.input);
-  input.stateMachine.markInputAvailable(toolCallId);
+  const toolResults: Array<{
+    parsed: RepairedToolCall;
+    output: unknown;
+  }> = [];
 
-  const predictedRuntime = input.predictToolBackend(input.sessionId, parsed.toolName);
-  input.publishRuntimeEvent(input.sessionId, "tool.call.started", {
-    toolCallId,
-    toolName: parsed.toolName,
-    inputPreview: input.summarizeUnknown(parsed.input),
-    backend: predictedRuntime.backend,
-    tabId: predictedRuntime.tabId,
-    state: "input-available",
-    fallbackSource: parsed.source,
-  });
+  for (const parsed of parsedCalls) {
+    const tool = input.context.tools[parsed.toolName] as unknown as { execute: (toolInput: unknown) => Promise<unknown> };
+    const toolCallId = `minimax-fallback-${randomUUID()}`;
+    recordToolCallStarted(input.sessionId, parsed.toolName, toolCallId, parsed.input);
+    input.stateMachine.start(toolCallId, parsed.toolName, parsed.input);
+    input.stateMachine.markInputAvailable(toolCallId);
 
-  const toolStartedAt = nowMs();
-
-  try {
-    const output = await tool.execute(parsed.input);
-    input.stateMachine.markOutputAvailable(toolCallId, output);
-    input.stateMachine.complete(toolCallId);
-    recordToolCallCompleted({
-      sessionId: input.sessionId,
-      toolName: parsed.toolName,
-      toolCallId,
-      success: true,
-      output,
-    });
-
-    const browserPayload = input.extractBrowserToolPayload(output);
-    input.publishRuntimeEvent(input.sessionId, "tool.call.completed", {
+    const predictedRuntime = input.predictToolBackend(input.sessionId, parsed.toolName);
+    input.publishRuntimeEvent(input.sessionId, "tool.call.started", {
       toolCallId,
       toolName: parsed.toolName,
-      success: true,
-      resultPreview: input.summarizeUnknown(output),
-      durationMs: roundMs(nowMs() - toolStartedAt),
-      backend: browserPayload.backend ?? predictedRuntime.backend,
-      tabId: browserPayload.tabId ?? predictedRuntime.tabId,
-      state: "output-available",
-      fallbackSource: parsed.source,
-    });
-
-    void input.maybePublishToolImageAttachment(
-      input.sessionId,
-      parsed.toolName,
-      output,
-      parsed.input,
-    ).catch(() => {});
-
-    let finalText = "";
-
-    try {
-      const followup = await generateText({
-        model: createProviderModel(input.provider, {
-          sessionId: input.sessionId,
-          reasoningEffort: input.reasoningEffort,
-        }),
-        system: input.context.systemPrompt,
-        messages: [
-          ...input.context.messages,
-          {
-            role: "assistant",
-            content: input.assistantText,
-          },
-          {
-            role: "user",
-            content: buildMiniMaxToolFallbackPrompt(
-              parsed.toolName,
-              parsed.input,
-              output,
-              input.summarizeUnknown,
-            ),
-          },
-        ],
-        providerOptions: buildAgentProviderOptions(input.provider, input.reasoningEffort),
-        abortSignal: input.abortSignal,
-      });
-      finalText = followup.text.trim();
-    } catch {
-      finalText = "";
-    }
-
-    if (!finalText) {
-      finalText = [
-        `已接住文本形式的工具调用并执行了 \`${parsed.toolName}\`。`,
-        input.summarizeUnknown(output, 4000) ?? "",
-      ].filter(Boolean).join("\n\n");
-    }
-
-    return {
-      replacementText: finalText,
-      toolCallCount: 1,
-      parsedMarkup: parsed.markup,
-    };
-  } catch (error) {
-    input.stateMachine.markError(toolCallId, error);
-    input.stateMachine.complete(toolCallId);
-    recordToolCallCompleted({
-      sessionId: input.sessionId,
-      toolName: parsed.toolName,
-      toolCallId,
-      success: false,
-      error,
-    });
-
-    input.publishRuntimeEvent(input.sessionId, "tool.call.completed", {
-      toolCallId,
-      toolName: parsed.toolName,
-      success: false,
-      resultPreview: input.summarizeUnknown(error),
-      durationMs: roundMs(nowMs() - toolStartedAt),
+      inputPreview: input.summarizeUnknown(parsed.input),
       backend: predictedRuntime.backend,
       tabId: predictedRuntime.tabId,
-      state: "output-error",
+      state: "input-available",
       fallbackSource: parsed.source,
     });
 
-    return {
-      replacementText: [
-        `模型返回了文本形式的工具调用：${parsed.markup}`,
-        `我尝试按 AI-native fallback 执行 \`${parsed.toolName}\`，但失败了：${error instanceof Error ? error.message : String(error)}`,
-      ].join("\n\n"),
-      toolCallCount: 1,
-      parsedMarkup: parsed.markup,
-    };
+    const toolStartedAt = nowMs();
+
+    try {
+      const output = await tool.execute(parsed.input);
+      input.stateMachine.markOutputAvailable(toolCallId, output);
+      input.stateMachine.complete(toolCallId);
+      recordToolCallCompleted({
+        sessionId: input.sessionId,
+        toolName: parsed.toolName,
+        toolCallId,
+        success: true,
+        output,
+      });
+
+      const browserPayload = input.extractBrowserToolPayload(output);
+      input.publishRuntimeEvent(input.sessionId, "tool.call.completed", {
+        toolCallId,
+        toolName: parsed.toolName,
+        success: true,
+        resultPreview: input.summarizeUnknown(output),
+        durationMs: roundMs(nowMs() - toolStartedAt),
+        backend: browserPayload.backend ?? predictedRuntime.backend,
+        tabId: browserPayload.tabId ?? predictedRuntime.tabId,
+        state: "output-available",
+        fallbackSource: parsed.source,
+      });
+
+      void input.maybePublishToolImageAttachment(
+        input.sessionId,
+        parsed.toolName,
+        output,
+        parsed.input,
+      ).catch(() => {});
+
+      toolResults.push({ parsed, output });
+    } catch (error) {
+      input.stateMachine.markError(toolCallId, error);
+      input.stateMachine.complete(toolCallId);
+      recordToolCallCompleted({
+        sessionId: input.sessionId,
+        toolName: parsed.toolName,
+        toolCallId,
+        success: false,
+        error,
+      });
+
+      input.publishRuntimeEvent(input.sessionId, "tool.call.completed", {
+        toolCallId,
+        toolName: parsed.toolName,
+        success: false,
+        resultPreview: input.summarizeUnknown(error),
+        durationMs: roundMs(nowMs() - toolStartedAt),
+        backend: predictedRuntime.backend,
+        tabId: predictedRuntime.tabId,
+        state: "output-error",
+        fallbackSource: parsed.source,
+      });
+
+      return {
+        replacementText: [
+          `模型返回了文本形式的工具调用：${parsed.markup}`,
+          `我尝试按 AI-native fallback 执行 \`${parsed.toolName}\`，但失败了：${error instanceof Error ? error.message : String(error)}`,
+        ].join("\n\n"),
+        toolCallCount: toolResults.length + 1,
+        parsedMarkup: parsed.markup,
+      };
+    }
   }
+
+  let finalText = "";
+
+  try {
+    const followup = await generateText({
+      model: createProviderModel(input.provider, {
+        sessionId: input.sessionId,
+        reasoningEffort: input.reasoningEffort,
+      }),
+      system: input.context.systemPrompt,
+      messages: [
+        ...input.context.messages,
+        {
+          role: "assistant",
+          content: input.assistantText,
+        },
+        {
+          role: "user",
+          content: buildMiniMaxToolFallbackPrompt(
+            toolResults.map((result) => ({
+              toolName: result.parsed.toolName,
+              input: result.parsed.input,
+              output: result.output,
+            })),
+            input.summarizeUnknown,
+          ),
+        },
+      ],
+      providerOptions: buildAgentProviderOptions(input.provider, input.reasoningEffort),
+      abortSignal: input.abortSignal,
+    });
+    finalText = followup.text.trim();
+  } catch {
+    finalText = "";
+  }
+
+  if (!finalText) {
+    finalText = [
+      `已接住文本形式的工具调用并执行了 ${toolResults.length} 次。`,
+      ...toolResults.map((result) => input.summarizeUnknown(result.output, 4000)).filter(Boolean),
+    ].join("\n\n");
+  }
+
+  return {
+    replacementText: finalText,
+    toolCallCount: toolResults.length,
+    parsedMarkup: parsedCalls.map((parsed) => parsed.markup).join("\n\n"),
+  };
 }

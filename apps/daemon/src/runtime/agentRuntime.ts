@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { statSync } from "node:fs";
-import { generateText, stepCountIs, streamText } from "ai";
+import { stepCountIs, streamText } from "ai";
 import { resolveModelContextBudget, type SessionContextUsageState } from "@aliceloop/runtime-core";
 import { type AgentContext, loadContext } from "../context/index";
 import { getLatestUserMessage } from "../context/session/sessionContext";
@@ -716,10 +716,11 @@ function buildToolResultSummaryPrompt(
   });
 
   return [
-    "你刚刚已经完成一段工作流。请把工作过程和工具结果压缩成最终回复，直接回答用户最初的请求。",
-    "要求：简洁、易懂、关键事实不漏。保留结论、重要数据、文件/命令结果、失败点和下一步；不要复述思考过程。",
-    "不要照抄工作过程；工作过程只用于理解你做了什么，最终回复必须面向用户重新组织。",
-    "不要输出新的工具调用、JSON、XML 或命令文本。不要只说工具已经完成。",
+    "本轮上方的思考、工具调用和草稿内容会在 UI 中折叠为“已处理”。",
+    "请基于折叠区里的有用信息和工具结果，重新写一份独立完整的最终回复，直接回答用户最初的请求。",
+    "最终回复必须保留关键结论、重要数据、来源线索、失败点和必要下一步；不能遗漏折叠区中对用户有价值的信息。",
+    "不要照抄 work_transcript；如果里面已经有草稿答案，请重新组织、去重、压缩，让正文像交付版而不是过程记录。",
+    "不要输出新的工具调用、JSON、XML 或命令文本。不要解释 UI 折叠机制。",
     assistantText.trim() ? ["", "<work_transcript>", assistantText.trim(), "</work_transcript>"].join("\n") : "",
     "",
     "<tool_results>",
@@ -727,6 +728,13 @@ function buildToolResultSummaryPrompt(
     "</tool_results>",
   ].join("\n");
 }
+
+const TOOL_RESULT_SUMMARY_SYSTEM_PROMPT = [
+  "你是 Aliceloop 的最终回复收尾器。",
+  "你只负责把本轮已经完成的思考过程、工具调用结果和草稿整理成给用户看的最终答案。",
+  "过程区会被折叠，所以最终答案必须独立完整；但不要复述过程本身。",
+  "输出应当清爽、准确、信息不漏，避免与草稿逐句重复。",
+].join("\n");
 
 async function synthesizeToolResultReply(input: {
   run: AgentRun;
@@ -740,13 +748,13 @@ async function synthesizeToolResultReply(input: {
   }
 
   try {
-    const response = await generateText({
+    const response = streamText({
       model: createProviderModel(input.run.provider, {
         sessionId: input.run.sessionId,
         enablePromptCacheEditing: true,
         reasoningEffort: input.reasoningEffort,
       }),
-      system: input.run.context.systemPrompt,
+      system: TOOL_RESULT_SUMMARY_SYSTEM_PROMPT,
       messages: [
         ...input.run.context.messages,
         {
@@ -757,8 +765,7 @@ async function synthesizeToolResultReply(input: {
       providerOptions: buildAgentProviderOptions(input.run.provider, input.reasoningEffort),
       abortSignal: input.run.abortController.signal,
     });
-    const text = response.text.trim();
-    return text ? { replacementText: text } : null;
+    return { textStream: response.textStream };
   } catch (error) {
     console.warn("[agent-post-tool-summary] failed", error);
     return null;
